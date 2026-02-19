@@ -505,6 +505,10 @@ version = "0.1.0"
 dependencies = [
  "object_store",
  "rax-core",
+ "rax-orchestrator",
+ "rax-rag",
+ "rax-text-search",
+ "rax-vector-search",
  "tokio",
 ]
 
@@ -538,6 +542,10 @@ dependencies = [
 [[package]]
 name = "rax-rag"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "rax-text-search"

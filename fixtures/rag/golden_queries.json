@@ -1,0 +1,39 @@
+[
+  {
+    "name": "constraint_boost_prioritizes_structured",
+    "query": "city:seoul",
+    "expected_mode": "constraint",
+    "candidates": [
+      { "id": 1, "structured_score": 0.1, "semantic_score": 0.9, "temporal_score": 0.0 },
+      { "id": 2, "structured_score": 0.6, "semantic_score": 0.1, "temporal_score": 0.0 }
+    ],
+    "expected_order": [2, 1]
+  },
+  {
+    "name": "semantic_query_uses_plain_weights",
+    "query": "what happened yesterday",
+    "expected_mode": "semantic",
+    "candidates": [
+      { "id": 10, "structured_score": 0.2, "semantic_score": 0.7, "temporal_score": 0.3 },
+      { "id": 11, "structured_score": 0.5, "semantic_score": 0.4, "temporal_score": 0.0 }
+    ],
+    "expected_order": [10, 11]
+  },
+  {
+    "name": "score_tie_breaks_by_id",
+    "query": "topic search",
+    "expected_mode": "semantic",
+    "candidates": [
+      { "id": 5, "structured_score": 0.1, "semantic_score": 0.9, "temporal_score": 0.0 },
+      { "id": 3, "structured_score": 0.3, "semantic_score": 0.7, "temporal_score": 0.0 }
+    ],
+    "expected_order": [3, 5]
+  },
+  {
+    "name": "empty_candidates_returns_empty_hits",
+    "query": "no data",
+    "expected_mode": "semantic",
+    "candidates": [],
+    "expected_order": []
+  }
+]
