@@ -1,6 +1,7 @@
 pub mod codec;
 pub mod format;
 pub mod frame;
+pub mod io;
 pub mod store;
 pub mod wal;
 
