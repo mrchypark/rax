@@ -503,7 +503,9 @@ dependencies = [
 name = "rax-compat-tests"
 version = "0.1.0"
 dependencies = [
+ "object_store",
  "rax-core",
+ "tokio",
 ]
 
 [[package]]

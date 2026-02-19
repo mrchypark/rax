@@ -17,3 +17,7 @@ pub fn verify_chain(manifests: &[BackupManifest]) -> bool {
     }
     true
 }
+
+pub fn interrupted_chain_detected(manifests: &[BackupManifest]) -> bool {
+    !verify_chain(manifests)
+}
