@@ -36,6 +36,12 @@ impl WALRing {
         seq
     }
 
+    pub fn compact(&mut self, committed_sequence: u64) -> usize {
+        let before = self.records.len();
+        self.records.retain(|r| r.sequence > committed_sequence);
+        before - self.records.len()
+    }
+
     pub fn records(&self) -> &[WALRecord] {
         &self.records
     }
