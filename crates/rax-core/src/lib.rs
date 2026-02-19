@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod codec;
 pub mod format;
 pub mod frame;
