@@ -8,7 +8,11 @@ pub struct ContextChunk {
 }
 
 pub fn build_context(mut chunks: Vec<ContextChunk>, token_budget: usize) -> Vec<ContextChunk> {
-    chunks.sort_by(|a, b| b.importance.cmp(&a.importance).then_with(|| a.id.cmp(&b.id)));
+    chunks.sort_by(|a, b| {
+        b.importance
+            .cmp(&a.importance)
+            .then_with(|| a.id.cmp(&b.id))
+    });
 
     let mut used = 0usize;
     let mut out = Vec::new();

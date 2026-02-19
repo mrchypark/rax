@@ -22,13 +22,8 @@ impl StructuredMemory {
 
     pub fn upsert(&mut self, id: impl Into<String>, attrs: HashMap<String, String>) {
         let id = canonicalize(&id.into());
-        self.entities.insert(
-            id.clone(),
-            StructuredEntity {
-                id,
-                attrs,
-            },
-        );
+        self.entities
+            .insert(id.clone(), StructuredEntity { id, attrs });
     }
 
     pub fn get(&self, id: &str) -> Option<&StructuredEntity> {

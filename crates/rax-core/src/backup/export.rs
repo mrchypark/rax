@@ -20,7 +20,11 @@ impl BackupExporter {
         }
     }
 
-    pub async fn export_manifest(&self, key: &str, manifest: &BackupManifest) -> Result<(), Box<dyn Error>> {
+    pub async fn export_manifest(
+        &self,
+        key: &str,
+        manifest: &BackupManifest,
+    ) -> Result<(), Box<dyn Error>> {
         let path = self.prefix.child(key);
         let body = serde_json::to_vec(manifest)?;
         self.store.put(&path, Bytes::from(body)).await?;

@@ -5,7 +5,9 @@ pub struct WaxSession {
 
 impl WaxSession {
     pub fn new() -> Self {
-        Self { memories: Vec::new() }
+        Self {
+            memories: Vec::new(),
+        }
     }
 
     pub fn remember(&mut self, text: impl Into<String>) {

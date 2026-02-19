@@ -27,13 +27,25 @@ impl MV2SFooter {
             return Err(FormatError::InvalidMagic);
         }
         let expected = checksum(&bytes[..20]);
-        let actual = u32::from_le_bytes(bytes[20..24].try_into().map_err(|_| FormatError::InvalidLength)?);
+        let actual = u32::from_le_bytes(
+            bytes[20..24]
+                .try_into()
+                .map_err(|_| FormatError::InvalidLength)?,
+        );
         if expected != actual {
             return Err(FormatError::ChecksumMismatch);
         }
         Ok(Self {
-            generation: u64::from_le_bytes(bytes[4..12].try_into().map_err(|_| FormatError::InvalidLength)?),
-            toc_offset: u64::from_le_bytes(bytes[12..20].try_into().map_err(|_| FormatError::InvalidLength)?),
+            generation: u64::from_le_bytes(
+                bytes[4..12]
+                    .try_into()
+                    .map_err(|_| FormatError::InvalidLength)?,
+            ),
+            toc_offset: u64::from_le_bytes(
+                bytes[12..20]
+                    .try_into()
+                    .map_err(|_| FormatError::InvalidLength)?,
+            ),
         })
     }
 }

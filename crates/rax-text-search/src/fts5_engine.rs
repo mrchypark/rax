@@ -24,7 +24,12 @@ impl TextSearchEngine {
         Self { docs: Vec::new() }
     }
 
-    pub fn ingest(&mut self, id: impl Into<String>, body: impl Into<String>, metadata: HashMap<String, String>) {
+    pub fn ingest(
+        &mut self,
+        id: impl Into<String>,
+        body: impl Into<String>,
+        metadata: HashMap<String, String>,
+    ) {
         self.docs.push(TextDocument {
             id: id.into(),
             body: body.into(),
@@ -32,7 +37,12 @@ impl TextSearchEngine {
         });
     }
 
-    pub fn query(&self, query: &str, metadata_filter: Option<(&str, &str)>, limit: usize) -> Vec<SearchHit> {
+    pub fn query(
+        &self,
+        query: &str,
+        metadata_filter: Option<(&str, &str)>,
+        limit: usize,
+    ) -> Vec<SearchHit> {
         let q_terms: Vec<String> = query
             .split_whitespace()
             .map(|s| s.to_ascii_lowercase())

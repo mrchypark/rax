@@ -15,8 +15,16 @@ pub struct UnifiedHit {
     pub score: f32,
 }
 
-pub fn fuse_results(request: &SearchRequest, mode: QueryMode, candidates: &[UnifiedCandidate]) -> Vec<UnifiedHit> {
-    let structured_boost = if mode == QueryMode::Constraint { 2.0 } else { 1.0 };
+pub fn fuse_results(
+    request: &SearchRequest,
+    mode: QueryMode,
+    candidates: &[UnifiedCandidate],
+) -> Vec<UnifiedHit> {
+    let structured_boost = if mode == QueryMode::Constraint {
+        2.0
+    } else {
+        1.0
+    };
 
     let mut out: Vec<UnifiedHit> = candidates
         .iter()

@@ -26,10 +26,16 @@ pub struct OpenState {
 }
 
 pub fn checksum(bytes: &[u8]) -> u32 {
-    bytes.iter().fold(0_u32, |acc, b| acc.wrapping_add(*b as u32))
+    bytes
+        .iter()
+        .fold(0_u32, |acc, b| acc.wrapping_add(*b as u32))
 }
 
-pub fn validate_open(page_a: &[u8], page_b: &[u8], footer: &[u8]) -> Result<OpenState, FormatError> {
+pub fn validate_open(
+    page_a: &[u8],
+    page_b: &[u8],
+    footer: &[u8],
+) -> Result<OpenState, FormatError> {
     let a = MV2SHeader::decode(page_a).ok();
     let b = MV2SHeader::decode(page_b).ok();
 

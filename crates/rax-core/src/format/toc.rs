@@ -25,12 +25,20 @@ impl MV2SToc {
             return Err(FormatError::InvalidMagic);
         }
         let expected = checksum(&bytes[..12]);
-        let actual = u32::from_le_bytes(bytes[12..16].try_into().map_err(|_| FormatError::InvalidLength)?);
+        let actual = u32::from_le_bytes(
+            bytes[12..16]
+                .try_into()
+                .map_err(|_| FormatError::InvalidLength)?,
+        );
         if expected != actual {
             return Err(FormatError::ChecksumMismatch);
         }
         Ok(Self {
-            frame_count: u64::from_le_bytes(bytes[4..12].try_into().map_err(|_| FormatError::InvalidLength)?),
+            frame_count: u64::from_le_bytes(
+                bytes[4..12]
+                    .try_into()
+                    .map_err(|_| FormatError::InvalidLength)?,
+            ),
         })
     }
 }

@@ -12,5 +12,8 @@ async fn structured_entity_persists_after_reopen() {
     let snapshot = mem.snapshot();
     let reopened = StructuredMemory::from_snapshot(&snapshot);
 
-    assert_eq!(reopened.get("entity-1").unwrap().attrs.get("team"), Some(&"core".to_string()));
+    assert_eq!(
+        reopened.get("entity-1").unwrap().attrs.get("team"),
+        Some(&"core".to_string())
+    );
 }

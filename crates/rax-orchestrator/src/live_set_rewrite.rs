@@ -4,7 +4,10 @@ pub struct LiveSetRewriteReport {
     pub after_count: usize,
 }
 
-pub fn rewrite_live_set(logical_ids: &[u64], superseded_ids: &[u64]) -> (Vec<u64>, LiveSetRewriteReport) {
+pub fn rewrite_live_set(
+    logical_ids: &[u64],
+    superseded_ids: &[u64],
+) -> (Vec<u64>, LiveSetRewriteReport) {
     let superseded: std::collections::HashSet<u64> = superseded_ids.iter().copied().collect();
     let mut rewritten: Vec<u64> = logical_ids
         .iter()

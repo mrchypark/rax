@@ -17,5 +17,8 @@ async fn backup_restore_e2e_memory_backend_round_trip() {
     exporter.export_manifest("inc.json", &inc).await.unwrap();
 
     let state = restore_incremental(&[base, inc]).unwrap();
-    assert_eq!(state.applied_snapshots, vec!["snap-1".to_string(), "snap-2".to_string()]);
+    assert_eq!(
+        state.applied_snapshots,
+        vec!["snap-1".to_string(), "snap-2".to_string()]
+    );
 }

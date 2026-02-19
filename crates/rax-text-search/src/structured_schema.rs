@@ -9,6 +9,9 @@ pub struct StructuredMemoryRecord {
 
 impl StructuredMemoryRecord {
     pub fn matches(&self, key: &str, value: &str) -> bool {
-        self.attributes.get(key).map(|v| v == value).unwrap_or(false)
+        self.attributes
+            .get(key)
+            .map(|v| v == value)
+            .unwrap_or(false)
     }
 }

@@ -15,7 +15,10 @@ impl StreamingWriter {
         }
     }
 
-    pub async fn write_from<R: AsyncRead + Unpin>(&mut self, reader: &mut R) -> io::Result<Vec<u8>> {
+    pub async fn write_from<R: AsyncRead + Unpin>(
+        &mut self,
+        reader: &mut R,
+    ) -> io::Result<Vec<u8>> {
         let mut out = Vec::new();
         let mut buf = vec![0u8; self.chunk_size];
 
