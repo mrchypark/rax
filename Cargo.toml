@@ -1,0 +1,10 @@
+[workspace]
+members = [
+  "crates/rax-core",
+  "crates/rax-text-search",
+  "crates/rax-vector-search",
+  "crates/rax-orchestrator",
+  "crates/rax-rag",
+  "crates/rax-media",
+]
+resolver = "2"
