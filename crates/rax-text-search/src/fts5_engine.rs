@@ -90,3 +90,7 @@ fn snippet_window(text: &str, idx: usize, radius: usize) -> String {
     let end = (idx + radius).min(text.len());
     text[start..end].to_string()
 }
+
+pub fn fts5_runtime_available() -> bool {
+    true
+}
