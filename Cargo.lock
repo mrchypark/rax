@@ -340,6 +340,7 @@ dependencies = [
  "serde_json",
  "strum",
  "tempfile",
+ "wax-bench-artifacts",
  "wax-bench-model",
  "wax-bench-packer",
 ]
@@ -548,6 +549,15 @@ dependencies = [
  "hashbrown 0.15.5",
  "indexmap",
  "semver",
+]
+
+[[package]]
+name = "wax-bench-artifacts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wax-bench-model",
 ]
 
 [[package]]

@@ -1,0 +1,21 @@
+{
+  "run_id": "run-001",
+  "benchmark": {
+    "dataset_id": "knowledge-small-clean-v1",
+    "workload_id": "container_open",
+    "sample_index": 0
+  },
+  "sample_count": 3,
+  "p50_total_ttfq_ms": {
+    "status": "available",
+    "value": 6.1
+  },
+  "p95_total_ttfq_ms": {
+    "status": "available",
+    "value": 7.4
+  },
+  "p99_total_ttfq_ms": {
+    "status": "unavailable",
+    "reason": "insufficient_samples"
+  }
+}
