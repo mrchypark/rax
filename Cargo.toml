@@ -57,3 +57,7 @@ path = "tests/contracts/runner_lifecycle_contract.rs"
 [[test]]
 name = "metric_slice_contract"
 path = "tests/contracts/metric_slice_contract.rs"
+
+[[test]]
+name = "local_e2e_smoke"
+path = "tests/contracts/local_e2e_smoke.rs"

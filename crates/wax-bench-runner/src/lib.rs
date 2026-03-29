@@ -50,6 +50,33 @@ impl<E> BenchmarkRunner<E> {
     }
 }
 
+pub fn run_benchmark_samples<E, F, C, M>(
+    runner: &mut BenchmarkRunner<E>,
+    request: &RunRequest,
+    sample_count: u32,
+    mut collector_factory: F,
+) -> Result<Vec<SampleMetrics>, E::Error>
+where
+    E: WaxEngine,
+    F: FnMut() -> MetricCollector<C, M>,
+    C: MonotonicClock,
+    M: MemorySampler,
+{
+    let mut samples = Vec::new();
+    for _ in 0..sample_count {
+        let mut collector = collector_factory();
+        let measured = runner.run_with_metrics(
+            request,
+            &mut collector,
+            Some(CompilerOptimization::Debug),
+            Some(ThermalState::Nominal),
+        )?;
+        samples.push(measured.metrics);
+    }
+
+    Ok(samples)
+}
+
 impl<E> BenchmarkRunner<E>
 where
     E: WaxEngine,

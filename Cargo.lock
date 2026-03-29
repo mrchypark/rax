@@ -559,6 +559,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "wax-bench-metrics",
  "wax-bench-model",
 ]
 
@@ -567,6 +568,9 @@ name = "wax-bench-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "serde_json",
+ "wax-bench-artifacts",
+ "wax-bench-metrics",
  "wax-bench-model",
  "wax-bench-packer",
  "wax-bench-runner",
