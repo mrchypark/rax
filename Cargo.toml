@@ -1,0 +1,19 @@
+[package]
+name = "rax"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+members = [
+  "crates/wax-bench-cli",
+  "crates/wax-bench-model",
+]
+resolver = "2"
+
+[dev-dependencies]
+wax-bench-model = { path = "crates/wax-bench-model" }
+
+[[test]]
+name = "workspace_smoke"
+path = "tests/contracts/workspace_smoke.rs"
