@@ -10,6 +10,7 @@ members = [
   "crates/wax-bench-cli",
   "crates/wax-bench-model",
   "crates/wax-bench-packer",
+  "crates/wax-bench-runner",
 ]
 resolver = "2"
 
@@ -21,6 +22,7 @@ tempfile = "3.23.0"
 wax-bench-artifacts = { path = "crates/wax-bench-artifacts" }
 wax-bench-model = { path = "crates/wax-bench-model" }
 wax-bench-packer = { path = "crates/wax-bench-packer" }
+wax-bench-runner = { path = "crates/wax-bench-runner" }
 
 [[test]]
 name = "workspace_smoke"
@@ -45,3 +47,7 @@ path = "tests/contracts/dataset_packer_reproducibility.rs"
 [[test]]
 name = "artifact_bundle_contract"
 path = "tests/contracts/artifact_bundle_contract.rs"
+
+[[test]]
+name = "runner_lifecycle_contract"
+path = "tests/contracts/runner_lifecycle_contract.rs"

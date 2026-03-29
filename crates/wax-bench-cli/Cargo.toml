@@ -7,3 +7,5 @@ publish = false
 [dependencies]
 clap = { version = "4.5.37", features = ["derive"] }
 wax-bench-packer = { path = "../wax-bench-packer" }
+wax-bench-model = { path = "../wax-bench-model" }
+wax-bench-runner = { path = "../wax-bench-runner" }

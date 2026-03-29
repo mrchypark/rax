@@ -343,6 +343,7 @@ dependencies = [
  "wax-bench-artifacts",
  "wax-bench-model",
  "wax-bench-packer",
+ "wax-bench-runner",
 ]
 
 [[package]]
@@ -565,7 +566,9 @@ name = "wax-bench-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "wax-bench-model",
  "wax-bench-packer",
+ "wax-bench-runner",
 ]
 
 [[package]]
@@ -583,6 +586,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "wax-bench-model",
+]
+
+[[package]]
+name = "wax-bench-runner"
+version = "0.1.0"
+dependencies = [
  "wax-bench-model",
 ]
 
