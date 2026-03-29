@@ -8,6 +8,7 @@ publish = false
 members = [
   "crates/wax-bench-artifacts",
   "crates/wax-bench-cli",
+  "crates/wax-bench-metrics",
   "crates/wax-bench-model",
   "crates/wax-bench-packer",
   "crates/wax-bench-runner",
@@ -21,6 +22,7 @@ strum = "0.27.2"
 tempfile = "3.23.0"
 wax-bench-artifacts = { path = "crates/wax-bench-artifacts" }
 wax-bench-model = { path = "crates/wax-bench-model" }
+wax-bench-metrics = { path = "crates/wax-bench-metrics" }
 wax-bench-packer = { path = "crates/wax-bench-packer" }
 wax-bench-runner = { path = "crates/wax-bench-runner" }
 
@@ -51,3 +53,7 @@ path = "tests/contracts/artifact_bundle_contract.rs"
 [[test]]
 name = "runner_lifecycle_contract"
 path = "tests/contracts/runner_lifecycle_contract.rs"
+
+[[test]]
+name = "metric_slice_contract"
+path = "tests/contracts/metric_slice_contract.rs"
