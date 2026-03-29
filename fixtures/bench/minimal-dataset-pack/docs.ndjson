@@ -1,0 +1,3 @@
+{"doc_id":"doc-001","text":"rust benchmark guide","workspace_id":"w1","tags":["rust","bench"]}
+{"doc_id":"doc-002","text":"semantic latency notes","workspace_id":"w2","tags":["search","vector"]}
+{"doc_id":"doc-003","text":"cold open p95 checklist","workspace_id":"w3","tags":["ios","latency"]}

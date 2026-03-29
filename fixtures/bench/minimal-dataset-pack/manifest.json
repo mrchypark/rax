@@ -1,0 +1,156 @@
+{
+  "schema_version": "wax_dataset_pack_v1",
+  "generated_at": "2026-03-30T00:00:00Z",
+  "generator": {
+    "name": "wax-bench-packer",
+    "version": "0.1.0"
+  },
+  "identity": {
+    "dataset_id": "knowledge-small-clean-v1",
+    "dataset_version": "v1",
+    "dataset_family": "knowledge",
+    "dataset_tier": "small",
+    "variant_id": "clean",
+    "embedding_spec_id": "minilm-l6-384-f32-cosine",
+    "embedding_model_version": "2026-03-15",
+    "embedding_model_hash": "sha256:model",
+    "corpus_checksum": "sha256:corpus",
+    "query_checksum": "sha256:queries"
+  },
+  "environment_constraints": {
+    "min_ram_gb": 4,
+    "recommended_ram_gb": 8
+  },
+  "corpus": {
+    "doc_count": 1000,
+    "vector_count": 1000,
+    "total_text_bytes": 240000,
+    "avg_doc_length": 240.0,
+    "median_doc_length": 210,
+    "p95_doc_length": 640,
+    "max_doc_length": 2000,
+    "languages": [
+      {
+        "code": "en",
+        "ratio": 1.0
+      }
+    ]
+  },
+  "text_profile": {
+    "length_buckets": {
+      "short_ratio": 0.4,
+      "medium_ratio": 0.5,
+      "long_ratio": 0.1
+    }
+  },
+  "metadata_profile": {
+    "facets": [
+      {
+        "name": "workspace_id",
+        "kind": "categorical_medium",
+        "cardinality": 12,
+        "null_ratio": 0.0
+      },
+      {
+        "name": "tags",
+        "kind": "collection",
+        "cardinality": 80,
+        "null_ratio": 0.1
+      }
+    ],
+    "selectivity_exemplars": {
+      "broad": "workspace_id = w1",
+      "medium": "workspace_id = w3 AND is_archived = false",
+      "narrow": "workspace_id = w3 AND tags_any = rust",
+      "zero_hit": "workspace_id = missing"
+    }
+  },
+  "vector_profile": {
+    "enabled": true,
+    "embedding_dimensions": 384,
+    "embedding_dtype": "f32",
+    "distance_metric": "cosine",
+    "query_vectors": {
+      "precomputed_available": true,
+      "runtime_embedding_supported": true
+    }
+  },
+  "dirty_profile": {
+    "profile": "clean",
+    "seed": 0,
+    "delete_ratio": 0.0,
+    "update_ratio": 0.0,
+    "append_ratio": 0.0,
+    "target_segment_count_range": [1, 1],
+    "target_segment_topology": [
+      {
+        "tier": "large",
+        "count": 1
+      }
+    ],
+    "target_tombstone_ratio": 0.0,
+    "compaction_state": "clean"
+  },
+  "files": [
+    {
+      "path": "docs.ndjson",
+      "kind": "documents",
+      "format": "ndjson",
+      "record_count": 1000,
+      "checksum": "sha256:1524054e25d7cf7a3ea2c631853e9050a651181352865b591f34979d61dd361b"
+    },
+    {
+      "path": "queries/core.jsonl",
+      "kind": "query_set",
+      "format": "jsonl",
+      "record_count": 3,
+      "checksum": "sha256:53196c271607a15911b7e2a471f44c3625ef92dd6651e00fd71f443e62241167"
+    },
+    {
+      "path": "queries/core-ground-truth.jsonl",
+      "kind": "ground_truth",
+      "format": "jsonl",
+      "record_count": 3,
+      "checksum": "sha256:b2400f62ebaa281e8800306bb5af9444ab3756f20238ba62d0773c0392f5eded"
+    },
+    {
+      "path": "queries/duplicate.jsonl",
+      "kind": "query_set",
+      "format": "jsonl",
+      "record_count": 3,
+      "checksum": "sha256:d230c1e7af3abf030656bebc1cb31d874782aa7de965ff0234f64868c5db80d7"
+    }
+  ],
+  "query_sets": [
+    {
+      "query_set_id": "knowledge-small-core-v1",
+      "path": "queries/core.jsonl",
+      "ground_truth_path": "queries/core-ground-truth.jsonl",
+      "query_count": 3,
+      "classes": [
+        "keyword",
+        "prefix",
+        "fuzzy_keyword",
+        "topical",
+        "vector",
+        "hybrid",
+        "metadata_filtered",
+        "no_hit",
+        "high_recall"
+      ],
+      "difficulty_distribution": {
+        "easy": 10,
+        "medium": 20,
+        "hard": 10
+      }
+    }
+  ],
+  "checksums": {
+    "manifest_payload_checksum": "sha256:manifest",
+    "logical_documents_checksum": "sha256:docs-logical",
+    "logical_metadata_checksum": "sha256:meta-logical",
+    "logical_query_definitions_checksum": "sha256:queries-logical",
+    "logical_vector_payload_checksum": "sha256:vectors-logical",
+    "fairness_fingerprint": "sha256:fairness"
+  }
+}
