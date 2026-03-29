@@ -16,6 +16,7 @@ resolver = "2"
 serde = "1.0.228"
 serde_json = "1.0.145"
 strum = "0.27.2"
+tempfile = "3.23.0"
 wax-bench-model = { path = "crates/wax-bench-model" }
 wax-bench-packer = { path = "crates/wax-bench-packer" }
 
@@ -34,3 +35,7 @@ path = "tests/contracts/benchmark_identity_contract.rs"
 [[test]]
 name = "dataset_manifest_roundtrip"
 path = "tests/contracts/dataset_manifest_roundtrip.rs"
+
+[[test]]
+name = "dataset_packer_reproducibility"
+path = "tests/contracts/dataset_packer_reproducibility.rs"

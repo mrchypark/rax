@@ -1,0 +1,47 @@
+{
+  "dataset_family": "knowledge",
+  "dataset_version": "v1",
+  "generated_at": "2026-03-30T00:00:00Z",
+  "embedding_spec_id": "minilm-l6-384-f32-cosine",
+  "embedding_model_version": "2026-03-15",
+  "embedding_model_hash": "sha256:model",
+  "environment_constraints": {
+    "min_ram_gb": 4,
+    "recommended_ram_gb": 8
+  },
+  "languages": [
+    {
+      "code": "en",
+      "ratio": 1.0
+    }
+  ],
+  "metadata_profile": {
+    "facets": [
+      {
+        "name": "workspace_id",
+        "kind": "categorical_medium",
+        "cardinality": 12,
+        "null_ratio": 0.0
+      },
+      {
+        "name": "tags",
+        "kind": "collection",
+        "cardinality": 80,
+        "null_ratio": 0.1
+      }
+    ],
+    "selectivity_exemplars": {
+      "broad": "workspace_id = w1",
+      "medium": "workspace_id = w3 AND is_archived = false",
+      "narrow": "workspace_id = w3 AND tags_any = rust",
+      "zero_hit": "workspace_id = missing"
+    }
+  },
+  "query_sets": [
+    {
+      "name": "core",
+      "path": "queries/core.jsonl",
+      "ground_truth_path": "queries/core-ground-truth.jsonl"
+    }
+  ]
+}
