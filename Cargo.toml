@@ -17,3 +17,7 @@ wax-bench-model = { path = "crates/wax-bench-model" }
 [[test]]
 name = "workspace_smoke"
 path = "tests/contracts/workspace_smoke.rs"
+
+[[test]]
+name = "engine_trait_contract"
+path = "tests/contracts/engine_trait_contract.rs"
