@@ -79,6 +79,7 @@ fn main() -> Result<(), String> {
             let workload = match workload.as_str() {
                 "container_open" => Workload::ContainerOpen,
                 "ttfq_text" => Workload::TtfqText,
+                "ttfq_vector" => Workload::TtfqVector,
                 _ => return Err("unsupported workload".to_owned()),
             };
             let manifest_text = std::fs::read_to_string(dataset.join("manifest.json"))
@@ -90,7 +91,6 @@ fn main() -> Result<(), String> {
                 workload_id: workload_label(&workload).to_owned(),
                 sample_index: 0,
             };
-            let mut runner = BenchmarkRunner::new(PackedTextEngine::default());
             let use_test_mode = std::env::var("WAX_BENCH_TEST_MODE").ok().as_deref() == Some("1");
             let request = RunRequest {
                 dataset_path: dataset,
@@ -98,13 +98,19 @@ fn main() -> Result<(), String> {
                 materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
             };
             let measured = if use_test_mode {
-                wax_bench_runner::run_benchmark_samples(&mut runner, &request, sample_count, || {
-                    MetricCollector::new(DeterministicClock::new(), TestMemorySampler)
-                })
+                wax_bench_runner::run_benchmark_samples_with_runner_factory(
+                    || BenchmarkRunner::new(PackedTextEngine::default()),
+                    &request,
+                    sample_count,
+                    || MetricCollector::new(DeterministicClock::new(), TestMemorySampler),
+                )
             } else {
-                wax_bench_runner::run_benchmark_samples(&mut runner, &request, sample_count, || {
-                    MetricCollector::new(SystemClock::new(), UnavailableMemorySampler)
-                })
+                wax_bench_runner::run_benchmark_samples_with_runner_factory(
+                    || BenchmarkRunner::new(PackedTextEngine::default()),
+                    &request,
+                    sample_count,
+                    || MetricCollector::new(SystemClock::new(), UnavailableMemorySampler),
+                )
             }
             .map_err(|error| error.to_string())?;
             let artifact_dir = artifact_dir
@@ -159,6 +165,7 @@ fn workload_label(workload: &Workload) -> &'static str {
     match workload {
         Workload::ContainerOpen => "container_open",
         Workload::TtfqText => "ttfq_text",
+        Workload::TtfqVector => "ttfq_vector",
     }
 }
 

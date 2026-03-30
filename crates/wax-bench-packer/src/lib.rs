@@ -52,12 +52,18 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
     let source = load_source_config(&request.source_dir.join("source.json"))?;
     fs::create_dir_all(&request.out_dir)
         .map_err(|_| PackError::new("failed to create output directory"))?;
+    let dimensions = require_embedding_dimensions(&source.embedding_spec_id)?;
+
+    let mut source_query_sets = source.query_sets.clone();
+    source_query_sets.sort_by(|left, right| left.name.cmp(&right.name));
+    ensure_vector_query_exists(&request.source_dir, &source_query_sets)?;
 
     let document_bytes = copy_file(
         &request.source_dir.join("docs.ndjson"),
         &request.out_dir.join("docs.ndjson"),
     )?;
     let document_stats = analyze_documents(&document_bytes)?;
+    let document_records = load_document_records(&document_bytes)?;
 
     let mut files = vec![build_manifest_file(
         "docs.ndjson",
@@ -68,9 +74,20 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
     )];
     let mut query_sets = Vec::new();
     let mut logical_query_hasher = Sha256::new();
+    let mut vector_payload_hasher = Sha256::new();
+    let document_vector_bytes = build_document_vector_payload(&document_records, dimensions);
+    let document_vector_path = "document_vectors.f32";
+    fs::write(request.out_dir.join(document_vector_path), &document_vector_bytes)
+        .map_err(|_| PackError::new("failed to write document vector payload"))?;
+    vector_payload_hasher.update(&document_vector_bytes);
+    files.push(build_manifest_file(
+        document_vector_path,
+        "document_vectors",
+        "f32le-row-major",
+        document_records.len() as u64,
+        &document_vector_bytes,
+    ));
 
-    let mut source_query_sets = source.query_sets.clone();
-    source_query_sets.sort_by(|left, right| left.name.cmp(&right.name));
     for source_query_set in source_query_sets {
         let query_bytes = copy_file(
             &request.source_dir.join(&source_query_set.path),
@@ -82,7 +99,9 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
         )?;
 
         let query_summary = analyze_query_set(&query_bytes)?;
+        let query_vector_bytes = build_query_vector_payload(&query_bytes, dimensions)?;
         logical_query_hasher.update(&query_bytes);
+        vector_payload_hasher.update(&query_vector_bytes);
 
         files.push(build_manifest_file(
             &source_query_set.path,
@@ -90,6 +109,16 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
             "jsonl",
             query_summary.query_count,
             &query_bytes,
+        ));
+        let query_vector_path = format!("{}.vectors.jsonl", source_query_set.name);
+        fs::write(request.out_dir.join(&query_vector_path), &query_vector_bytes)
+            .map_err(|_| PackError::new("failed to write query vector payload"))?;
+        files.push(build_manifest_file(
+            &query_vector_path,
+            "query_vectors",
+            "jsonl",
+            query_summary.query_count,
+            &query_vector_bytes,
         ));
         files.push(build_manifest_file(
             &source_query_set.ground_truth_path,
@@ -113,14 +142,20 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
     }
 
     let vector_profile = build_vector_profile(&source.embedding_spec_id);
-    let clean_dataset_id = dataset_id(&source.dataset_family, &request.tier, "clean", &source.dataset_version);
+    let clean_dataset_id = dataset_id(
+        &source.dataset_family,
+        &request.tier,
+        "clean",
+        &source.dataset_version,
+    );
     let dirty_profile = build_dirty_profile(&request.variant, &clean_dataset_id)?;
     let metadata_profile = source.metadata_profile.clone();
     let logical_metadata_checksum = checksum_label(
         &serde_json::to_vec(&metadata_profile)
             .map_err(|_| PackError::new("failed to serialize metadata profile for checksum"))?,
     );
-    let query_fingerprint = manifest_query_fingerprint(&request.tier, &request.variant, &clean_dataset_id);
+    let query_fingerprint =
+        manifest_query_fingerprint(&request.tier, &request.variant, &clean_dataset_id);
     let logical_query_fingerprint = serde_json::to_vec(&query_fingerprint)
         .map_err(|_| PackError::new("failed to serialize query fingerprint"))?;
 
@@ -177,7 +212,10 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
             logical_documents_checksum: checksum_label(&document_bytes),
             logical_metadata_checksum,
             logical_query_definitions_checksum: checksum_label(&logical_query_fingerprint),
-            logical_vector_payload_checksum: None,
+            logical_vector_payload_checksum: Some(format!(
+                "sha256:{:x}",
+                vector_payload_hasher.finalize()
+            )),
             fairness_fingerprint: checksum_label(&logical_query_fingerprint),
         },
     };
@@ -335,11 +373,9 @@ fn build_manifest_file(
 }
 
 fn analyze_documents(bytes: &[u8]) -> Result<DocumentStats, PackError> {
-    let text = std::str::from_utf8(bytes).map_err(|_| PackError::new("documents must be utf-8"))?;
+    let records = load_document_records(bytes)?;
     let mut lengths = Vec::new();
-    for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        let record: DocumentStub =
-            serde_json::from_str(line).map_err(|_| PackError::new("documents file contains invalid json"))?;
+    for record in records {
         lengths.push(record.text.len() as u64);
     }
 
@@ -403,6 +439,44 @@ fn analyze_query_set(bytes: &[u8]) -> Result<QuerySetSummary, PackError> {
         classes,
         difficulty_distribution: DifficultyDistribution { easy, medium, hard },
     })
+}
+
+fn load_document_records(bytes: &[u8]) -> Result<Vec<DocumentStub>, PackError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| PackError::new("documents must be utf-8"))?;
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str(line)
+                .map_err(|_| PackError::new("documents file contains invalid json"))
+        })
+        .collect()
+}
+
+fn build_document_vector_payload(records: &[DocumentStub], dimensions: u32) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(records.len() * dimensions as usize * 4);
+    for record in records {
+        for value in embed_text(&record.text, dimensions) {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    bytes
+}
+
+fn build_query_vector_payload(bytes: &[u8], dimensions: u32) -> Result<Vec<u8>, PackError> {
+    let mut out = Vec::new();
+    for record in load_query_vector_stubs(bytes)? {
+        let payload = QueryVectorRecord {
+            query_id: record.query_id,
+            vector: embed_text(&record.query_text, dimensions),
+            lane_eligibility: record.lane_eligibility,
+            query_text: record.query_text,
+        };
+        let line = serde_json::to_string(&payload)
+            .map_err(|_| PackError::new("failed to serialize query vector payload"))?;
+        out.extend_from_slice(line.as_bytes());
+        out.push(b'\n');
+    }
+    Ok(out)
 }
 
 fn build_vector_profile(embedding_spec_id: &str) -> VectorProfile {
@@ -488,7 +562,11 @@ fn distance_metric_from_spec_id(spec_id: &str) -> &str {
     spec_id.rsplit('-').next().unwrap_or("cosine")
 }
 
-fn manifest_query_fingerprint(tier: &str, variant: &str, clean_dataset_id: &str) -> serde_json::Value {
+fn manifest_query_fingerprint(
+    tier: &str,
+    variant: &str,
+    clean_dataset_id: &str,
+) -> serde_json::Value {
     serde_json::json!({
         "tier": tier,
         "variant": variant,
@@ -497,9 +575,9 @@ fn manifest_query_fingerprint(tier: &str, variant: &str, clean_dataset_id: &str)
 }
 
 fn validate_vector_profile(manifest: &DatasetPackManifest) -> Result<(), ValidationError> {
-    if let Some(expected_dimensions) = embedding_dimensions_from_spec_id(
-        &manifest.identity.embedding_spec_id,
-    ) {
+    if let Some(expected_dimensions) =
+        embedding_dimensions_from_spec_id(&manifest.identity.embedding_spec_id)
+    {
         if manifest.vector_profile.embedding_dimensions != expected_dimensions {
             return Err(ValidationError::new(
                 "embedding_dimensions does not match embedding_spec_id",
@@ -568,6 +646,31 @@ fn embedding_dimensions_from_spec_id(spec_id: &str) -> Option<u32> {
     }
 
     None
+}
+
+fn require_embedding_dimensions(spec_id: &str) -> Result<u32, PackError> {
+    embedding_dimensions_from_spec_id(spec_id)
+        .ok_or_else(|| PackError::new("embedding_spec_id must declare vector dimensions"))
+}
+
+fn ensure_vector_query_exists(
+    source_dir: &Path,
+    query_sets: &[SourceQuerySet],
+) -> Result<(), PackError> {
+    for query_set in query_sets {
+        let bytes = fs::read(source_dir.join(&query_set.path))
+            .map_err(|_| PackError::new("failed to read source file"))?;
+        if load_query_vector_stubs(&bytes)?
+            .into_iter()
+            .any(|record| record.lane_eligibility.vector)
+        {
+            return Ok(());
+        }
+    }
+
+    Err(PackError::new(
+        "vector-enabled datasets require a vector query",
+    ))
 }
 
 fn validate_file_references(manifest: &DatasetPackManifest) -> Result<(), ValidationError> {
@@ -661,7 +764,10 @@ fn validate_file_payloads(
 }
 
 fn validate_constrained_values(manifest: &DatasetPackManifest) -> Result<(), ValidationError> {
-    if !matches!(manifest.identity.dataset_tier.as_str(), "small" | "medium" | "large") {
+    if !matches!(
+        manifest.identity.dataset_tier.as_str(),
+        "small" | "medium" | "large"
+    ) {
         return Err(ValidationError::new("invalid dataset_tier"));
     }
 
@@ -711,7 +817,10 @@ fn validate_constrained_values(manifest: &DatasetPackManifest) -> Result<(), Val
 fn validate_vector_checksum_requirements(
     manifest: &DatasetPackManifest,
 ) -> Result<(), ValidationError> {
-    let has_vector_payload = manifest.files.iter().any(|file| file.kind == "document_vectors");
+    let has_vector_payload = manifest
+        .files
+        .iter()
+        .any(|file| file.kind == "document_vectors");
     if has_vector_payload && manifest.checksums.logical_vector_payload_checksum.is_none() {
         return Err(ValidationError::new(
             "vector payload checksum is required when vector payload exists",
@@ -758,9 +867,9 @@ fn load_ground_truth_ids(path: PathBuf) -> Result<Vec<String>, ValidationError> 
 fn is_pack_relative_path(path: &str) -> bool {
     let path = Path::new(path);
     !path.is_absolute()
-        && path.components().all(|component| {
-            matches!(component, Component::Normal(_))
-        })
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 #[derive(serde::Deserialize)]
@@ -768,6 +877,28 @@ struct QueryDefinitionStub {
     query_id: String,
     query_class: String,
     difficulty: String,
+}
+
+#[derive(Deserialize)]
+struct QueryVectorStub {
+    query_id: String,
+    query_text: String,
+    lane_eligibility: QueryLaneEligibility,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+struct QueryLaneEligibility {
+    text: bool,
+    vector: bool,
+    hybrid: bool,
+}
+
+#[derive(serde::Serialize)]
+struct QueryVectorRecord {
+    query_id: String,
+    query_text: String,
+    vector: Vec<f32>,
+    lane_eligibility: QueryLaneEligibility,
 }
 
 #[derive(serde::Deserialize)]
@@ -779,9 +910,51 @@ struct GroundTruthStub {
 struct DocumentStub {
     text: String,
 }
+
 fn non_empty_line_count(bytes: &[u8]) -> u64 {
     std::str::from_utf8(bytes)
         .ok()
         .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count() as u64)
         .unwrap_or(0)
+}
+
+fn load_query_vector_stubs(bytes: &[u8]) -> Result<Vec<QueryVectorStub>, PackError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| PackError::new("query set must be utf-8"))?;
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str(line)
+                .map_err(|_| PackError::new("query_set file contains invalid json"))
+        })
+        .collect()
+}
+
+fn embed_text(text: &str, dimensions: u32) -> Vec<f32> {
+    let dimensions = dimensions as usize;
+    if dimensions == 0 {
+        return Vec::new();
+    }
+
+    let mut vector = vec![0.0f32; dimensions];
+    for token in text
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+    {
+        let token = token.to_ascii_lowercase();
+        let mut digest = Sha256::new();
+        digest.update(token.as_bytes());
+        let bytes = digest.finalize();
+        let bucket = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize
+            % dimensions;
+        vector[bucket] += 1.0;
+    }
+
+    let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for value in &mut vector {
+            *value /= norm;
+        }
+    }
+
+    vector
 }

@@ -14,11 +14,16 @@ pub struct PackedTextEngine {
     phase: EnginePhase,
     manifest: Option<DatasetPackManifest>,
     text_lane: Option<TextLane>,
+    vector_lane: Option<VectorLane>,
 }
 
 impl PackedTextEngine {
     pub fn is_text_lane_materialized(&self) -> bool {
         self.text_lane.is_some()
+    }
+
+    pub fn is_vector_lane_materialized(&self) -> bool {
+        self.vector_lane.is_some()
     }
 
     fn manifest(&self) -> Result<&DatasetPackManifest, String> {
@@ -43,6 +48,17 @@ impl PackedTextEngine {
             .as_ref()
             .ok_or_else(|| "text lane not materialized".to_owned())
     }
+
+    fn ensure_vector_lane(&mut self) -> Result<&VectorLane, String> {
+        if self.vector_lane.is_none() {
+            let mount_root = self.mount_root()?.to_path_buf();
+            let manifest = self.manifest()?.clone();
+            self.vector_lane = Some(VectorLane::load(&mount_root, &manifest)?);
+        }
+        self.vector_lane
+            .as_ref()
+            .ok_or_else(|| "vector lane not materialized".to_owned())
+    }
 }
 
 impl WaxEngine for PackedTextEngine {
@@ -53,6 +69,7 @@ impl WaxEngine for PackedTextEngine {
         self.phase = EnginePhase::Mounted;
         self.manifest = None;
         self.text_lane = None;
+        self.vector_lane = None;
         Ok(())
     }
 
@@ -80,6 +97,16 @@ impl WaxEngine for PackedTextEngine {
             self.ensure_text_lane()?;
             return Ok(SearchResult { hits: Vec::new() });
         }
+        if request.query_text == "__materialize_vector_lane__" {
+            self.ensure_vector_lane()?;
+            return Ok(SearchResult { hits: Vec::new() });
+        }
+        if request.query_text == "__ttfq_vector__" {
+            let lane = self.ensure_vector_lane()?;
+            return Ok(SearchResult {
+                hits: lane.search_first_vector_query(),
+            });
+        }
 
         let lane = self.ensure_text_lane()?;
         let query_text = if request.query_text == "__ttfq_text__" {
@@ -105,6 +132,13 @@ struct TextLane {
     first_text_query: String,
     docs: Vec<DocumentRecord>,
     inverted: HashMap<String, Vec<usize>>,
+}
+
+#[derive(Debug)]
+struct VectorLane {
+    first_vector_query: Vec<f32>,
+    doc_ids: Vec<String>,
+    doc_vectors: Vec<Vec<f32>>,
 }
 
 impl TextLane {
@@ -163,6 +197,68 @@ impl TextLane {
     }
 }
 
+impl VectorLane {
+    fn load(mount_root: &Path, manifest: &DatasetPackManifest) -> Result<Self, String> {
+        let docs_path = manifest
+            .files
+            .iter()
+            .find(|file| file.kind == "documents")
+            .map(|file| mount_root.join(&file.path))
+            .ok_or_else(|| "documents file missing from manifest".to_owned())?;
+        let doc_ids = load_documents(&docs_path)?
+            .into_iter()
+            .map(|record| record.doc_id)
+            .collect::<Vec<_>>();
+
+        let document_vectors_path = manifest
+            .files
+            .iter()
+            .find(|file| file.kind == "document_vectors")
+            .map(|file| mount_root.join(&file.path))
+            .ok_or_else(|| "document_vectors file missing from manifest".to_owned())?;
+        let query_vectors_path = manifest
+            .files
+            .iter()
+            .filter(|file| file.kind == "query_vectors")
+            .map(|file| mount_root.join(&file.path))
+            .collect::<Vec<_>>();
+        if query_vectors_path.is_empty() {
+            return Err("query_vectors file missing from manifest".to_owned());
+        }
+
+        let dimensions = manifest.vector_profile.embedding_dimensions as usize;
+        let document_vector_bytes =
+            fs::read(&document_vectors_path).map_err(|error| error.to_string())?;
+        let doc_vectors = load_document_vectors(&document_vector_bytes, dimensions)?;
+        let first_vector_query = load_first_vector_query(&query_vectors_path)?;
+
+        Ok(Self {
+            first_vector_query,
+            doc_ids,
+            doc_vectors,
+        })
+    }
+
+    fn search_first_vector_query(&self) -> Vec<String> {
+        let mut hits = self
+            .doc_vectors
+            .iter()
+            .enumerate()
+            .map(|(index, vector)| (index, cosine_similarity(&self.first_vector_query, vector)))
+            .collect::<Vec<_>>();
+        hits.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap()
+                .then_with(|| self.doc_ids[left.0].cmp(&self.doc_ids[right.0]))
+        });
+        hits.into_iter()
+            .map(|(index, _)| self.doc_ids[index].clone())
+            .collect()
+    }
+}
+
 fn load_documents(path: &Path) -> Result<Vec<DocumentRecord>, String> {
     let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
     text.lines()
@@ -202,7 +298,51 @@ struct QueryRecord {
     lane_eligibility: LaneEligibility,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct LaneEligibility {
     text: bool,
+    vector: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct QueryVectorRecord {
+    vector: Vec<f32>,
+    lane_eligibility: LaneEligibility,
+}
+
+fn load_document_vectors(bytes: &[u8], dimensions: usize) -> Result<Vec<Vec<f32>>, String> {
+    if dimensions == 0 {
+        return Ok(Vec::new());
+    }
+    if !bytes.len().is_multiple_of(dimensions * 4) {
+        return Err("document vector payload has invalid length".to_owned());
+    }
+
+    Ok(bytes
+        .chunks_exact(dimensions * 4)
+        .map(|row| {
+            row.chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect::<Vec<_>>()
+        })
+        .collect())
+}
+
+fn load_first_vector_query(paths: &[PathBuf]) -> Result<Vec<f32>, String> {
+    for path in paths {
+        let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let query: QueryVectorRecord =
+                serde_json::from_str(line).map_err(|error| error.to_string())?;
+            if query.lane_eligibility.vector {
+                return Ok(query.vector);
+            }
+        }
+    }
+
+    Err("no vector-eligible query found".to_owned())
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    left.iter().zip(right).map(|(l, r)| l * r).sum()
 }

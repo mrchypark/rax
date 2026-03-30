@@ -10,6 +10,7 @@ use wax_bench_model::{MaterializationMode, MountRequest, OpenRequest, SearchRequ
 pub enum Workload {
     ContainerOpen,
     TtfqText,
+    TtfqVector,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,20 +51,22 @@ impl<E> BenchmarkRunner<E> {
     }
 }
 
-pub fn run_benchmark_samples<E, F, C, M>(
-    runner: &mut BenchmarkRunner<E>,
+pub fn run_benchmark_samples_with_runner_factory<E, R, F, C, M>(
+    mut runner_factory: R,
     request: &RunRequest,
     sample_count: u32,
     mut collector_factory: F,
 ) -> Result<Vec<SampleMetrics>, E::Error>
 where
     E: WaxEngine,
+    R: FnMut() -> BenchmarkRunner<E>,
     F: FnMut() -> MetricCollector<C, M>,
     C: MonotonicClock,
     M: MemorySampler,
 {
     let mut samples = Vec::new();
     for _ in 0..sample_count {
+        let mut runner = runner_factory();
         let mut collector = collector_factory();
         let measured = runner.run_with_metrics(
             request,
@@ -119,8 +122,7 @@ where
             )?;
         }
 
-        if matches!(request.workload, Workload::TtfqText) {
-            let query_text = "__ttfq_text__".to_owned();
+        if let Some(query_text) = first_query_for_workload(&request.workload) {
             self.engine.search(SearchRequest {
                 query_text: query_text.clone(),
             })?;
@@ -183,8 +185,7 @@ where
 
         collector.mark_metadata_ready();
 
-        if matches!(request.workload, Workload::TtfqText) {
-            let query_text = "__ttfq_text__".to_owned();
+        if let Some(query_text) = first_query_for_workload(&request.workload) {
             self.engine.search(SearchRequest {
                 query_text: query_text.clone(),
             })?;
@@ -245,5 +246,13 @@ impl WaxEngine for NoopWaxEngine {
             phase: wax_bench_model::EnginePhase::Open,
             last_mounted_path: None,
         }
+    }
+}
+
+fn first_query_for_workload(workload: &Workload) -> Option<String> {
+    match workload {
+        Workload::ContainerOpen => None,
+        Workload::TtfqText => Some("__ttfq_text__".to_owned()),
+        Workload::TtfqVector => Some("__ttfq_vector__".to_owned()),
     }
 }

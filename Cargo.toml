@@ -77,3 +77,7 @@ path = "tests/contracts/artifact_replay_contract.rs"
 [[test]]
 name = "text_engine_contract"
 path = "tests/contracts/text_engine_contract.rs"
+
+[[test]]
+name = "vector_engine_contract"
+path = "tests/contracts/vector_engine_contract.rs"

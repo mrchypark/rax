@@ -4,6 +4,7 @@ use wax_bench_model::{
     EnginePhase, EngineStats, MaterializationMode, MountRequest, OpenRequest, OpenResult,
     SearchRequest, SearchResult, WaxEngine,
 };
+use wax_bench_metrics::{MemoryReading, MetricCollector, MonotonicClock, MemorySampler};
 use wax_bench_runner::{BenchmarkRunner, LifecycleEvent, RunRequest, Workload};
 
 #[test]
@@ -42,7 +43,10 @@ fn container_open_excludes_lane_materialization() {
         })
         .unwrap();
 
-    assert_eq!(trace.events, vec![LifecycleEvent::Mounted, LifecycleEvent::Opened]);
+    assert_eq!(
+        trace.events,
+        vec![LifecycleEvent::Mounted, LifecycleEvent::Opened]
+    );
     assert!(trace.search_queries.is_empty());
 }
 
@@ -110,11 +114,59 @@ fn force_all_lanes_materializes_text_and_vector_before_search() {
     );
 }
 
+#[test]
+fn vector_workload_executes_vector_first_query() {
+    let engine = RecordingEngine::default();
+    let mut runner = BenchmarkRunner::new(engine);
+
+    let trace = runner
+        .run(&RunRequest {
+            dataset_path: PathBuf::from("/tmp/wax-pack"),
+            workload: Workload::TtfqVector,
+            materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
+        })
+        .unwrap();
+
+    assert_eq!(
+        trace.events,
+        vec![
+            LifecycleEvent::Mounted,
+            LifecycleEvent::Opened,
+            LifecycleEvent::SearchExecuted,
+        ]
+    );
+    assert_eq!(trace.search_queries, vec!["__ttfq_vector__".to_owned()]);
+}
+
+#[test]
+fn benchmark_samples_use_fresh_engine_instances() {
+    let request = RunRequest {
+        dataset_path: PathBuf::from("/tmp/wax-pack"),
+        workload: Workload::TtfqVector,
+        materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
+    };
+
+    let samples = wax_bench_runner::run_benchmark_samples_with_runner_factory(
+        || BenchmarkRunner::new(FreshOnlyEngine::default()),
+        &request,
+        2,
+        || MetricCollector::new(FixedClock, FixedMemorySampler),
+    )
+    .unwrap();
+
+    assert_eq!(samples.len(), 2);
+}
+
 #[derive(Default)]
 struct RecordingEngine {
     phase: EnginePhase,
     mounted_path: Option<PathBuf>,
     search_queries: Vec<String>,
+}
+
+#[derive(Default)]
+struct FreshOnlyEngine {
+    was_used: bool,
 }
 
 impl WaxEngine for RecordingEngine {
@@ -140,6 +192,51 @@ impl WaxEngine for RecordingEngine {
         EngineStats {
             phase: self.phase,
             last_mounted_path: self.mounted_path.clone(),
+        }
+    }
+}
+
+impl WaxEngine for FreshOnlyEngine {
+    type Error = &'static str;
+
+    fn mount(&mut self, _request: MountRequest) -> Result<(), Self::Error> {
+        if self.was_used {
+            return Err("reused engine");
+        }
+        Ok(())
+    }
+
+    fn open(&mut self, _request: OpenRequest) -> Result<OpenResult, Self::Error> {
+        Ok(OpenResult)
+    }
+
+    fn search(&mut self, _request: SearchRequest) -> Result<SearchResult, Self::Error> {
+        self.was_used = true;
+        Ok(SearchResult { hits: Vec::new() })
+    }
+
+    fn get_stats(&self) -> EngineStats {
+        EngineStats {
+            phase: EnginePhase::Open,
+            last_mounted_path: None,
+        }
+    }
+}
+
+struct FixedClock;
+
+impl MonotonicClock for FixedClock {
+    fn now_ms(&mut self) -> u64 {
+        0
+    }
+}
+
+struct FixedMemorySampler;
+
+impl MemorySampler for FixedMemorySampler {
+    fn sample_resident_bytes(&self) -> MemoryReading {
+        MemoryReading::Unavailable {
+            reason: "test".to_owned(),
         }
     }
 }

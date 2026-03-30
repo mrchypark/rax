@@ -26,8 +26,20 @@ fn dataset_packer_emits_expected_clean_and_dirty_metadata() {
     let clean_out = tempdir().unwrap();
     let dirty_out = tempdir().unwrap();
 
-    pack_dataset(&PackRequest::new(source, clean_out.path(), "small", "clean")).unwrap();
-    pack_dataset(&PackRequest::new(source, dirty_out.path(), "small", "dirty_light")).unwrap();
+    pack_dataset(&PackRequest::new(
+        source,
+        clean_out.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+    pack_dataset(&PackRequest::new(
+        source,
+        dirty_out.path(),
+        "small",
+        "dirty_light",
+    ))
+    .unwrap();
 
     let clean = read_manifest(clean_out.path());
     let dirty = read_manifest(dirty_out.path());
@@ -48,8 +60,20 @@ fn dataset_packer_keeps_query_set_ids_stable_across_variants() {
     let clean_out = tempdir().unwrap();
     let dirty_out = tempdir().unwrap();
 
-    pack_dataset(&PackRequest::new(source, clean_out.path(), "small", "clean")).unwrap();
-    pack_dataset(&PackRequest::new(source, dirty_out.path(), "small", "dirty_light")).unwrap();
+    pack_dataset(&PackRequest::new(
+        source,
+        clean_out.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+    pack_dataset(&PackRequest::new(
+        source,
+        dirty_out.path(),
+        "small",
+        "dirty_light",
+    ))
+    .unwrap();
 
     let clean = read_manifest(clean_out.path());
     let dirty = read_manifest(dirty_out.path());
@@ -66,6 +90,127 @@ fn dataset_packer_keeps_query_set_ids_stable_across_variants() {
         .collect();
 
     assert_eq!(clean_ids, dirty_ids);
+}
+
+#[test]
+fn dataset_packer_rejects_vector_enabled_source_without_vector_query() {
+    let source_dir = tempdir().unwrap();
+    let out_dir = tempdir().unwrap();
+
+    std::fs::write(
+        source_dir.path().join("source.json"),
+        r#"{
+  "dataset_family": "knowledge",
+  "dataset_version": "v1",
+  "generated_at": "2026-03-30T00:00:00Z",
+  "embedding_spec_id": "minilm-l6-384-f32-cosine",
+  "embedding_model_version": "2026-03-15",
+  "embedding_model_hash": "sha256:model",
+  "environment_constraints": { "min_ram_gb": 4, "recommended_ram_gb": 8 },
+  "languages": [{ "code": "en", "ratio": 1.0 }],
+  "metadata_profile": {
+    "facets": [],
+    "selectivity_exemplars": {
+      "broad": "workspace_id = w1",
+      "medium": "workspace_id = w1",
+      "narrow": "workspace_id = w1",
+      "zero_hit": "workspace_id = missing"
+    }
+  },
+  "query_sets": [
+    { "name": "core", "path": "queries/core.jsonl", "ground_truth_path": "queries/core-ground-truth.jsonl" }
+  ]
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        source_dir.path().join("docs.ndjson"),
+        "{\"doc_id\":\"doc-001\",\"text\":\"rust benchmark\"}\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(source_dir.path().join("queries")).unwrap();
+    std::fs::write(
+        source_dir.path().join("queries/core.jsonl"),
+        "{\"query_id\":\"q-001\",\"query_class\":\"keyword\",\"difficulty\":\"easy\",\"query_text\":\"rust benchmark\",\"top_k\":10,\"filter_spec\":{},\"preview_expected\":true,\"embedding_available\":true,\"lane_eligibility\":{\"text\":true,\"vector\":false,\"hybrid\":true}}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        source_dir.path().join("queries/core-ground-truth.jsonl"),
+        "{\"query_id\":\"q-001\",\"doc_ids\":[\"doc-001\"]}\n",
+    )
+    .unwrap();
+
+    let error = pack_dataset(&PackRequest::new(
+        source_dir.path(),
+        out_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap_err();
+
+    assert_eq!(error.message, "vector-enabled datasets require a vector query");
+}
+
+#[test]
+fn dataset_packer_rejects_malformed_embedding_spec_for_vector_payloads() {
+    let source_dir = tempdir().unwrap();
+    let out_dir = tempdir().unwrap();
+
+    std::fs::write(
+        source_dir.path().join("source.json"),
+        r#"{
+  "dataset_family": "knowledge",
+  "dataset_version": "v1",
+  "generated_at": "2026-03-30T00:00:00Z",
+  "embedding_spec_id": "minilm-l6-cosine",
+  "embedding_model_version": "2026-03-15",
+  "embedding_model_hash": "sha256:model",
+  "environment_constraints": { "min_ram_gb": 4, "recommended_ram_gb": 8 },
+  "languages": [{ "code": "en", "ratio": 1.0 }],
+  "metadata_profile": {
+    "facets": [],
+    "selectivity_exemplars": {
+      "broad": "workspace_id = w1",
+      "medium": "workspace_id = w1",
+      "narrow": "workspace_id = w1",
+      "zero_hit": "workspace_id = missing"
+    }
+  },
+  "query_sets": [
+    { "name": "core", "path": "queries/core.jsonl", "ground_truth_path": "queries/core-ground-truth.jsonl" }
+  ]
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        source_dir.path().join("docs.ndjson"),
+        "{\"doc_id\":\"doc-001\",\"text\":\"semantic latency\"}\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(source_dir.path().join("queries")).unwrap();
+    std::fs::write(
+        source_dir.path().join("queries/core.jsonl"),
+        "{\"query_id\":\"q-001\",\"query_class\":\"vector\",\"difficulty\":\"easy\",\"query_text\":\"semantic latency\",\"top_k\":10,\"filter_spec\":{},\"preview_expected\":true,\"embedding_available\":true,\"lane_eligibility\":{\"text\":false,\"vector\":true,\"hybrid\":true}}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        source_dir.path().join("queries/core-ground-truth.jsonl"),
+        "{\"query_id\":\"q-001\",\"doc_ids\":[\"doc-001\"]}\n",
+    )
+    .unwrap();
+
+    let error = pack_dataset(&PackRequest::new(
+        source_dir.path(),
+        out_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap_err();
+
+    assert_eq!(
+        error.message,
+        "embedding_spec_id must declare vector dimensions"
+    );
 }
 
 fn read_manifest(out_dir: &Path) -> DatasetPackManifest {
