@@ -1,7 +1,7 @@
 use tempfile::tempdir;
 use wax_bench_artifacts::{
     read_run_bundle, render_replay_command, write_run_bundle_with_replay_config,
-    ArtifactBundleStatus, ReplayConfigArtifact,
+    ArtifactBundleStatus, MetricValue, ReplayConfigArtifact,
 };
 use wax_bench_metrics::{CompilerOptimization, MemoryReading, SampleMetrics, ThermalState};
 use wax_bench_model::{BenchmarkId, MaterializationMode};
@@ -93,6 +93,27 @@ fn run_config_can_be_replayed_exactly() {
     );
 }
 
+#[test]
+fn zero_duration_ttfq_is_preserved_as_available() {
+    let run_dir = tempdir().unwrap();
+    let replay = replay_config("/tmp/replayed-artifacts");
+    write_run_bundle_with_replay_config(
+        run_dir.path(),
+        "run-001",
+        &benchmark_id(),
+        "sha256:fairness-a",
+        &[sample(0.0)],
+        &replay,
+    )
+    .unwrap();
+
+    let bundle = read_run_bundle(run_dir.path()).unwrap();
+    assert_eq!(
+        bundle.samples[0].metrics.total_ttfq_ms,
+        MetricValue::available(0.0)
+    );
+}
+
 fn benchmark_id() -> BenchmarkId {
     BenchmarkId {
         dataset_id: "knowledge-small-clean-v1".to_owned(),
@@ -116,6 +137,8 @@ fn sample(total_ttfq_ms: f64) -> SampleMetrics {
         container_open_ms: 1.0,
         metadata_readiness_ms: 1.0,
         total_ttfq_ms,
+        total_ttfq_recorded: true,
+        search_latency_ms: None,
         resident_memory_bytes: MemoryReading::Unavailable {
             reason: "test".to_owned(),
         },

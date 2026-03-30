@@ -30,6 +30,7 @@ pub struct SampleMetricSlices {
     pub container_open_ms: MetricValue<f64>,
     pub metadata_readiness_ms: MetricValue<f64>,
     pub total_ttfq_ms: MetricValue<f64>,
+    pub search_latency_ms: MetricValue<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -45,9 +46,15 @@ pub struct RunSummaryArtifact {
     pub benchmark: BenchmarkId,
     pub fairness_fingerprint: String,
     pub sample_count: u32,
+    pub p50_container_open_ms: MetricValue<f64>,
+    pub p95_container_open_ms: MetricValue<f64>,
+    pub p99_container_open_ms: MetricValue<f64>,
     pub p50_total_ttfq_ms: MetricValue<f64>,
     pub p95_total_ttfq_ms: MetricValue<f64>,
     pub p99_total_ttfq_ms: MetricValue<f64>,
+    pub p50_search_latency_ms: MetricValue<f64>,
+    pub p95_search_latency_ms: MetricValue<f64>,
+    pub p99_search_latency_ms: MetricValue<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,14 +110,20 @@ impl ArtifactError {
 
 pub fn render_markdown_summary(summary: &RunSummaryArtifact) -> String {
     format!(
-        "# Benchmark Summary\n\n- Run: {}\n- Dataset: {}\n- Workload: {}\n- Samples: {}\n- p50 total_ttfq_ms: {}\n- p95 total_ttfq_ms: {}\n- p99 total_ttfq_ms: {}\n",
+        "# Benchmark Summary\n\n- Run: {}\n- Dataset: {}\n- Workload: {}\n- Samples: {}\n- p50 container_open_ms: {}\n- p95 container_open_ms: {}\n- p99 container_open_ms: {}\n- p50 total_ttfq_ms: {}\n- p95 total_ttfq_ms: {}\n- p99 total_ttfq_ms: {}\n- p50 search_latency_ms: {}\n- p95 search_latency_ms: {}\n- p99 search_latency_ms: {}\n",
         summary.run_id,
         summary.benchmark.dataset_id,
         summary.benchmark.workload_id,
         summary.sample_count,
+        metric_value_label(&summary.p50_container_open_ms),
+        metric_value_label(&summary.p95_container_open_ms),
+        metric_value_label(&summary.p99_container_open_ms),
         metric_value_label(&summary.p50_total_ttfq_ms),
         metric_value_label(&summary.p95_total_ttfq_ms),
-        metric_value_label(&summary.p99_total_ttfq_ms)
+        metric_value_label(&summary.p99_total_ttfq_ms),
+        metric_value_label(&summary.p50_search_latency_ms),
+        metric_value_label(&summary.p95_search_latency_ms),
+        metric_value_label(&summary.p99_search_latency_ms)
     )
 }
 
@@ -160,7 +173,16 @@ pub fn write_run_bundle_with_replay_config(
             metrics: SampleMetricSlices {
                 container_open_ms: MetricValue::available(metrics.container_open_ms),
                 metadata_readiness_ms: MetricValue::available(metrics.metadata_readiness_ms),
-                total_ttfq_ms: MetricValue::available(metrics.total_ttfq_ms),
+                total_ttfq_ms: metric_value_from_option(
+                    metrics
+                        .total_ttfq_recorded
+                        .then_some(metrics.total_ttfq_ms),
+                    "not_measured",
+                ),
+                search_latency_ms: metric_value_from_option(
+                    metrics.search_latency_ms,
+                    "not_measured",
+                ),
             },
             resident_memory_bytes: memory_metric(&metrics.resident_memory_bytes),
         };
@@ -284,6 +306,13 @@ fn build_run_summary(
     fairness_fingerprint: &str,
     sample_artifacts: &[SampleArtifact],
 ) -> RunSummaryArtifact {
+    let mut container_opens: Vec<f64> = sample_artifacts
+        .iter()
+        .filter_map(|artifact| match artifact.metrics.container_open_ms {
+            MetricValue::Available { value } => Some(value),
+            MetricValue::Unavailable { .. } => None,
+        })
+        .collect();
     let mut totals: Vec<f64> = sample_artifacts
         .iter()
         .filter_map(|artifact| match artifact.metrics.total_ttfq_ms {
@@ -291,16 +320,31 @@ fn build_run_summary(
             MetricValue::Unavailable { .. } => None,
         })
         .collect();
+    let mut search_latencies: Vec<f64> = sample_artifacts
+        .iter()
+        .filter_map(|artifact| match artifact.metrics.search_latency_ms {
+            MetricValue::Available { value } => Some(value),
+            MetricValue::Unavailable { .. } => None,
+        })
+        .collect();
+    container_opens.sort_by(|left, right| left.partial_cmp(right).unwrap());
     totals.sort_by(|left, right| left.partial_cmp(right).unwrap());
+    search_latencies.sort_by(|left, right| left.partial_cmp(right).unwrap());
 
     RunSummaryArtifact {
         run_id: run_id.to_owned(),
         benchmark: benchmark.clone(),
         fairness_fingerprint: fairness_fingerprint.to_owned(),
         sample_count: sample_artifacts.len() as u32,
+        p50_container_open_ms: percentile_metric(&container_opens, 0.50, 1),
+        p95_container_open_ms: percentile_metric(&container_opens, 0.95, 1),
+        p99_container_open_ms: percentile_metric(&container_opens, 0.99, 4),
         p50_total_ttfq_ms: percentile_metric(&totals, 0.50, 1),
         p95_total_ttfq_ms: percentile_metric(&totals, 0.95, 1),
         p99_total_ttfq_ms: percentile_metric(&totals, 0.99, 4),
+        p50_search_latency_ms: percentile_metric(&search_latencies, 0.50, 1),
+        p95_search_latency_ms: percentile_metric(&search_latencies, 0.95, 1),
+        p99_search_latency_ms: percentile_metric(&search_latencies, 0.99, 4),
     }
 }
 
@@ -317,6 +361,13 @@ fn memory_metric(reading: &MemoryReading) -> MetricValue<u64> {
     match reading {
         MemoryReading::Available { value } => MetricValue::available(*value),
         MemoryReading::Unavailable { reason } => MetricValue::unavailable(reason.clone()),
+    }
+}
+
+fn metric_value_from_option(value: Option<f64>, unavailable_reason: &str) -> MetricValue<f64> {
+    match value {
+        Some(value) => MetricValue::available(value),
+        None => MetricValue::unavailable(unavailable_reason),
     }
 }
 

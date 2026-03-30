@@ -23,6 +23,8 @@ pub struct SampleMetrics {
     pub container_open_ms: f64,
     pub metadata_readiness_ms: f64,
     pub total_ttfq_ms: f64,
+    pub total_ttfq_recorded: bool,
+    pub search_latency_ms: Option<f64>,
     pub resident_memory_bytes: MemoryReading,
     pub compiler_optimization: Option<CompilerOptimization>,
     pub thermal_state: Option<ThermalState>,
@@ -43,6 +45,8 @@ pub struct MetricCollector<C, M> {
     container_open_us: Option<u64>,
     metadata_readiness_us: Option<u64>,
     query_done_us: Option<u64>,
+    search_start_us: Option<u64>,
+    search_done_us: Option<u64>,
     resident_memory_bytes: Option<MemoryReading>,
 }
 
@@ -59,6 +63,8 @@ where
             container_open_us: None,
             metadata_readiness_us: None,
             query_done_us: None,
+            search_start_us: None,
+            search_done_us: None,
             resident_memory_bytes: None,
         }
     }
@@ -82,6 +88,17 @@ where
         self.query_done_us = Some(self.clock.now_us() - start_us);
     }
 
+    pub fn start_search_measurement(&mut self) {
+        self.search_start_us = Some(self.clock.now_us());
+    }
+
+    pub fn mark_search_done(&mut self) {
+        let search_start_us = self
+            .search_start_us
+            .expect("start_search_measurement must be called first");
+        self.search_done_us = Some(self.clock.now_us() - search_start_us);
+    }
+
     pub fn snapshot_memory(&mut self) {
         self.resident_memory_bytes = Some(self.memory_sampler.sample_resident_bytes());
     }
@@ -95,6 +112,8 @@ where
             container_open_ms: duration_ms(self.container_open_us.unwrap_or(0)),
             metadata_readiness_ms: duration_ms(self.metadata_readiness_us.unwrap_or(0)),
             total_ttfq_ms: duration_ms(self.query_done_us.unwrap_or(0)),
+            total_ttfq_recorded: self.query_done_us.is_some(),
+            search_latency_ms: self.search_done_us.map(duration_ms),
             resident_memory_bytes: self
                 .resident_memory_bytes
                 .clone()

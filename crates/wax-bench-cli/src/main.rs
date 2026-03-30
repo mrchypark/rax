@@ -80,6 +80,9 @@ fn main() -> Result<(), String> {
                 "container_open" => Workload::ContainerOpen,
                 "ttfq_text" => Workload::TtfqText,
                 "ttfq_vector" => Workload::TtfqVector,
+                "warm_text" => Workload::WarmText,
+                "warm_vector" => Workload::WarmVector,
+                "warm_hybrid" => Workload::WarmHybrid,
                 _ => return Err("unsupported workload".to_owned()),
             };
             let manifest_text = std::fs::read_to_string(dataset.join("manifest.json"))
@@ -166,6 +169,9 @@ fn workload_label(workload: &Workload) -> &'static str {
         Workload::ContainerOpen => "container_open",
         Workload::TtfqText => "ttfq_text",
         Workload::TtfqVector => "ttfq_vector",
+        Workload::WarmText => "warm_text",
+        Workload::WarmVector => "warm_vector",
+        Workload::WarmHybrid => "warm_hybrid",
     }
 }
 

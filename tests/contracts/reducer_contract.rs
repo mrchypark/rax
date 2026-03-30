@@ -25,6 +25,10 @@ fn reducer_computes_percentiles_from_sample_bundle() {
 
     let report = reduce_run_dir(run_dir.path(), None).unwrap();
     assert_eq!(
+        report.summary.p50_container_open_ms,
+        MetricValue::available(1.0)
+    );
+    assert_eq!(
         report.summary.p50_total_ttfq_ms,
         MetricValue::available(3.0)
     );
@@ -35,6 +39,10 @@ fn reducer_computes_percentiles_from_sample_bundle() {
     assert_eq!(
         report.summary.p99_total_ttfq_ms,
         MetricValue::available(5.0)
+    );
+    assert_eq!(
+        report.summary.p95_search_latency_ms,
+        MetricValue::unavailable("insufficient_samples")
     );
     assert!(report.markdown.contains("p95"));
 }
@@ -100,6 +108,7 @@ fn reducer_preserves_unavailable_percentiles_for_empty_measurements() {
             container_open_ms: MetricValue::available(1.0),
             metadata_readiness_ms: MetricValue::available(1.0),
             total_ttfq_ms: MetricValue::unavailable("not_measured"),
+            search_latency_ms: MetricValue::available(0.7),
         },
         resident_memory_bytes: MetricValue::unavailable("test"),
     };
@@ -108,9 +117,15 @@ fn reducer_preserves_unavailable_percentiles_for_empty_measurements() {
         benchmark: sample.benchmark_id.clone(),
         fairness_fingerprint: "sha256:fairness-a".to_owned(),
         sample_count: 1,
+        p50_container_open_ms: MetricValue::available(1.0),
+        p95_container_open_ms: MetricValue::available(1.0),
+        p99_container_open_ms: MetricValue::unavailable("insufficient_samples"),
         p50_total_ttfq_ms: MetricValue::unavailable("insufficient_samples"),
         p95_total_ttfq_ms: MetricValue::unavailable("insufficient_samples"),
         p99_total_ttfq_ms: MetricValue::unavailable("insufficient_samples"),
+        p50_search_latency_ms: MetricValue::available(0.7),
+        p95_search_latency_ms: MetricValue::available(0.7),
+        p99_search_latency_ms: MetricValue::unavailable("insufficient_samples"),
     };
     std::fs::write(
         run_dir.path().join("sample-000.json"),
@@ -165,6 +180,8 @@ fn sample(total_ttfq_ms: f64) -> SampleMetrics {
         container_open_ms: 1.0,
         metadata_readiness_ms: 1.0,
         total_ttfq_ms,
+        total_ttfq_recorded: true,
+        search_latency_ms: None,
         resident_memory_bytes: MemoryReading::Unavailable {
             reason: "test".to_owned(),
         },

@@ -7,6 +7,18 @@
   },
   "fairness_fingerprint": "sha256:fairness-a",
   "sample_count": 3,
+  "p50_container_open_ms": {
+    "status": "available",
+    "value": 0.2
+  },
+  "p95_container_open_ms": {
+    "status": "available",
+    "value": 0.4
+  },
+  "p99_container_open_ms": {
+    "status": "unavailable",
+    "reason": "insufficient_samples"
+  },
   "p50_total_ttfq_ms": {
     "status": "available",
     "value": 6.1
@@ -16,6 +28,18 @@
     "value": 7.4
   },
   "p99_total_ttfq_ms": {
+    "status": "unavailable",
+    "reason": "insufficient_samples"
+  },
+  "p50_search_latency_ms": {
+    "status": "available",
+    "value": 1.1
+  },
+  "p95_search_latency_ms": {
+    "status": "available",
+    "value": 1.4
+  },
+  "p99_search_latency_ms": {
     "status": "unavailable",
     "reason": "insufficient_samples"
   }

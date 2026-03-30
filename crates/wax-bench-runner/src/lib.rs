@@ -11,6 +11,9 @@ pub enum Workload {
     ContainerOpen,
     TtfqText,
     TtfqVector,
+    WarmText,
+    WarmVector,
+    WarmHybrid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,6 +141,14 @@ where
             trace.search_queries.push(query_text);
         }
 
+        if let Some(query_text) = measured_query_for_workload(&request.workload) {
+            self.engine.search(SearchRequest {
+                query_text: query_text.clone(),
+            })?;
+            trace.events.push(LifecycleEvent::SearchExecuted);
+            trace.search_queries.push(query_text);
+        }
+
         Ok(trace)
     }
 
@@ -199,7 +210,19 @@ where
             })?;
             trace.events.push(LifecycleEvent::SearchExecuted);
             trace.search_queries.push(query_text);
-            collector.mark_query_done();
+            if measured_query_for_workload(&request.workload).is_none() {
+                collector.mark_query_done();
+            }
+        }
+
+        if let Some(query_text) = measured_query_for_workload(&request.workload) {
+            collector.start_search_measurement();
+            self.engine.search(SearchRequest {
+                query_text: query_text.clone(),
+            })?;
+            trace.events.push(LifecycleEvent::SearchExecuted);
+            trace.search_queries.push(query_text);
+            collector.mark_search_done();
         }
 
         collector.snapshot_memory();
@@ -262,5 +285,17 @@ fn first_query_for_workload(workload: &Workload) -> Option<String> {
         Workload::ContainerOpen => None,
         Workload::TtfqText => Some("__ttfq_text__".to_owned()),
         Workload::TtfqVector => Some("__ttfq_vector__".to_owned()),
+        Workload::WarmText => Some("__ttfq_text__".to_owned()),
+        Workload::WarmVector => Some("__ttfq_vector__".to_owned()),
+        Workload::WarmHybrid => Some("__ttfq_hybrid__".to_owned()),
+    }
+}
+
+fn measured_query_for_workload(workload: &Workload) -> Option<String> {
+    match workload {
+        Workload::WarmText => Some("__warm_text__".to_owned()),
+        Workload::WarmVector => Some("__warm_vector__".to_owned()),
+        Workload::WarmHybrid => Some("__warm_hybrid__".to_owned()),
+        _ => None,
     }
 }

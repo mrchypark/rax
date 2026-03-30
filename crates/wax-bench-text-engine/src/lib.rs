@@ -101,15 +101,30 @@ impl WaxEngine for PackedTextEngine {
             self.ensure_vector_lane()?;
             return Ok(SearchResult { hits: Vec::new() });
         }
-        if request.query_text == "__ttfq_vector__" {
+        if matches!(request.query_text.as_str(), "__ttfq_vector__" | "__warm_vector__") {
             let lane = self.ensure_vector_lane()?;
             return Ok(SearchResult {
                 hits: lane.search_first_vector_query(),
             });
         }
+        if matches!(request.query_text.as_str(), "__ttfq_hybrid__" | "__warm_hybrid__") {
+            self.ensure_text_lane()?;
+            self.ensure_vector_lane()?;
+            let text_lane = self
+                .text_lane
+                .as_ref()
+                .ok_or_else(|| "text lane not materialized".to_owned())?;
+            let vector_lane = self
+                .vector_lane
+                .as_ref()
+                .ok_or_else(|| "vector lane not materialized".to_owned())?;
+            return Ok(SearchResult {
+                hits: search_first_hybrid_query(text_lane, vector_lane),
+            });
+        }
 
         let lane = self.ensure_text_lane()?;
-        let hits = if request.query_text == "__ttfq_text__" {
+        let hits = if matches!(request.query_text.as_str(), "__ttfq_text__" | "__warm_text__") {
             lane.search_first_text_query()
         } else {
             lane.search(&request.query_text)
@@ -129,6 +144,8 @@ impl WaxEngine for PackedTextEngine {
 struct TextLane {
     first_text_query: String,
     first_text_top_k: usize,
+    first_hybrid_query: Option<String>,
+    first_hybrid_top_k: usize,
     inverted: HashMap<String, Vec<String>>,
 }
 
@@ -136,6 +153,8 @@ struct TextLane {
 struct VectorLane {
     first_vector_query: Vec<f32>,
     first_vector_top_k: usize,
+    first_hybrid_query: Option<Vec<f32>>,
+    first_hybrid_top_k: usize,
     doc_ids: Vec<String>,
     doc_vectors: Vec<Vec<f32>>,
 }
@@ -158,11 +177,16 @@ impl TextLane {
         }
 
         let (first_text_query, first_text_top_k) = load_first_text_query(&query_paths)?;
+        let first_hybrid_query = load_first_hybrid_text_query(&query_paths)?;
         let inverted = load_text_postings(&postings_path)?;
 
         Ok(Self {
             first_text_query,
             first_text_top_k,
+            first_hybrid_query: first_hybrid_query
+                .as_ref()
+                .map(|query| query.query_text.clone()),
+            first_hybrid_top_k: first_hybrid_query.map(|query| query.top_k).unwrap_or(0),
             inverted,
         })
     }
@@ -225,10 +249,13 @@ impl VectorLane {
             fs::read(&document_vectors_path).map_err(|error| error.to_string())?;
         let doc_vectors = load_document_vectors(&document_vector_bytes, dimensions)?;
         let first_vector_query = load_first_vector_query(&query_vectors_path)?;
+        let first_hybrid_query = load_first_hybrid_vector_query(&query_vectors_path)?;
 
         Ok(Self {
             first_vector_query: first_vector_query.vector,
             first_vector_top_k: first_vector_query.top_k,
+            first_hybrid_query: first_hybrid_query.as_ref().map(|query| query.vector.clone()),
+            first_hybrid_top_k: first_hybrid_query.map(|query| query.top_k).unwrap_or(0),
             doc_ids,
             doc_vectors,
         })
@@ -239,10 +266,18 @@ impl VectorLane {
             return Vec::new();
         }
 
+        self.search_with_query(&self.first_vector_query, self.first_vector_top_k)
+    }
+
+    fn search_with_query(&self, query: &[f32], limit: usize) -> Vec<String> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
         let mut hits = Vec::new();
         for (index, vector) in self.doc_vectors.iter().enumerate() {
-            let score = cosine_similarity(&self.first_vector_query, vector);
-            insert_ranked_hit(&mut hits, self.first_vector_top_k, index, score, &self.doc_ids);
+            let score = cosine_similarity(query, vector);
+            insert_ranked_hit(&mut hits, limit, index, score, &self.doc_ids);
         }
 
         hits.into_iter()
@@ -264,6 +299,24 @@ fn load_first_text_query(paths: &[PathBuf]) -> Result<(String, usize), String> {
     }
 
     Err("no text-eligible query found".to_owned())
+}
+
+fn load_first_hybrid_text_query(paths: &[PathBuf]) -> Result<Option<FirstTextQuery>, String> {
+    for path in paths {
+        let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let query: QueryRecord =
+                serde_json::from_str(line).map_err(|error| error.to_string())?;
+            if query.lane_eligibility.hybrid {
+                return Ok(Some(FirstTextQuery {
+                    query_text: query.query_text,
+                    top_k: query.top_k as usize,
+                }));
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 fn load_text_postings(path: &Path) -> Result<HashMap<String, Vec<String>>, String> {
@@ -307,6 +360,7 @@ struct QueryRecord {
 struct LaneEligibility {
     text: bool,
     vector: bool,
+    hybrid: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -330,6 +384,12 @@ struct TextPostingRecord {
 #[derive(Debug)]
 struct FirstVectorQuery {
     vector: Vec<f32>,
+    top_k: usize,
+}
+
+#[derive(Debug)]
+struct FirstTextQuery {
+    query_text: String,
     top_k: usize,
 }
 
@@ -369,6 +429,24 @@ fn load_first_vector_query(paths: &[PathBuf]) -> Result<FirstVectorQuery, String
     Err("no vector-eligible query found".to_owned())
 }
 
+fn load_first_hybrid_vector_query(paths: &[PathBuf]) -> Result<Option<FirstVectorQuery>, String> {
+    for path in paths {
+        let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let query: QueryVectorRecord =
+                serde_json::from_str(line).map_err(|error| error.to_string())?;
+            if query.lane_eligibility.hybrid {
+                return Ok(Some(FirstVectorQuery {
+                    vector: query.vector,
+                    top_k: query.top_k as usize,
+                }));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 fn insert_ranked_hit(
     hits: &mut Vec<(usize, f32)>,
     limit: usize,
@@ -387,6 +465,42 @@ fn insert_ranked_hit(
     if hits.len() > limit {
         hits.truncate(limit);
     }
+}
+
+fn search_first_hybrid_query(text_lane: &TextLane, vector_lane: &VectorLane) -> Vec<String> {
+    let Some(hybrid_text_query) = text_lane.first_hybrid_query.as_ref() else {
+        return Vec::new();
+    };
+    let Some(hybrid_vector_query) = vector_lane.first_hybrid_query.as_ref() else {
+        return Vec::new();
+    };
+    let limit = text_lane
+        .first_hybrid_top_k
+        .max(vector_lane.first_hybrid_top_k)
+        .max(1);
+    let text_hits = text_lane.search_with_limit(hybrid_text_query, limit);
+    let vector_hits = vector_lane.search_with_query(hybrid_vector_query, limit);
+    fuse_ranked_hits(&text_hits, &vector_hits, limit)
+}
+
+fn fuse_ranked_hits(text_hits: &[String], vector_hits: &[String], limit: usize) -> Vec<String> {
+    let mut scores = HashMap::<String, f64>::new();
+    for (rank, doc_id) in text_hits.iter().enumerate() {
+        *scores.entry(doc_id.clone()).or_insert(0.0) += 1.0 / (rank as f64 + 1.0);
+    }
+    for (rank, doc_id) in vector_hits.iter().enumerate() {
+        *scores.entry(doc_id.clone()).or_insert(0.0) += 1.0 / (rank as f64 + 1.0);
+    }
+
+    let mut fused = scores.into_iter().collect::<Vec<_>>();
+    fused.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap()
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    fused.into_iter().take(limit).map(|(doc_id, _)| doc_id).collect()
 }
 
 fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {

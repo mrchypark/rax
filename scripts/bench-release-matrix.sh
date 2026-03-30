@@ -15,7 +15,7 @@ mkdir -p "$ARTIFACT_ROOT"
 
 cargo build --release -p wax-bench-cli
 
-for WORKLOAD in container_open ttfq_text ttfq_vector; do
+for WORKLOAD in container_open ttfq_text ttfq_vector warm_text warm_vector warm_hybrid; do
   RUN_DIR="$ARTIFACT_ROOT/$WORKLOAD"
   rm -rf "$RUN_DIR"
   "$BIN" run \

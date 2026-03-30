@@ -17,6 +17,7 @@ fn sample_artifact_serializes_identity_and_explicit_missing_metrics() {
             container_open_ms: MetricValue::available(4.2),
             metadata_readiness_ms: MetricValue::available(4.8),
             total_ttfq_ms: MetricValue::unavailable("not_measured"),
+            search_latency_ms: MetricValue::available(0.9),
         },
         resident_memory_bytes: MetricValue::unavailable("platform_not_supported"),
     };
@@ -28,6 +29,7 @@ fn sample_artifact_serializes_identity_and_explicit_missing_metrics() {
     );
     assert_eq!(value["metrics"]["container_open_ms"]["status"], "available");
     assert_eq!(value["metrics"]["total_ttfq_ms"]["status"], "unavailable");
+    assert_eq!(value["metrics"]["search_latency_ms"]["value"], 0.9);
     assert_eq!(
         value["resident_memory_bytes"]["reason"],
         "platform_not_supported"
@@ -45,9 +47,15 @@ fn run_summary_matches_expected_fixture() {
         },
         fairness_fingerprint: "sha256:fairness-a".to_owned(),
         sample_count: 3,
+        p50_container_open_ms: MetricValue::available(0.2),
+        p95_container_open_ms: MetricValue::available(0.4),
+        p99_container_open_ms: MetricValue::unavailable("insufficient_samples"),
         p50_total_ttfq_ms: MetricValue::available(6.1),
         p95_total_ttfq_ms: MetricValue::available(7.4),
         p99_total_ttfq_ms: MetricValue::unavailable("insufficient_samples"),
+        p50_search_latency_ms: MetricValue::available(1.1),
+        p95_search_latency_ms: MetricValue::available(1.4),
+        p99_search_latency_ms: MetricValue::unavailable("insufficient_samples"),
     };
 
     let expected =

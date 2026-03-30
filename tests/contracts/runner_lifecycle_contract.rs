@@ -157,6 +157,44 @@ fn benchmark_samples_use_fresh_engine_instances() {
     assert_eq!(samples.len(), 2);
 }
 
+#[test]
+fn warm_text_workload_warms_then_measures_text_search() {
+    let engine = RecordingEngine::default();
+    let mut runner = BenchmarkRunner::new(engine);
+
+    let trace = runner
+        .run(&RunRequest {
+            dataset_path: PathBuf::from("/tmp/wax-pack"),
+            workload: Workload::WarmText,
+            materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
+        })
+        .unwrap();
+
+    assert_eq!(
+        trace.search_queries,
+        vec!["__ttfq_text__".to_owned(), "__warm_text__".to_owned()]
+    );
+}
+
+#[test]
+fn warm_hybrid_workload_warms_then_measures_hybrid_search() {
+    let engine = RecordingEngine::default();
+    let mut runner = BenchmarkRunner::new(engine);
+
+    let trace = runner
+        .run(&RunRequest {
+            dataset_path: PathBuf::from("/tmp/wax-pack"),
+            workload: Workload::WarmHybrid,
+            materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
+        })
+        .unwrap();
+
+    assert_eq!(
+        trace.search_queries,
+        vec!["__ttfq_hybrid__".to_owned(), "__warm_hybrid__".to_owned()]
+    );
+}
+
 #[derive(Default)]
 struct RecordingEngine {
     phase: EnginePhase,

@@ -27,6 +27,8 @@ fn metric_collector_records_core_ttfq_slices() {
             container_open_ms: 4.0,
             metadata_readiness_ms: 9.0,
             total_ttfq_ms: 15.0,
+            total_ttfq_recorded: true,
+            search_latency_ms: None,
             resident_memory_bytes: MemoryReading::Available { value: 4096 },
             compiler_optimization: Some(CompilerOptimization::Debug),
             thermal_state: Some(ThermalState::Nominal),
@@ -72,6 +74,26 @@ fn metric_collector_preserves_submillisecond_precision() {
     assert_eq!(snapshot.container_open_ms, 0.25);
     assert_eq!(snapshot.metadata_readiness_ms, 0.75);
     assert_eq!(snapshot.total_ttfq_ms, 1.25);
+}
+
+#[test]
+fn metric_collector_records_warm_search_latency_separately() {
+    let clock = SequenceClock::new([0, 5_000, 5_000, 5_200, 5_450]);
+    let sampler = FixedMemorySampler::available(1024);
+    let mut collector = MetricCollector::new(clock, sampler);
+
+    collector.start_run();
+    collector.mark_container_open_done();
+    collector.mark_metadata_ready();
+    collector.start_search_measurement();
+    collector.mark_search_done();
+
+    let snapshot = collector.finish(None, None);
+
+    assert_eq!(snapshot.container_open_ms, 5.0);
+    assert_eq!(snapshot.metadata_readiness_ms, 5.0);
+    assert!(!snapshot.total_ttfq_recorded);
+    assert_eq!(snapshot.search_latency_ms, Some(0.25));
 }
 
 struct SequenceClock {

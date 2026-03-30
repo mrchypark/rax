@@ -158,3 +158,33 @@ fn packed_text_engine_finds_first_text_query_across_multiple_query_sets() {
 
     assert_eq!(first.hits.first().map(String::as_str), Some("doc-002"));
 }
+
+#[test]
+fn packed_text_engine_executes_hybrid_query_with_sidecar_lanes() {
+    let dataset_dir = tempdir().unwrap();
+    pack_dataset(&PackRequest::new(
+        "fixtures/bench/source/minimal",
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+    fs::remove_file(dataset_dir.path().join("docs.ndjson")).unwrap();
+
+    let mut engine = PackedTextEngine::default();
+    engine
+        .mount(MountRequest {
+            store_path: dataset_dir.path().to_path_buf(),
+        })
+        .unwrap();
+    engine.open(OpenRequest).unwrap();
+
+    let first = engine
+        .search(SearchRequest {
+            query_text: "__warm_hybrid__".to_owned(),
+        })
+        .unwrap();
+
+    assert_eq!(first.hits.first().map(String::as_str), Some("doc-001"));
+    assert!(first.hits.len() >= 2);
+}
