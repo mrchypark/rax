@@ -3,7 +3,10 @@ use std::time::Instant;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use wax_bench_artifacts::write_run_bundle;
+use wax_bench_artifacts::{
+    read_run_bundle, render_replay_command, write_run_bundle_with_replay_config,
+    ReplayConfigArtifact,
+};
 use wax_bench_metrics::{MemoryReading, MemorySampler, MetricCollector, MonotonicClock};
 use wax_bench_model::{BenchmarkId, DatasetPackManifest, MaterializationMode};
 use wax_bench_packer::PackRequest;
@@ -37,12 +40,18 @@ enum Command {
         workload: String,
         #[arg(long)]
         sample_count: u32,
+        #[arg(long)]
+        artifact_dir: Option<PathBuf>,
     },
     Reduce {
         #[arg(long)]
         input: PathBuf,
         #[arg(long)]
         baseline: Option<PathBuf>,
+    },
+    Replay {
+        #[arg(long)]
+        input: PathBuf,
     },
 }
 
@@ -64,6 +73,7 @@ fn main() -> Result<(), String> {
             dataset,
             workload,
             sample_count,
+            artifact_dir,
         }) => {
             let workload = match workload.as_str() {
                 "container_open" => Workload::ContainerOpen,
@@ -96,14 +106,27 @@ fn main() -> Result<(), String> {
                 })
             }
             .map_err(|error| error.to_string())?;
-            let artifact_dir = std::env::var("WAX_BENCH_ARTIFACT_DIR")
-                .unwrap_or_else(|_| "artifacts/latest".to_owned());
-            write_run_bundle(
-                PathBuf::from(artifact_dir).as_path(),
+            let artifact_dir = artifact_dir
+                .or_else(|| {
+                    std::env::var("WAX_BENCH_ARTIFACT_DIR")
+                        .ok()
+                        .map(PathBuf::from)
+                })
+                .unwrap_or_else(|| PathBuf::from("artifacts/latest"));
+            let replay = ReplayConfigArtifact {
+                dataset_path: Some(request.dataset_path.display().to_string()),
+                workload_id: workload_label(&request.workload).to_owned(),
+                sample_count,
+                materialization_mode: request.materialization_mode,
+                artifact_dir: artifact_dir.display().to_string(),
+            };
+            write_run_bundle_with_replay_config(
+                artifact_dir.as_path(),
                 "run-local",
                 &benchmark_id,
                 &manifest.checksums.fairness_fingerprint,
                 &measured,
+                &replay,
             )
             .map_err(|error| error.to_string())?;
             Ok(())
@@ -117,6 +140,14 @@ fn main() -> Result<(), String> {
             )
             .map_err(|error| error.to_string())?;
             println!("{}", report.markdown);
+            Ok(())
+        }
+        Some(Command::Replay { input }) => {
+            let bundle = read_run_bundle(input.as_path()).map_err(|error| error.message)?;
+            println!(
+                "{}",
+                render_replay_command(&bundle.manifest.replay).map_err(|error| error.to_string())?
+            );
             Ok(())
         }
         None => Ok(()),

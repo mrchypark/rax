@@ -67,3 +67,7 @@ path = "tests/contracts/local_e2e_smoke.rs"
 [[test]]
 name = "reducer_contract"
 path = "tests/contracts/reducer_contract.rs"
+
+[[test]]
+name = "artifact_replay_contract"
+path = "tests/contracts/artifact_replay_contract.rs"

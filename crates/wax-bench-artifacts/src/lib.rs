@@ -2,8 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use wax_bench_metrics::{MemoryReading, SampleMetrics};
-use wax_bench_model::BenchmarkId;
+use wax_bench_model::{BenchmarkId, MaterializationMode};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -49,6 +50,57 @@ pub struct RunSummaryArtifact {
     pub p99_total_ttfq_ms: MetricValue<f64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayConfigArtifact {
+    pub dataset_path: Option<String>,
+    pub workload_id: String,
+    pub sample_count: u32,
+    pub materialization_mode: MaterializationMode,
+    pub artifact_dir: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactFileDigest {
+    pub path: String,
+    pub checksum: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunManifestArtifact {
+    pub run_id: String,
+    pub benchmark: BenchmarkId,
+    pub fairness_fingerprint: String,
+    pub replay: ReplayConfigArtifact,
+    pub files: Vec<ArtifactFileDigest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactBundleStatus {
+    Complete,
+    Partial { missing_files: Vec<String> },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunBundleArtifact {
+    pub manifest: RunManifestArtifact,
+    pub summary: Option<RunSummaryArtifact>,
+    pub samples: Vec<SampleArtifact>,
+    pub status: ArtifactBundleStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactError {
+    pub message: String,
+}
+
+impl ArtifactError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
 pub fn render_markdown_summary(summary: &RunSummaryArtifact) -> String {
     format!(
         "# Benchmark Summary\n\n- Run: {}\n- Dataset: {}\n- Workload: {}\n- Samples: {}\n- p50 total_ttfq_ms: {}\n- p95 total_ttfq_ms: {}\n- p99 total_ttfq_ms: {}\n",
@@ -69,9 +121,35 @@ pub fn write_run_bundle(
     fairness_fingerprint: &str,
     measured_runs: &[SampleMetrics],
 ) -> Result<(), String> {
+    let replay = ReplayConfigArtifact {
+        dataset_path: None,
+        workload_id: benchmark.workload_id.clone(),
+        sample_count: measured_runs.len() as u32,
+        materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
+        artifact_dir: out_dir.display().to_string(),
+    };
+    write_run_bundle_with_replay_config(
+        out_dir,
+        run_id,
+        benchmark,
+        fairness_fingerprint,
+        measured_runs,
+        &replay,
+    )
+}
+
+pub fn write_run_bundle_with_replay_config(
+    out_dir: &Path,
+    run_id: &str,
+    benchmark: &BenchmarkId,
+    fairness_fingerprint: &str,
+    measured_runs: &[SampleMetrics],
+    replay: &ReplayConfigArtifact,
+) -> Result<(), String> {
     fs::create_dir_all(out_dir).map_err(|error| error.to_string())?;
 
     let mut sample_artifacts = Vec::new();
+    let mut file_digests = Vec::new();
     for (index, metrics) in measured_runs.iter().enumerate() {
         let artifact = SampleArtifact {
             benchmark_id: BenchmarkId {
@@ -92,18 +170,29 @@ pub fn write_run_bundle(
             serde_json::to_string_pretty(&artifact).map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;
+        file_digests.push(digest_entry(out_dir, &format!("sample-{index:03}.json"))?);
         sample_artifacts.push(artifact);
     }
 
     let summary = build_run_summary(run_id, benchmark, fairness_fingerprint, &sample_artifacts);
+    let summary_json = serde_json::to_string_pretty(&summary).map_err(|error| error.to_string())?;
+    fs::write(out_dir.join("summary.json"), summary_json).map_err(|error| error.to_string())?;
+    file_digests.push(digest_entry(out_dir, "summary.json")?);
+
+    let markdown = render_markdown_summary(&summary);
+    fs::write(out_dir.join("summary.md"), markdown).map_err(|error| error.to_string())?;
+    file_digests.push(digest_entry(out_dir, "summary.md")?);
+
+    let manifest = RunManifestArtifact {
+        run_id: run_id.to_owned(),
+        benchmark: benchmark.clone(),
+        fairness_fingerprint: fairness_fingerprint.to_owned(),
+        replay: replay.clone(),
+        files: file_digests,
+    };
     fs::write(
-        out_dir.join("summary.json"),
-        serde_json::to_string_pretty(&summary).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    fs::write(
-        out_dir.join("summary.md"),
-        render_markdown_summary(&summary),
+        out_dir.join("run-manifest.json"),
+        serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
 
@@ -131,6 +220,62 @@ pub fn list_sample_artifact_paths(run_dir: &Path) -> Result<Vec<PathBuf>, String
     }
     paths.sort();
     Ok(paths)
+}
+
+pub fn read_run_manifest(path: &Path) -> Result<RunManifestArtifact, String> {
+    read_json(path)
+}
+
+pub fn read_run_bundle(run_dir: &Path) -> Result<RunBundleArtifact, ArtifactError> {
+    let manifest =
+        read_run_manifest(&run_dir.join("run-manifest.json")).map_err(ArtifactError::new)?;
+    let mut missing_files = Vec::new();
+    let mut summary = None;
+    let mut samples = Vec::new();
+
+    for entry in &manifest.files {
+        let path = run_dir.join(&entry.path);
+        if !path.exists() {
+            missing_files.push(entry.path.clone());
+            continue;
+        }
+
+        let actual = checksum_file(&path).map_err(ArtifactError::new)?;
+        if actual != entry.checksum {
+            return Err(ArtifactError::new("artifact checksum mismatch"));
+        }
+
+        if entry.path == "summary.json" {
+            summary = Some(read_run_summary(&path).map_err(ArtifactError::new)?);
+        } else if entry.path.starts_with("sample-") && entry.path.ends_with(".json") {
+            samples.push(read_sample_artifact(&path).map_err(ArtifactError::new)?);
+        }
+    }
+
+    samples.sort_by_key(|sample| sample.benchmark_id.sample_index);
+    let status = if missing_files.is_empty() {
+        ArtifactBundleStatus::Complete
+    } else {
+        ArtifactBundleStatus::Partial { missing_files }
+    };
+
+    Ok(RunBundleArtifact {
+        manifest,
+        summary,
+        samples,
+        status,
+    })
+}
+
+pub fn render_replay_command(replay: &ReplayConfigArtifact) -> Result<String, String> {
+    let dataset_path = replay
+        .dataset_path
+        .as_deref()
+        .ok_or_else(|| "replay dataset_path missing".to_owned())?;
+    Ok(format!(
+        "cargo run -p wax-bench-cli -- run --dataset {} --workload {} --sample-count {} --artifact-dir {}",
+        dataset_path, replay.workload_id, replay.sample_count, replay.artifact_dir
+    ))
 }
 
 fn build_run_summary(
@@ -188,4 +333,18 @@ where
 {
     let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
     serde_json::from_str(&text).map_err(|error| error.to_string())
+}
+
+fn digest_entry(root: &Path, relative_path: &str) -> Result<ArtifactFileDigest, String> {
+    Ok(ArtifactFileDigest {
+        path: relative_path.to_owned(),
+        checksum: checksum_file(&root.join(relative_path))?,
+    })
+}
+
+fn checksum_file(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
