@@ -7,6 +7,7 @@ use wax_bench_artifacts::write_run_bundle;
 use wax_bench_metrics::{MemoryReading, MemorySampler, MetricCollector, MonotonicClock};
 use wax_bench_model::{BenchmarkId, DatasetPackManifest, MaterializationMode};
 use wax_bench_packer::PackRequest;
+use wax_bench_reducer::reduce_run_dir;
 use wax_bench_runner::{BenchmarkRunner, NoopWaxEngine, RunRequest, Workload};
 
 #[derive(Debug, Parser)]
@@ -36,6 +37,12 @@ enum Command {
         workload: String,
         #[arg(long)]
         sample_count: u32,
+    },
+    Reduce {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        baseline: Option<PathBuf>,
     },
 }
 
@@ -80,25 +87,36 @@ fn main() -> Result<(), String> {
                 materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
             };
             let measured = if use_test_mode {
-                wax_bench_runner::run_benchmark_samples(
-                    &mut runner,
-                    &request,
-                    sample_count,
-                    || MetricCollector::new(DeterministicClock::new(), TestMemorySampler),
-                )
+                wax_bench_runner::run_benchmark_samples(&mut runner, &request, sample_count, || {
+                    MetricCollector::new(DeterministicClock::new(), TestMemorySampler)
+                })
             } else {
-                wax_bench_runner::run_benchmark_samples(
-                    &mut runner,
-                    &request,
-                    sample_count,
-                    || MetricCollector::new(SystemClock::new(), UnavailableMemorySampler),
-                )
+                wax_bench_runner::run_benchmark_samples(&mut runner, &request, sample_count, || {
+                    MetricCollector::new(SystemClock::new(), UnavailableMemorySampler)
+                })
             }
             .map_err(|error| error.to_string())?;
             let artifact_dir = std::env::var("WAX_BENCH_ARTIFACT_DIR")
                 .unwrap_or_else(|_| "artifacts/latest".to_owned());
-            write_run_bundle(PathBuf::from(artifact_dir).as_path(), "run-local", &benchmark_id, &measured)
-                .map_err(|error| error.to_string())?;
+            write_run_bundle(
+                PathBuf::from(artifact_dir).as_path(),
+                "run-local",
+                &benchmark_id,
+                &manifest.checksums.fairness_fingerprint,
+                &measured,
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(())
+        }
+        Some(Command::Reduce { input, baseline }) => {
+            let report = reduce_run_dir(input.as_path(), baseline.as_deref())
+                .map_err(|error| error.message)?;
+            std::fs::write(
+                input.join("reduced-summary.json"),
+                serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            println!("{}", report.markdown);
             Ok(())
         }
         None => Ok(()),

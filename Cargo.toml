@@ -11,6 +11,7 @@ members = [
   "crates/wax-bench-metrics",
   "crates/wax-bench-model",
   "crates/wax-bench-packer",
+  "crates/wax-bench-reducer",
   "crates/wax-bench-runner",
 ]
 resolver = "2"
@@ -24,6 +25,7 @@ wax-bench-artifacts = { path = "crates/wax-bench-artifacts" }
 wax-bench-model = { path = "crates/wax-bench-model" }
 wax-bench-metrics = { path = "crates/wax-bench-metrics" }
 wax-bench-packer = { path = "crates/wax-bench-packer" }
+wax-bench-reducer = { path = "crates/wax-bench-reducer" }
 wax-bench-runner = { path = "crates/wax-bench-runner" }
 
 [[test]]
@@ -61,3 +63,7 @@ path = "tests/contracts/metric_slice_contract.rs"
 [[test]]
 name = "local_e2e_smoke"
 path = "tests/contracts/local_e2e_smoke.rs"
+
+[[test]]
+name = "reducer_contract"
+path = "tests/contracts/reducer_contract.rs"

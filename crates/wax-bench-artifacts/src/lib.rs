@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use wax_bench_metrics::{MemoryReading, SampleMetrics};
@@ -42,6 +42,7 @@ pub struct SampleArtifact {
 pub struct RunSummaryArtifact {
     pub run_id: String,
     pub benchmark: BenchmarkId,
+    pub fairness_fingerprint: String,
     pub sample_count: u32,
     pub p50_total_ttfq_ms: MetricValue<f64>,
     pub p95_total_ttfq_ms: MetricValue<f64>,
@@ -50,11 +51,14 @@ pub struct RunSummaryArtifact {
 
 pub fn render_markdown_summary(summary: &RunSummaryArtifact) -> String {
     format!(
-        "# Benchmark Summary\n\n- Run: {}\n- Dataset: {}\n- Workload: {}\n- Samples: {}\n",
+        "# Benchmark Summary\n\n- Run: {}\n- Dataset: {}\n- Workload: {}\n- Samples: {}\n- p50 total_ttfq_ms: {}\n- p95 total_ttfq_ms: {}\n- p99 total_ttfq_ms: {}\n",
         summary.run_id,
         summary.benchmark.dataset_id,
         summary.benchmark.workload_id,
-        summary.sample_count
+        summary.sample_count,
+        metric_value_label(&summary.p50_total_ttfq_ms),
+        metric_value_label(&summary.p95_total_ttfq_ms),
+        metric_value_label(&summary.p99_total_ttfq_ms)
     )
 }
 
@@ -62,6 +66,7 @@ pub fn write_run_bundle(
     out_dir: &Path,
     run_id: &str,
     benchmark: &BenchmarkId,
+    fairness_fingerprint: &str,
     measured_runs: &[SampleMetrics],
 ) -> Result<(), String> {
     fs::create_dir_all(out_dir).map_err(|error| error.to_string())?;
@@ -76,9 +81,7 @@ pub fn write_run_bundle(
             },
             metrics: SampleMetricSlices {
                 container_open_ms: MetricValue::available(metrics.container_open_ms as f64),
-                metadata_readiness_ms: MetricValue::available(
-                    metrics.metadata_readiness_ms as f64,
-                ),
+                metadata_readiness_ms: MetricValue::available(metrics.metadata_readiness_ms as f64),
                 total_ttfq_ms: MetricValue::available(metrics.total_ttfq_ms as f64),
             },
             resident_memory_bytes: memory_metric(&metrics.resident_memory_bytes),
@@ -92,21 +95,48 @@ pub fn write_run_bundle(
         sample_artifacts.push(artifact);
     }
 
-    let summary = build_run_summary(run_id, benchmark, &sample_artifacts);
+    let summary = build_run_summary(run_id, benchmark, fairness_fingerprint, &sample_artifacts);
     fs::write(
         out_dir.join("summary.json"),
         serde_json::to_string_pretty(&summary).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
-    fs::write(out_dir.join("summary.md"), render_markdown_summary(&summary))
-        .map_err(|error| error.to_string())?;
+    fs::write(
+        out_dir.join("summary.md"),
+        render_markdown_summary(&summary),
+    )
+    .map_err(|error| error.to_string())?;
 
     Ok(())
+}
+
+pub fn read_sample_artifact(path: &Path) -> Result<SampleArtifact, String> {
+    read_json(path)
+}
+
+pub fn read_run_summary(path: &Path) -> Result<RunSummaryArtifact, String> {
+    read_json(path)
+}
+
+pub fn list_sample_artifact_paths(run_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(run_dir).map_err(|error| error.to_string())? {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with("sample-") && name.ends_with(".json") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
 }
 
 fn build_run_summary(
     run_id: &str,
     benchmark: &BenchmarkId,
+    fairness_fingerprint: &str,
     sample_artifacts: &[SampleArtifact],
 ) -> RunSummaryArtifact {
     let mut totals: Vec<f64> = sample_artifacts
@@ -121,6 +151,7 @@ fn build_run_summary(
     RunSummaryArtifact {
         run_id: run_id.to_owned(),
         benchmark: benchmark.clone(),
+        fairness_fingerprint: fairness_fingerprint.to_owned(),
         sample_count: sample_artifacts.len() as u32,
         p50_total_ttfq_ms: percentile_metric(&totals, 0.50, 1),
         p95_total_ttfq_ms: percentile_metric(&totals, 0.95, 1),
@@ -142,4 +173,19 @@ fn memory_metric(reading: &MemoryReading) -> MetricValue<u64> {
         MemoryReading::Available { value } => MetricValue::available(*value),
         MemoryReading::Unavailable { reason } => MetricValue::unavailable(reason.clone()),
     }
+}
+
+fn metric_value_label(value: &MetricValue<f64>) -> String {
+    match value {
+        MetricValue::Available { value } => format!("{value:.3}"),
+        MetricValue::Unavailable { reason } => format!("unavailable ({reason})"),
+    }
+}
+
+fn read_json<T>(path: &Path) -> Result<T, String>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    serde_json::from_str(&text).map_err(|error| error.to_string())
 }

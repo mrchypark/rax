@@ -10,5 +10,6 @@ serde_json = "1.0.145"
 wax-bench-artifacts = { path = "../wax-bench-artifacts" }
 wax-bench-metrics = { path = "../wax-bench-metrics" }
 wax-bench-packer = { path = "../wax-bench-packer" }
+wax-bench-reducer = { path = "../wax-bench-reducer" }
 wax-bench-model = { path = "../wax-bench-model" }
 wax-bench-runner = { path = "../wax-bench-runner" }

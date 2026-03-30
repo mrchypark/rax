@@ -22,7 +22,10 @@ fn sample_artifact_serializes_identity_and_explicit_missing_metrics() {
     };
 
     let value = serde_json::to_value(&artifact).unwrap();
-    assert_eq!(value["benchmark_id"]["dataset_id"], "knowledge-small-clean-v1");
+    assert_eq!(
+        value["benchmark_id"]["dataset_id"],
+        "knowledge-small-clean-v1"
+    );
     assert_eq!(value["metrics"]["container_open_ms"]["status"], "available");
     assert_eq!(value["metrics"]["total_ttfq_ms"]["status"], "unavailable");
     assert_eq!(
@@ -40,13 +43,15 @@ fn run_summary_matches_expected_fixture() {
             workload_id: "container_open".to_owned(),
             sample_index: 0,
         },
+        fairness_fingerprint: "sha256:fairness-a".to_owned(),
         sample_count: 3,
         p50_total_ttfq_ms: MetricValue::available(6.1),
         p95_total_ttfq_ms: MetricValue::available(7.4),
         p99_total_ttfq_ms: MetricValue::unavailable("insufficient_samples"),
     };
 
-    let expected = fs::read_to_string("fixtures/bench/expected-artifacts/sample-summary.json").unwrap();
+    let expected =
+        fs::read_to_string("fixtures/bench/expected-artifacts/sample-summary.json").unwrap();
     let actual = serde_json::to_string_pretty(&summary).unwrap();
 
     assert_eq!(actual.trim_end(), expected.trim_end());

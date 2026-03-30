@@ -5,6 +5,7 @@
     "workload_id": "container_open",
     "sample_index": 0
   },
+  "fairness_fingerprint": "sha256:fairness-a",
   "sample_count": 3,
   "p50_total_ttfq_ms": {
     "status": "available",
