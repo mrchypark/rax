@@ -1,7 +1,7 @@
 use std::fs;
 
 use tempfile::tempdir;
-use wax_bench_model::{MountRequest, OpenRequest, SearchRequest, WaxEngine};
+use wax_bench_model::{DatasetPackManifest, MountRequest, OpenRequest, SearchRequest, WaxEngine};
 use wax_bench_packer::{pack_dataset, PackRequest};
 use wax_bench_text_engine::PackedTextEngine;
 
@@ -146,6 +146,78 @@ fn packed_engine_uses_vector_sidecars_without_docs_file() {
     ))
     .unwrap();
     fs::remove_file(dataset_dir.path().join("docs.ndjson")).unwrap();
+
+    let mut engine = PackedTextEngine::default();
+    engine
+        .mount(MountRequest {
+            store_path: dataset_dir.path().to_path_buf(),
+        })
+        .unwrap();
+    engine.open(OpenRequest).unwrap();
+
+    let first = engine
+        .search(SearchRequest {
+            query_text: "__ttfq_vector__".to_owned(),
+        })
+        .unwrap();
+
+    assert_eq!(first.hits.first().map(String::as_str), Some("doc-002"));
+}
+
+#[test]
+fn packed_engine_uses_persisted_vector_lane_without_document_id_sidecar() {
+    let dataset_dir = tempdir().unwrap();
+    pack_dataset(&PackRequest::new(
+        "fixtures/bench/source/minimal",
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+    fs::remove_file(dataset_dir.path().join("docs.ndjson")).unwrap();
+    fs::remove_file(dataset_dir.path().join("document_ids.jsonl")).unwrap();
+
+    let mut engine = PackedTextEngine::default();
+    engine
+        .mount(MountRequest {
+            store_path: dataset_dir.path().to_path_buf(),
+        })
+        .unwrap();
+    engine.open(OpenRequest).unwrap();
+
+    let first = engine
+        .search(SearchRequest {
+            query_text: "__ttfq_vector__".to_owned(),
+        })
+        .unwrap();
+
+    assert_eq!(first.hits.first().map(String::as_str), Some("doc-002"));
+}
+
+#[test]
+fn packed_engine_falls_back_to_documents_when_old_pack_has_no_vector_skeleton_or_document_ids() {
+    let dataset_dir = tempdir().unwrap();
+    pack_dataset(&PackRequest::new(
+        "fixtures/bench/source/minimal",
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+
+    let manifest_path = dataset_dir.path().join("manifest.json");
+    let mut manifest: DatasetPackManifest =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest.files.retain(|file| {
+        file.kind != "document_ids" && file.kind != "vector_lane_skeleton"
+    });
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    fs::remove_file(dataset_dir.path().join("document_ids.jsonl")).unwrap();
+    fs::remove_file(dataset_dir.path().join("vector_lane.skel")).unwrap();
 
     let mut engine = PackedTextEngine::default();
     engine

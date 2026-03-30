@@ -1,11 +1,15 @@
 use std::collections::HashMap;
+use std::fs::File;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use bytemuck::try_cast_slice;
+use memmap2::{Mmap, MmapOptions};
 use serde::Deserialize;
 use wax_bench_model::{
+    build_vector_lane_skeleton, parse_vector_lane_skeleton_header, vector_lane_doc_id_offsets,
     DatasetPackManifest, EnginePhase, EngineStats, MountRequest, OpenRequest, OpenResult,
-    SearchRequest, SearchResult, WaxEngine,
+    SearchRequest, SearchResult, VectorLaneSkeletonHeader, WaxEngine,
 };
 
 #[derive(Debug, Default)]
@@ -155,9 +159,26 @@ struct VectorLane {
     first_vector_top_k: usize,
     first_hybrid_query: Option<Vec<f32>>,
     first_hybrid_top_k: usize,
-    doc_ids: Vec<String>,
-    doc_vectors: Vec<f32>,
+    doc_ids: ByteStorage,
+    skeleton_header: VectorLaneSkeletonHeader,
+    doc_id_offsets: Vec<u64>,
+    doc_vectors: Mmap,
     dimensions: usize,
+}
+
+#[derive(Debug)]
+enum ByteStorage {
+    Mapped(Mmap),
+    Owned(Vec<u8>),
+}
+
+impl ByteStorage {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Mapped(bytes) => bytes.as_ref(),
+            Self::Owned(bytes) => bytes.as_slice(),
+        }
+    }
 }
 
 impl TextLane {
@@ -225,9 +246,7 @@ impl VectorLane {
             .files
             .iter()
             .find(|file| file.kind == "document_ids")
-            .map(|file| mount_root.join(&file.path))
-            .ok_or_else(|| "document_ids file missing from manifest".to_owned())?;
-        let doc_ids = load_document_ids(&document_ids_path)?;
+            .map(|file| mount_root.join(&file.path));
 
         let document_vectors_path = manifest
             .files
@@ -246,9 +265,20 @@ impl VectorLane {
         }
 
         let dimensions = manifest.vector_profile.embedding_dimensions as usize;
-        let document_vector_bytes =
-            fs::read(&document_vectors_path).map_err(|error| error.to_string())?;
-        let doc_vectors = load_document_vectors(&document_vector_bytes, dimensions)?;
+        let doc_count = manifest.corpus.vector_count as usize;
+        let doc_ids =
+            load_vector_lane_skeleton(mount_root, manifest, dimensions as u32, document_ids_path)?;
+        let skeleton_header = parse_vector_lane_skeleton_header(doc_ids.as_slice())?;
+        if skeleton_header.dimensions as usize != dimensions {
+            return Err("vector lane skeleton dimensions do not match manifest".to_owned());
+        }
+        if skeleton_header.doc_count as usize != doc_count {
+            return Err("vector lane skeleton doc_count does not match manifest".to_owned());
+        }
+        let doc_id_offsets = vector_lane_doc_id_offsets(doc_ids.as_slice(), &skeleton_header)?;
+
+        let doc_vectors = map_read_only(&document_vectors_path)?;
+        validate_document_vectors(doc_vectors.as_ref(), dimensions, doc_count)?;
         let first_vector_query = load_first_vector_query(&query_vectors_path)?;
         let first_hybrid_query = load_first_hybrid_vector_query(&query_vectors_path)?;
 
@@ -258,6 +288,8 @@ impl VectorLane {
             first_hybrid_query: first_hybrid_query.as_ref().map(|query| query.vector.clone()),
             first_hybrid_top_k: first_hybrid_query.map(|query| query.top_k).unwrap_or(0),
             doc_ids,
+            skeleton_header,
+            doc_id_offsets,
             doc_vectors,
             dimensions,
         })
@@ -276,16 +308,55 @@ impl VectorLane {
             return Vec::new();
         }
 
-        let mut hits = Vec::with_capacity(limit.min(self.doc_ids.len()));
-        for (index, vector) in self.doc_vectors.chunks_exact(self.dimensions).enumerate() {
+        let mut hits = Vec::with_capacity(limit.min(self.skeleton_header.doc_count as usize));
+        let vector_values =
+            try_cast_slice::<u8, f32>(self.doc_vectors.as_ref()).expect("validated vector mmap");
+        for (index, vector) in vector_values.chunks_exact(self.dimensions).enumerate() {
             let score = dot_product(query, vector);
-            collect_top_hit(&mut hits, limit, index, score, &self.doc_ids);
+            self.collect_top_hit(&mut hits, limit, index, score);
         }
 
-        hits.sort_by(|left, right| compare_hits(*left, *right, &self.doc_ids));
+        hits.sort_by(|left, right| self.compare_hits(*left, *right));
         hits.into_iter()
-            .map(|(index, _)| self.doc_ids[index].clone())
+            .map(|(index, _)| self.doc_id(index).to_owned())
             .collect()
+    }
+
+    fn collect_top_hit(&self, hits: &mut Vec<(usize, f32)>, limit: usize, index: usize, score: f32) {
+        let candidate = (index, score);
+        if hits.len() < limit {
+            hits.push(candidate);
+            return;
+        }
+
+        let Some((worst_index, worst_hit)) = hits
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| self.compare_hits(*left, *right))
+        else {
+            return;
+        };
+
+        if self.compare_hits(candidate, worst_hit).is_lt() {
+            hits[worst_index] = candidate;
+        }
+    }
+
+    fn compare_hits(&self, left: (usize, f32), right: (usize, f32)) -> std::cmp::Ordering {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| self.doc_id(left.0).cmp(self.doc_id(right.0)))
+    }
+
+    fn doc_id(&self, index: usize) -> &str {
+        let start = self.doc_id_offsets[index] as usize;
+        let end = self.doc_id_offsets[index + 1] as usize;
+        let blob_base = self.skeleton_header.doc_id_blob_offset as usize;
+        let blob = &self.doc_ids.as_slice()
+            [blob_base..blob_base + self.skeleton_header.doc_id_blob_length as usize];
+        std::str::from_utf8(&blob[start..end]).expect("validated vector lane skeleton")
     }
 }
 
@@ -396,18 +467,19 @@ struct FirstTextQuery {
     top_k: usize,
 }
 
-fn load_document_vectors(bytes: &[u8], dimensions: usize) -> Result<Vec<f32>, String> {
+fn validate_document_vectors(bytes: &[u8], dimensions: usize, doc_count: usize) -> Result<(), String> {
     if dimensions == 0 {
-        return Ok(Vec::new());
+        return Ok(());
     }
     if !bytes.len().is_multiple_of(dimensions * 4) {
         return Err("document vector payload has invalid length".to_owned());
     }
-
-    Ok(bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect())
+    let values = try_cast_slice::<u8, f32>(bytes)
+        .map_err(|_| "document vector payload alignment is invalid".to_owned())?;
+    if values.len() != doc_count * dimensions {
+        return Err("document vector payload row count does not match manifest".to_owned());
+    }
+    Ok(())
 }
 
 fn load_first_vector_query(paths: &[PathBuf]) -> Result<FirstVectorQuery, String> {
@@ -446,33 +518,6 @@ fn load_first_hybrid_vector_query(paths: &[PathBuf]) -> Result<Option<FirstVecto
     Ok(None)
 }
 
-fn collect_top_hit(
-    hits: &mut Vec<(usize, f32)>,
-    limit: usize,
-    index: usize,
-    score: f32,
-    doc_ids: &[String],
-) {
-    let candidate = (index, score);
-    if hits.len() < limit {
-        hits.push(candidate);
-        return;
-    }
-
-    let Some((worst_index, worst_hit)) = hits
-        .iter()
-        .copied()
-        .enumerate()
-        .max_by(|(_, left), (_, right)| compare_hits(*left, *right, doc_ids))
-    else {
-        return;
-    };
-
-    if compare_hits(candidate, worst_hit, doc_ids).is_lt() {
-        hits[worst_index] = candidate;
-    }
-}
-
 fn search_first_hybrid_query(text_lane: &TextLane, vector_lane: &VectorLane) -> Vec<String> {
     let Some(hybrid_text_query) = text_lane.first_hybrid_query.as_ref() else {
         return Vec::new();
@@ -509,13 +554,53 @@ fn fuse_ranked_hits(text_hits: &[String], vector_hits: &[String], limit: usize) 
     fused.into_iter().take(limit).map(|(doc_id, _)| doc_id).collect()
 }
 
-fn compare_hits(left: (usize, f32), right: (usize, f32), doc_ids: &[String]) -> std::cmp::Ordering {
-    right
-        .1
-        .total_cmp(&left.1)
-        .then_with(|| doc_ids[left.0].cmp(&doc_ids[right.0]))
-}
-
 fn dot_product(left: &[f32], right: &[f32]) -> f32 {
     left.iter().zip(right).map(|(l, r)| l * r).sum()
+}
+
+fn load_vector_lane_skeleton(
+    mount_root: &Path,
+    manifest: &DatasetPackManifest,
+    dimensions: u32,
+    fallback_document_ids_path: Option<PathBuf>,
+) -> Result<ByteStorage, String> {
+    if let Some(path) = manifest
+        .files
+        .iter()
+        .find(|file| file.kind == "vector_lane_skeleton")
+        .map(|file| mount_root.join(&file.path))
+    {
+        return map_read_only(&path).map(ByteStorage::Mapped);
+    }
+
+    let doc_ids = if let Some(document_ids_path) = fallback_document_ids_path {
+        load_document_ids(&document_ids_path)?
+    } else {
+        let documents_path = mount_root.join("docs.ndjson");
+        load_document_ids_from_documents(&documents_path)?
+    };
+    Ok(ByteStorage::Owned(build_vector_lane_skeleton(&doc_ids, dimensions)))
+}
+
+fn map_read_only(path: &Path) -> Result<Mmap, String> {
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    // Read-only mappings let the first query use persisted lane state without heap rebuild.
+    unsafe { MmapOptions::new().map(&file) }.map_err(|error| error.to_string())
+}
+
+fn load_document_ids_from_documents(path: &Path) -> Result<Vec<String>, String> {
+    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<DocumentRecord>(line)
+                .map(|record| record.doc_id)
+                .map_err(|error| error.to_string())
+        })
+        .collect()
+}
+
+#[derive(Debug, Deserialize)]
+struct DocumentRecord {
+    doc_id: String,
 }

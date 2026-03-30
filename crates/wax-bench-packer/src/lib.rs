@@ -5,10 +5,10 @@ use std::path::{Component, Path, PathBuf};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use wax_bench_model::{
-    CorpusProfile, DatasetIdentity, DatasetPackManifest, DifficultyDistribution, DirtyProfile,
-    EnvironmentConstraints, LanguageShare, LengthBuckets, ManifestChecksums, ManifestFile,
-    ManifestGenerator, MetadataProfile, QuerySetEntry, QueryVectorProfile, SegmentTopologyEntry,
-    TextProfile, VectorProfile,
+    build_vector_lane_skeleton, CorpusProfile, DatasetIdentity, DatasetPackManifest,
+    DifficultyDistribution, DirtyProfile, EnvironmentConstraints, LanguageShare, LengthBuckets,
+    ManifestChecksums, ManifestFile, ManifestGenerator, MetadataProfile, QuerySetEntry,
+    QueryVectorProfile, SegmentTopologyEntry, TextProfile, VectorProfile,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +108,26 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
         "f32le-row-major",
         document_records.len() as u64,
         &document_vector_bytes,
+    ));
+    let vector_lane_skeleton_bytes = build_vector_lane_skeleton(
+        &document_records
+            .iter()
+            .map(|record| record.doc_id.clone())
+            .collect::<Vec<_>>(),
+        dimensions,
+    );
+    let vector_lane_skeleton_path = "vector_lane.skel";
+    fs::write(
+        request.out_dir.join(vector_lane_skeleton_path),
+        &vector_lane_skeleton_bytes,
+    )
+    .map_err(|_| PackError::new("failed to write vector lane skeleton"))?;
+    files.push(build_manifest_file(
+        vector_lane_skeleton_path,
+        "vector_lane_skeleton",
+        "wax-vector-lane-skeleton-v1",
+        document_records.len() as u64,
+        &vector_lane_skeleton_bytes,
     ));
 
     for source_query_set in source_query_sets {
@@ -722,6 +742,7 @@ fn validate_file_references(manifest: &DatasetPackManifest) -> Result<(), Valida
                 | "text_postings"
                 | "document_ids"
                 | "document_vectors"
+                | "vector_lane_skeleton"
                 | "query_vectors"
                 | "prebuilt_store"
         ) {

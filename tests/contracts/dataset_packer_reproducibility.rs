@@ -106,6 +106,20 @@ fn dataset_packer_emits_sidecar_artifacts_for_text_and_vector_lanes() {
 }
 
 #[test]
+fn dataset_packer_emits_persisted_vector_lane_skeleton() {
+    let source = Path::new("fixtures/bench/source/minimal");
+    let out_dir = tempdir().unwrap();
+
+    let manifest = pack_dataset(&PackRequest::new(source, out_dir.path(), "small", "clean")).unwrap();
+
+    assert!(manifest
+        .files
+        .iter()
+        .any(|file| file.kind == "vector_lane_skeleton"));
+    assert!(out_dir.path().join("vector_lane.skel").exists());
+}
+
+#[test]
 fn dataset_packer_rejects_vector_enabled_source_without_vector_query() {
     let source_dir = tempdir().unwrap();
     let out_dir = tempdir().unwrap();
