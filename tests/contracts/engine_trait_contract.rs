@@ -89,14 +89,14 @@ fn engine_trait_supports_runner_lifecycle_surface() {
 
     let unopened = DummyEngine::default();
     let mut unopened = unopened;
-    assert!(unopened.open(OpenRequest::default()).is_err());
+    assert!(unopened.open(OpenRequest).is_err());
     let unopened_stats = unopened.get_stats();
 
     assert_eq!(unopened_stats.phase, EnginePhase::New);
     assert_eq!(unopened_stats.last_mounted_path, None);
 
-    let open = engine.open(OpenRequest::default()).unwrap();
-    assert!(engine.open(OpenRequest::default()).is_err());
+    let open = engine.open(OpenRequest).unwrap();
+    assert!(engine.open(OpenRequest).is_err());
     let stats_after_failed_reopen = engine.get_stats();
     let search = engine
         .search(SearchRequest {

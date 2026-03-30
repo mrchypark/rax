@@ -347,16 +347,20 @@ impl VectorLane {
         right
             .1
             .total_cmp(&left.1)
-            .then_with(|| self.doc_id(left.0).cmp(self.doc_id(right.0)))
+            .then_with(|| self.doc_id_bytes(left.0).cmp(self.doc_id_bytes(right.0)))
     }
 
     fn doc_id(&self, index: usize) -> &str {
+        std::str::from_utf8(self.doc_id_bytes(index)).expect("validated vector lane skeleton")
+    }
+
+    fn doc_id_bytes(&self, index: usize) -> &[u8] {
         let start = self.doc_id_offsets[index] as usize;
         let end = self.doc_id_offsets[index + 1] as usize;
         let blob_base = self.skeleton_header.doc_id_blob_offset as usize;
         let blob = &self.doc_ids.as_slice()
             [blob_base..blob_base + self.skeleton_header.doc_id_blob_length as usize];
-        std::str::from_utf8(&blob[start..end]).expect("validated vector lane skeleton")
+        &blob[start..end]
     }
 }
 
