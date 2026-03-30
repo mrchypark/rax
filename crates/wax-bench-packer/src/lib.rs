@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -72,6 +72,28 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
         document_stats.doc_count,
         &document_bytes,
     )];
+    let document_id_bytes = build_document_id_payload(&document_records)
+        .map_err(|_| PackError::new("failed to serialize document id payload"))?;
+    fs::write(request.out_dir.join("document_ids.jsonl"), &document_id_bytes)
+        .map_err(|_| PackError::new("failed to write document id payload"))?;
+    files.push(build_manifest_file(
+        "document_ids.jsonl",
+        "document_ids",
+        "jsonl",
+        document_records.len() as u64,
+        &document_id_bytes,
+    ));
+    let text_posting_bytes = build_text_postings_payload(&document_records)
+        .map_err(|_| PackError::new("failed to serialize text postings payload"))?;
+    fs::write(request.out_dir.join("text_postings.jsonl"), &text_posting_bytes)
+        .map_err(|_| PackError::new("failed to write text postings payload"))?;
+    files.push(build_manifest_file(
+        "text_postings.jsonl",
+        "text_postings",
+        "jsonl",
+        non_empty_line_count(&text_posting_bytes),
+        &text_posting_bytes,
+    ));
     let mut query_sets = Vec::new();
     let mut logical_query_hasher = Sha256::new();
     let mut vector_payload_hasher = Sha256::new();
@@ -467,6 +489,7 @@ fn build_query_vector_payload(bytes: &[u8], dimensions: u32) -> Result<Vec<u8>, 
     for record in load_query_vector_stubs(bytes)? {
         let payload = QueryVectorRecord {
             query_id: record.query_id,
+            top_k: record.top_k,
             vector: embed_text(&record.query_text, dimensions),
             lane_eligibility: record.lane_eligibility,
             query_text: record.query_text,
@@ -696,6 +719,8 @@ fn validate_file_references(manifest: &DatasetPackManifest) -> Result<(), Valida
                 | "metadata"
                 | "query_set"
                 | "ground_truth"
+                | "text_postings"
+                | "document_ids"
                 | "document_vectors"
                 | "query_vectors"
                 | "prebuilt_store"
@@ -883,6 +908,7 @@ struct QueryDefinitionStub {
 struct QueryVectorStub {
     query_id: String,
     query_text: String,
+    top_k: u32,
     lane_eligibility: QueryLaneEligibility,
 }
 
@@ -897,6 +923,7 @@ struct QueryLaneEligibility {
 struct QueryVectorRecord {
     query_id: String,
     query_text: String,
+    top_k: u32,
     vector: Vec<f32>,
     lane_eligibility: QueryLaneEligibility,
 }
@@ -908,7 +935,19 @@ struct GroundTruthStub {
 
 #[derive(Deserialize)]
 struct DocumentStub {
+    doc_id: String,
     text: String,
+}
+
+#[derive(serde::Serialize)]
+struct DocumentIdRecord<'a> {
+    doc_id: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct TextPostingRecord {
+    token: String,
+    doc_ids: Vec<String>,
 }
 
 fn non_empty_line_count(bytes: &[u8]) -> u64 {
@@ -927,6 +966,38 @@ fn load_query_vector_stubs(bytes: &[u8]) -> Result<Vec<QueryVectorStub>, PackErr
                 .map_err(|_| PackError::new("query_set file contains invalid json"))
         })
         .collect()
+}
+
+fn build_document_id_payload(records: &[DocumentStub]) -> Result<Vec<u8>, serde_json::Error> {
+    let mut out = Vec::new();
+    for record in records {
+        let line = serde_json::to_string(&DocumentIdRecord {
+            doc_id: &record.doc_id,
+        })?;
+        out.extend_from_slice(line.as_bytes());
+        out.push(b'\n');
+    }
+    Ok(out)
+}
+
+fn build_text_postings_payload(records: &[DocumentStub]) -> Result<Vec<u8>, serde_json::Error> {
+    let mut postings: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for record in records {
+        let mut seen = HashSet::new();
+        for token in tokenize(&record.text) {
+            if seen.insert(token.clone()) {
+                postings.entry(token).or_default().push(record.doc_id.clone());
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for (token, doc_ids) in postings {
+        let line = serde_json::to_string(&TextPostingRecord { token, doc_ids })?;
+        out.extend_from_slice(line.as_bytes());
+        out.push(b'\n');
+    }
+    Ok(out)
 }
 
 fn embed_text(text: &str, dimensions: u32) -> Vec<f32> {
@@ -957,4 +1028,11 @@ fn embed_text(text: &str, dimensions: u32) -> Vec<f32> {
     }
 
     vector
+}
+
+fn tokenize(text: &str) -> Vec<String> {
+    text.split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
 }

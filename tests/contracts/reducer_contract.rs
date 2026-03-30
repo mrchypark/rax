@@ -19,7 +19,7 @@ fn reducer_computes_percentiles_from_sample_bundle() {
             sample_index: 0,
         },
         "sha256:fairness-a",
-        &[sample(1), sample(2), sample(3), sample(4), sample(5)],
+        &[sample(1.0), sample(2.0), sample(3.0), sample(4.0), sample(5.0)],
     )
     .unwrap();
 
@@ -53,7 +53,7 @@ fn reducer_detects_and_rejects_fairness_mismatch() {
             sample_index: 0,
         },
         "sha256:fairness-a",
-        &[sample(3)],
+        &[sample(3.0)],
     )
     .unwrap();
     write_run_bundle(
@@ -65,7 +65,7 @@ fn reducer_detects_and_rejects_fairness_mismatch() {
             sample_index: 0,
         },
         "sha256:fairness-b",
-        &[sample(2)],
+        &[sample(2.0)],
     )
     .unwrap();
 
@@ -142,7 +142,7 @@ fn reducer_rejects_inconsistent_sample_bundle() {
             sample_index: 0,
         },
         "sha256:fairness-a",
-        &[sample(3)],
+        &[sample(3.0)],
     )
     .unwrap();
 
@@ -160,10 +160,10 @@ fn reducer_rejects_inconsistent_sample_bundle() {
     );
 }
 
-fn sample(total_ttfq_ms: u64) -> SampleMetrics {
+fn sample(total_ttfq_ms: f64) -> SampleMetrics {
     SampleMetrics {
-        container_open_ms: 1,
-        metadata_readiness_ms: 1,
+        container_open_ms: 1.0,
+        metadata_readiness_ms: 1.0,
         total_ttfq_ms,
         resident_memory_bytes: MemoryReading::Unavailable {
             reason: "test".to_owned(),

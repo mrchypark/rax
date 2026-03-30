@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -109,14 +109,12 @@ impl WaxEngine for PackedTextEngine {
         }
 
         let lane = self.ensure_text_lane()?;
-        let query_text = if request.query_text == "__ttfq_text__" {
-            lane.first_text_query.clone()
+        let hits = if request.query_text == "__ttfq_text__" {
+            lane.search_first_text_query()
         } else {
-            request.query_text
+            lane.search(&request.query_text)
         };
-        Ok(SearchResult {
-            hits: lane.search(&query_text),
-        })
+        Ok(SearchResult { hits })
     }
 
     fn get_stats(&self) -> EngineStats {
@@ -130,85 +128,81 @@ impl WaxEngine for PackedTextEngine {
 #[derive(Debug)]
 struct TextLane {
     first_text_query: String,
-    docs: Vec<DocumentRecord>,
-    inverted: HashMap<String, Vec<usize>>,
+    first_text_top_k: usize,
+    inverted: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug)]
 struct VectorLane {
     first_vector_query: Vec<f32>,
+    first_vector_top_k: usize,
     doc_ids: Vec<String>,
     doc_vectors: Vec<Vec<f32>>,
 }
 
 impl TextLane {
     fn load(mount_root: &Path, manifest: &DatasetPackManifest) -> Result<Self, String> {
-        let docs_path = manifest
+        let postings_path = manifest
             .files
             .iter()
-            .find(|file| file.kind == "documents")
+            .find(|file| file.kind == "text_postings")
             .map(|file| mount_root.join(&file.path))
-            .ok_or_else(|| "documents file missing from manifest".to_owned())?;
-        let query_path = manifest
+            .ok_or_else(|| "text_postings file missing from manifest".to_owned())?;
+        let query_paths = manifest
             .query_sets
-            .first()
+            .iter()
             .map(|query_set| mount_root.join(&query_set.path))
-            .ok_or_else(|| "query_set missing from manifest".to_owned())?;
-
-        let docs = load_documents(&docs_path)?;
-        let first_text_query = load_first_text_query(&query_path)?;
-        let mut inverted: HashMap<String, Vec<usize>> = HashMap::new();
-        for (index, doc) in docs.iter().enumerate() {
-            let mut seen = HashSet::new();
-            for token in tokenize(&doc.text) {
-                if seen.insert(token.clone()) {
-                    inverted.entry(token).or_default().push(index);
-                }
-            }
+            .collect::<Vec<_>>();
+        if query_paths.is_empty() {
+            return Err("query_set missing from manifest".to_owned());
         }
+
+        let (first_text_query, first_text_top_k) = load_first_text_query(&query_paths)?;
+        let inverted = load_text_postings(&postings_path)?;
 
         Ok(Self {
             first_text_query,
-            docs,
+            first_text_top_k,
             inverted,
         })
     }
 
+    fn search_first_text_query(&self) -> Vec<String> {
+        self.search_with_limit(&self.first_text_query, self.first_text_top_k)
+    }
+
     fn search(&self, query: &str) -> Vec<String> {
-        let mut scores: HashMap<usize, u32> = HashMap::new();
+        self.search_with_limit(query, usize::MAX)
+    }
+
+    fn search_with_limit(&self, query: &str, limit: usize) -> Vec<String> {
+        let mut scores: HashMap<String, u32> = HashMap::new();
         for token in tokenize(query) {
-            if let Some(doc_indices) = self.inverted.get(&token) {
-                for doc_index in doc_indices {
-                    *scores.entry(*doc_index).or_insert(0) += 1;
+            if let Some(doc_ids) = self.inverted.get(&token) {
+                for doc_id in doc_ids {
+                    *scores.entry(doc_id.clone()).or_insert(0) += 1;
                 }
             }
         }
 
-        let mut hits: Vec<(usize, u32)> = scores.into_iter().collect();
-        hits.sort_by(|left, right| {
-            right
-                .1
-                .cmp(&left.1)
-                .then_with(|| self.docs[left.0].doc_id.cmp(&self.docs[right.0].doc_id))
-        });
+        let mut hits: Vec<(String, u32)> = scores.into_iter().collect();
+        hits.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
         hits.into_iter()
-            .map(|(doc_index, _)| self.docs[doc_index].doc_id.clone())
+            .take(limit)
+            .map(|(doc_id, _)| doc_id)
             .collect()
     }
 }
 
 impl VectorLane {
     fn load(mount_root: &Path, manifest: &DatasetPackManifest) -> Result<Self, String> {
-        let docs_path = manifest
+        let document_ids_path = manifest
             .files
             .iter()
-            .find(|file| file.kind == "documents")
+            .find(|file| file.kind == "document_ids")
             .map(|file| mount_root.join(&file.path))
-            .ok_or_else(|| "documents file missing from manifest".to_owned())?;
-        let doc_ids = load_documents(&docs_path)?
-            .into_iter()
-            .map(|record| record.doc_id)
-            .collect::<Vec<_>>();
+            .ok_or_else(|| "document_ids file missing from manifest".to_owned())?;
+        let doc_ids = load_document_ids(&document_ids_path)?;
 
         let document_vectors_path = manifest
             .files
@@ -233,50 +227,66 @@ impl VectorLane {
         let first_vector_query = load_first_vector_query(&query_vectors_path)?;
 
         Ok(Self {
-            first_vector_query,
+            first_vector_query: first_vector_query.vector,
+            first_vector_top_k: first_vector_query.top_k,
             doc_ids,
             doc_vectors,
         })
     }
 
     fn search_first_vector_query(&self) -> Vec<String> {
-        let mut hits = self
-            .doc_vectors
-            .iter()
-            .enumerate()
-            .map(|(index, vector)| (index, cosine_similarity(&self.first_vector_query, vector)))
-            .collect::<Vec<_>>();
-        hits.sort_by(|left, right| {
-            right
-                .1
-                .partial_cmp(&left.1)
-                .unwrap()
-                .then_with(|| self.doc_ids[left.0].cmp(&self.doc_ids[right.0]))
-        });
+        if self.first_vector_top_k == 0 {
+            return Vec::new();
+        }
+
+        let mut hits = Vec::new();
+        for (index, vector) in self.doc_vectors.iter().enumerate() {
+            let score = cosine_similarity(&self.first_vector_query, vector);
+            insert_ranked_hit(&mut hits, self.first_vector_top_k, index, score, &self.doc_ids);
+        }
+
         hits.into_iter()
             .map(|(index, _)| self.doc_ids[index].clone())
             .collect()
     }
 }
 
-fn load_documents(path: &Path) -> Result<Vec<DocumentRecord>, String> {
-    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    text.lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).map_err(|error| error.to_string()))
-        .collect()
-}
-
-fn load_first_text_query(path: &Path) -> Result<String, String> {
-    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        let query: QueryRecord = serde_json::from_str(line).map_err(|error| error.to_string())?;
-        if query.lane_eligibility.text {
-            return Ok(query.query_text);
+fn load_first_text_query(paths: &[PathBuf]) -> Result<(String, usize), String> {
+    for path in paths {
+        let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let query: QueryRecord =
+                serde_json::from_str(line).map_err(|error| error.to_string())?;
+            if query.lane_eligibility.text {
+                return Ok((query.query_text, query.top_k as usize));
+            }
         }
     }
 
     Err("no text-eligible query found".to_owned())
+}
+
+fn load_text_postings(path: &Path) -> Result<HashMap<String, Vec<String>>, String> {
+    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let mut postings = HashMap::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let posting: TextPostingRecord =
+            serde_json::from_str(line).map_err(|error| error.to_string())?;
+        postings.insert(posting.token, posting.doc_ids);
+    }
+    Ok(postings)
+}
+
+fn load_document_ids(path: &Path) -> Result<Vec<String>, String> {
+    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<DocumentIdRecord>(line)
+                .map(|record| record.doc_id)
+                .map_err(|error| error.to_string())
+        })
+        .collect()
 }
 
 fn tokenize(text: &str) -> Vec<String> {
@@ -286,15 +296,10 @@ fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct DocumentRecord {
-    doc_id: String,
-    text: String,
-}
-
 #[derive(Debug, Deserialize)]
 struct QueryRecord {
     query_text: String,
+    top_k: u32,
     lane_eligibility: LaneEligibility,
 }
 
@@ -306,8 +311,26 @@ struct LaneEligibility {
 
 #[derive(Debug, Deserialize)]
 struct QueryVectorRecord {
+    top_k: u32,
     vector: Vec<f32>,
     lane_eligibility: LaneEligibility,
+}
+
+#[derive(Debug, Deserialize)]
+struct DocumentIdRecord {
+    doc_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TextPostingRecord {
+    token: String,
+    doc_ids: Vec<String>,
+}
+
+#[derive(Debug)]
+struct FirstVectorQuery {
+    vector: Vec<f32>,
+    top_k: usize,
 }
 
 fn load_document_vectors(bytes: &[u8], dimensions: usize) -> Result<Vec<Vec<f32>>, String> {
@@ -328,19 +351,42 @@ fn load_document_vectors(bytes: &[u8], dimensions: usize) -> Result<Vec<Vec<f32>
         .collect())
 }
 
-fn load_first_vector_query(paths: &[PathBuf]) -> Result<Vec<f32>, String> {
+fn load_first_vector_query(paths: &[PathBuf]) -> Result<FirstVectorQuery, String> {
     for path in paths {
         let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
         for line in text.lines().filter(|line| !line.trim().is_empty()) {
             let query: QueryVectorRecord =
                 serde_json::from_str(line).map_err(|error| error.to_string())?;
             if query.lane_eligibility.vector {
-                return Ok(query.vector);
+                return Ok(FirstVectorQuery {
+                    vector: query.vector,
+                    top_k: query.top_k as usize,
+                });
             }
         }
     }
 
     Err("no vector-eligible query found".to_owned())
+}
+
+fn insert_ranked_hit(
+    hits: &mut Vec<(usize, f32)>,
+    limit: usize,
+    index: usize,
+    score: f32,
+    doc_ids: &[String],
+) {
+    hits.push((index, score));
+    hits.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap()
+            .then_with(|| doc_ids[left.0].cmp(&doc_ids[right.0]))
+    });
+    if hits.len() > limit {
+        hits.truncate(limit);
+    }
 }
 
 fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {

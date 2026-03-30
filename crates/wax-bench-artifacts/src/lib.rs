@@ -158,9 +158,9 @@ pub fn write_run_bundle_with_replay_config(
                 sample_index: index as u32,
             },
             metrics: SampleMetricSlices {
-                container_open_ms: MetricValue::available(metrics.container_open_ms as f64),
-                metadata_readiness_ms: MetricValue::available(metrics.metadata_readiness_ms as f64),
-                total_ttfq_ms: MetricValue::available(metrics.total_ttfq_ms as f64),
+                container_open_ms: MetricValue::available(metrics.container_open_ms),
+                metadata_readiness_ms: MetricValue::available(metrics.metadata_readiness_ms),
+                total_ttfq_ms: MetricValue::available(metrics.total_ttfq_ms),
             },
             resident_memory_bytes: memory_metric(&metrics.resident_memory_bytes),
         };

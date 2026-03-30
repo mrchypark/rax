@@ -134,3 +134,32 @@ fn packed_engine_finds_first_vector_query_across_multiple_query_vector_files() {
 
     assert_eq!(first.hits.first().map(String::as_str), Some("doc-002"));
 }
+
+#[test]
+fn packed_engine_uses_vector_sidecars_without_docs_file() {
+    let dataset_dir = tempdir().unwrap();
+    pack_dataset(&PackRequest::new(
+        "fixtures/bench/source/minimal",
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+    fs::remove_file(dataset_dir.path().join("docs.ndjson")).unwrap();
+
+    let mut engine = PackedTextEngine::default();
+    engine
+        .mount(MountRequest {
+            store_path: dataset_dir.path().to_path_buf(),
+        })
+        .unwrap();
+    engine.open(OpenRequest).unwrap();
+
+    let first = engine
+        .search(SearchRequest {
+            query_text: "__ttfq_vector__".to_owned(),
+        })
+        .unwrap();
+
+    assert_eq!(first.hits.first().map(String::as_str), Some("doc-002"));
+}

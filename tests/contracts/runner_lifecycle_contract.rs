@@ -226,7 +226,7 @@ impl WaxEngine for FreshOnlyEngine {
 struct FixedClock;
 
 impl MonotonicClock for FixedClock {
-    fn now_ms(&mut self) -> u64 {
+    fn now_us(&mut self) -> u64 {
         0
     }
 }

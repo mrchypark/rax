@@ -21,7 +21,7 @@ fn artifact_checksum_mismatch_is_detected() {
         "run-001",
         &benchmark_id(),
         "sha256:fairness-a",
-        &[sample(3)],
+        &[sample(3.0)],
         &replay,
     )
     .unwrap();
@@ -53,7 +53,7 @@ fn incomplete_run_is_still_readable_as_partial() {
         "run-001",
         &benchmark_id(),
         "sha256:fairness-a",
-        &[sample(3)],
+        &[sample(3.0)],
         &replay,
     )
     .unwrap();
@@ -80,7 +80,7 @@ fn run_config_can_be_replayed_exactly() {
         "run-001",
         &benchmark_id(),
         "sha256:fairness-a",
-        &[sample(3), sample(5)],
+        &[sample(3.0), sample(5.0)],
         &replay,
     )
     .unwrap();
@@ -111,10 +111,10 @@ fn replay_config(artifact_dir: &str) -> ReplayConfigArtifact {
     }
 }
 
-fn sample(total_ttfq_ms: u64) -> SampleMetrics {
+fn sample(total_ttfq_ms: f64) -> SampleMetrics {
     SampleMetrics {
-        container_open_ms: 1,
-        metadata_readiness_ms: 1,
+        container_open_ms: 1.0,
+        metadata_readiness_ms: 1.0,
         total_ttfq_ms,
         resident_memory_bytes: MemoryReading::Unavailable {
             reason: "test".to_owned(),

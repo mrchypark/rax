@@ -182,8 +182,8 @@ impl SystemClock {
 }
 
 impl MonotonicClock for SystemClock {
-    fn now_ms(&mut self) -> u64 {
-        self.start.elapsed().as_millis() as u64
+    fn now_us(&mut self) -> u64 {
+        self.start.elapsed().as_micros() as u64
     }
 }
 
@@ -205,14 +205,14 @@ struct DeterministicClock {
 impl DeterministicClock {
     fn new() -> Self {
         Self {
-            ticks: [0, 4, 8, 12],
+            ticks: [0, 4_000, 8_000, 12_000],
             index: 0,
         }
     }
 }
 
 impl MonotonicClock for DeterministicClock {
-    fn now_ms(&mut self) -> u64 {
+    fn now_us(&mut self) -> u64 {
         let value = self.ticks[self.index.min(self.ticks.len() - 1)];
         self.index += 1;
         value

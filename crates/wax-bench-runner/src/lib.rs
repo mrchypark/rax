@@ -35,7 +35,7 @@ pub struct RunTrace {
     pub search_queries: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MeasuredRun {
     pub trace: RunTrace,
     pub metrics: SampleMetrics,
@@ -71,13 +71,21 @@ where
         let measured = runner.run_with_metrics(
             request,
             &mut collector,
-            Some(CompilerOptimization::Debug),
+            Some(active_compiler_optimization()),
             Some(ThermalState::Nominal),
         )?;
         samples.push(measured.metrics);
     }
 
     Ok(samples)
+}
+
+fn active_compiler_optimization() -> CompilerOptimization {
+    if cfg!(debug_assertions) {
+        CompilerOptimization::Debug
+    } else {
+        CompilerOptimization::Release
+    }
 }
 
 impl<E> BenchmarkRunner<E>

@@ -93,6 +93,19 @@ fn dataset_packer_keeps_query_set_ids_stable_across_variants() {
 }
 
 #[test]
+fn dataset_packer_emits_sidecar_artifacts_for_text_and_vector_lanes() {
+    let source = Path::new("fixtures/bench/source/minimal");
+    let out_dir = tempdir().unwrap();
+
+    let manifest = pack_dataset(&PackRequest::new(source, out_dir.path(), "small", "clean")).unwrap();
+
+    assert!(manifest.files.iter().any(|file| file.kind == "text_postings"));
+    assert!(manifest.files.iter().any(|file| file.kind == "document_ids"));
+    assert!(out_dir.path().join("text_postings.jsonl").exists());
+    assert!(out_dir.path().join("document_ids.jsonl").exists());
+}
+
+#[test]
 fn dataset_packer_rejects_vector_enabled_source_without_vector_query() {
     let source_dir = tempdir().unwrap();
     let out_dir = tempdir().unwrap();
