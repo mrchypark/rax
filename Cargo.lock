@@ -346,6 +346,7 @@ dependencies = [
  "wax-bench-packer",
  "wax-bench-reducer",
  "wax-bench-runner",
+ "wax-bench-text-engine",
 ]
 
 [[package]]
@@ -577,6 +578,7 @@ dependencies = [
  "wax-bench-packer",
  "wax-bench-reducer",
  "wax-bench-runner",
+ "wax-bench-text-engine",
 ]
 
 [[package]]
@@ -615,6 +617,15 @@ name = "wax-bench-runner"
 version = "0.1.0"
 dependencies = [
  "wax-bench-metrics",
+ "wax-bench-model",
+]
+
+[[package]]
+name = "wax-bench-text-engine"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "wax-bench-model",
 ]
 

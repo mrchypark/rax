@@ -11,7 +11,8 @@ use wax_bench_metrics::{MemoryReading, MemorySampler, MetricCollector, Monotonic
 use wax_bench_model::{BenchmarkId, DatasetPackManifest, MaterializationMode};
 use wax_bench_packer::PackRequest;
 use wax_bench_reducer::reduce_run_dir;
-use wax_bench_runner::{BenchmarkRunner, NoopWaxEngine, RunRequest, Workload};
+use wax_bench_runner::{BenchmarkRunner, RunRequest, Workload};
+use wax_bench_text_engine::PackedTextEngine;
 
 #[derive(Debug, Parser)]
 #[command(name = "wax-bench-cli")]
@@ -89,7 +90,7 @@ fn main() -> Result<(), String> {
                 workload_id: workload_label(&workload).to_owned(),
                 sample_index: 0,
             };
-            let mut runner = BenchmarkRunner::new(NoopWaxEngine);
+            let mut runner = BenchmarkRunner::new(PackedTextEngine::default());
             let use_test_mode = std::env::var("WAX_BENCH_TEST_MODE").ok().as_deref() == Some("1");
             let request = RunRequest {
                 dataset_path: dataset,

@@ -13,6 +13,7 @@ members = [
   "crates/wax-bench-packer",
   "crates/wax-bench-reducer",
   "crates/wax-bench-runner",
+  "crates/wax-bench-text-engine",
 ]
 resolver = "2"
 
@@ -27,6 +28,7 @@ wax-bench-metrics = { path = "crates/wax-bench-metrics" }
 wax-bench-packer = { path = "crates/wax-bench-packer" }
 wax-bench-reducer = { path = "crates/wax-bench-reducer" }
 wax-bench-runner = { path = "crates/wax-bench-runner" }
+wax-bench-text-engine = { path = "crates/wax-bench-text-engine" }
 
 [[test]]
 name = "workspace_smoke"
@@ -71,3 +73,7 @@ path = "tests/contracts/reducer_contract.rs"
 [[test]]
 name = "artifact_replay_contract"
 path = "tests/contracts/artifact_replay_contract.rs"
+
+[[test]]
+name = "text_engine_contract"
+path = "tests/contracts/text_engine_contract.rs"

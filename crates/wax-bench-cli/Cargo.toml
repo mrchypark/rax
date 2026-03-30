@@ -13,3 +13,4 @@ wax-bench-packer = { path = "../wax-bench-packer" }
 wax-bench-reducer = { path = "../wax-bench-reducer" }
 wax-bench-model = { path = "../wax-bench-model" }
 wax-bench-runner = { path = "../wax-bench-runner" }
+wax-bench-text-engine = { path = "../wax-bench-text-engine" }
