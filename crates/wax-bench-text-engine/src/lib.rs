@@ -156,7 +156,8 @@ struct VectorLane {
     first_hybrid_query: Option<Vec<f32>>,
     first_hybrid_top_k: usize,
     doc_ids: Vec<String>,
-    doc_vectors: Vec<Vec<f32>>,
+    doc_vectors: Vec<f32>,
+    dimensions: usize,
 }
 
 impl TextLane {
@@ -258,6 +259,7 @@ impl VectorLane {
             first_hybrid_top_k: first_hybrid_query.map(|query| query.top_k).unwrap_or(0),
             doc_ids,
             doc_vectors,
+            dimensions,
         })
     }
 
@@ -270,16 +272,17 @@ impl VectorLane {
     }
 
     fn search_with_query(&self, query: &[f32], limit: usize) -> Vec<String> {
-        if limit == 0 {
+        if limit == 0 || self.dimensions == 0 {
             return Vec::new();
         }
 
-        let mut hits = Vec::new();
-        for (index, vector) in self.doc_vectors.iter().enumerate() {
-            let score = cosine_similarity(query, vector);
-            insert_ranked_hit(&mut hits, limit, index, score, &self.doc_ids);
+        let mut hits = Vec::with_capacity(limit.min(self.doc_ids.len()));
+        for (index, vector) in self.doc_vectors.chunks_exact(self.dimensions).enumerate() {
+            let score = dot_product(query, vector);
+            collect_top_hit(&mut hits, limit, index, score, &self.doc_ids);
         }
 
+        hits.sort_by(|left, right| compare_hits(*left, *right, &self.doc_ids));
         hits.into_iter()
             .map(|(index, _)| self.doc_ids[index].clone())
             .collect()
@@ -393,7 +396,7 @@ struct FirstTextQuery {
     top_k: usize,
 }
 
-fn load_document_vectors(bytes: &[u8], dimensions: usize) -> Result<Vec<Vec<f32>>, String> {
+fn load_document_vectors(bytes: &[u8], dimensions: usize) -> Result<Vec<f32>, String> {
     if dimensions == 0 {
         return Ok(Vec::new());
     }
@@ -402,12 +405,8 @@ fn load_document_vectors(bytes: &[u8], dimensions: usize) -> Result<Vec<Vec<f32>
     }
 
     Ok(bytes
-        .chunks_exact(dimensions * 4)
-        .map(|row| {
-            row.chunks_exact(4)
-                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                .collect::<Vec<_>>()
-        })
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect())
 }
 
@@ -447,23 +446,30 @@ fn load_first_hybrid_vector_query(paths: &[PathBuf]) -> Result<Option<FirstVecto
     Ok(None)
 }
 
-fn insert_ranked_hit(
+fn collect_top_hit(
     hits: &mut Vec<(usize, f32)>,
     limit: usize,
     index: usize,
     score: f32,
     doc_ids: &[String],
 ) {
-    hits.push((index, score));
-    hits.sort_by(|left, right| {
-        right
-            .1
-            .partial_cmp(&left.1)
-            .unwrap()
-            .then_with(|| doc_ids[left.0].cmp(&doc_ids[right.0]))
-    });
-    if hits.len() > limit {
-        hits.truncate(limit);
+    let candidate = (index, score);
+    if hits.len() < limit {
+        hits.push(candidate);
+        return;
+    }
+
+    let Some((worst_index, worst_hit)) = hits
+        .iter()
+        .copied()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| compare_hits(*left, *right, doc_ids))
+    else {
+        return;
+    };
+
+    if compare_hits(candidate, worst_hit, doc_ids).is_lt() {
+        hits[worst_index] = candidate;
     }
 }
 
@@ -503,6 +509,13 @@ fn fuse_ranked_hits(text_hits: &[String], vector_hits: &[String], limit: usize) 
     fused.into_iter().take(limit).map(|(doc_id, _)| doc_id).collect()
 }
 
-fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+fn compare_hits(left: (usize, f32), right: (usize, f32), doc_ids: &[String]) -> std::cmp::Ordering {
+    right
+        .1
+        .total_cmp(&left.1)
+        .then_with(|| doc_ids[left.0].cmp(&doc_ids[right.0]))
+}
+
+fn dot_product(left: &[f32], right: &[f32]) -> f32 {
     left.iter().zip(right).map(|(l, r)| l * r).sum()
 }
