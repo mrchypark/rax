@@ -1,0 +1,81 @@
+client:
+  name: basic
+  file-system: device-agnostic
+tools: {}
+targets:
+  "HostMain-arm64-apple-macosx26.0-debug.exe": ["<HostMain-arm64-apple-macosx26.0-debug.exe>"]
+  "HostMain-arm64-apple-macosx26.0-debug.module": ["<HostMain-arm64-apple-macosx26.0-debug.module>"]
+  "PackageStructure": ["<PackageStructure>"]
+  "main": ["<HostMain-arm64-apple-macosx26.0-debug.exe>","<HostMain-arm64-apple-macosx26.0-debug.module>"]
+  "test": ["<HostMain-arm64-apple-macosx26.0-debug.exe>","<HostMain-arm64-apple-macosx26.0-debug.module>"]
+default: "main"
+nodes:
+  "/Users/cypark/Documents/project/rax/apps/ios-harness-host/Sources/HostMain/":
+    is-directory-structure: true
+    content-exclusion-patterns: [".git",".build"]
+  "/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain":
+    is-mutated: true
+commands:
+  "/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain-entitlement.plist":
+    tool: write-auxiliary-file
+    inputs: ["<entitlement-plist>","<com.apple.security.get-task-allow>"]
+    outputs: ["/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain-entitlement.plist"]
+    description: "Write auxiliary file /Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain-entitlement.plist"
+
+  "/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain.build/sources":
+    tool: write-auxiliary-file
+    inputs: ["<sources-file-list>","/Users/cypark/Documents/project/rax/apps/ios-harness-host/Sources/HostMain/main.swift"]
+    outputs: ["/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain.build/sources"]
+    description: "Write auxiliary file /Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain.build/sources"
+
+  "/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain.product/Objects.LinkFileList":
+    tool: write-auxiliary-file
+    inputs: ["<link-file-list>","/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain.build/main.swift.o"]
+    outputs: ["/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain.product/Objects.LinkFileList"]
+    description: "Write auxiliary file /Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain.product/Objects.LinkFileList"
+
+  "/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt":
+    tool: write-auxiliary-file
+    inputs: ["<swift-get-version>","/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"]
+    outputs: ["/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"]
+    always-out-of-date: "true"
+    description: "Write auxiliary file /Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+
+  "<HostMain-arm64-apple-macosx26.0-debug.exe>":
+    tool: phony
+    inputs: ["<HostMain-arm64-apple-macosx26.0-debug.exe-CodeSigning>"]
+    outputs: ["<HostMain-arm64-apple-macosx26.0-debug.exe>"]
+
+  "<HostMain-arm64-apple-macosx26.0-debug.module>":
+    tool: phony
+    inputs: ["/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain.build/main.swift.o","/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/Modules/HostMain.swiftmodule"]
+    outputs: ["<HostMain-arm64-apple-macosx26.0-debug.module>"]
+
+  "C.HostMain-arm64-apple-macosx26.0-debug.exe":
+    tool: shell
+    inputs: ["/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain.build/main.swift.o","/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain.product/Objects.LinkFileList"]
+    outputs: ["/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain"]
+    description: "Linking ./.build/arm64-apple-macosx/debug/HostMain"
+    args: ["/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc","-L","/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug","-o","/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain","-module-name","HostMain","-Xlinker","-no_warn_duplicate_libraries","-emit-executable","-Xlinker","-alias","-Xlinker","_HostMain_main","-Xlinker","_main","-Xlinker","-rpath","-Xlinker","@loader_path","@/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain.product/Objects.LinkFileList","-Xlinker","-rpath","-Xlinker","/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-6.2/macosx","-target","arm64-apple-macosx13.0","-Xlinker","-add_ast_path","-Xlinker","/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/Modules/HostMain.swiftmodule","-plugin-path","/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing","-sdk","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk","-F","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks","-F","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks","-I","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib","-L","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib","-g"]
+
+  "C.HostMain-arm64-apple-macosx26.0-debug.exe-entitlements":
+    tool: shell
+    inputs: ["/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain","/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain-entitlement.plist"]
+    outputs: ["<HostMain-arm64-apple-macosx26.0-debug.exe-CodeSigning>"]
+    description: "Applying debug entitlements to ./.build/arm64-apple-macosx/debug/HostMain"
+    args: ["codesign","--force","--sign","-","--entitlements","/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain-entitlement.plist","/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain"]
+
+  "C.HostMain-arm64-apple-macosx26.0-debug.module":
+    tool: shell
+    inputs: ["/Users/cypark/Documents/project/rax/apps/ios-harness-host/Sources/HostMain/main.swift","/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt","/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain.build/sources"]
+    outputs: ["/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain.build/main.swift.o","/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/Modules/HostMain.swiftmodule"]
+    description: "Compiling Swift Module 'HostMain' (1 sources)"
+    args: ["/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc","-module-name","HostMain","-emit-dependencies","-emit-module","-emit-module-path","/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/Modules/HostMain.swiftmodule","-output-file-map","/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain.build/output-file-map.json","-incremental","-c","@/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/HostMain.build/sources","-I","/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/Modules","-target","arm64-apple-macosx13.0","-incremental","-enable-batch-mode","-serialize-diagnostics","-index-store-path","/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/index/store","-Onone","-enable-testing","-j8","-DSWIFT_PACKAGE","-DDEBUG","-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE","-module-cache-path","/Users/cypark/Documents/project/rax/apps/ios-harness-host/.build/arm64-apple-macosx/debug/ModuleCache","-parseable-output","-Xfrontend","-entry-point-function-name","-Xfrontend","HostMain_main","-parse-as-library","-swift-version","5","-plugin-path","/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing","-sdk","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk","-F","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks","-F","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks","-I","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib","-L","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib","-g","-Xcc","-isysroot","-Xcc","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk","-Xcc","-F","-Xcc","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks","-Xcc","-F","-Xcc","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks","-Xcc","-fPIC","-Xcc","-g","-package-name","ios_harness_host"]
+
+  "PackageStructure":
+    tool: package-structure-tool
+    inputs: ["/Users/cypark/Documents/project/rax/apps/ios-harness-host/Sources/HostMain/","/Users/cypark/Documents/project/rax/apps/ios-harness-host/Package.swift","/Users/cypark/Documents/project/rax/apps/ios-harness-host/Package.resolved"]
+    outputs: ["<PackageStructure>"]
+    description: "Planning build"
+    allow-missing-inputs: true
+
