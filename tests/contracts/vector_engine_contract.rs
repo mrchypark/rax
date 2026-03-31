@@ -1,7 +1,9 @@
 use std::fs;
 
 use tempfile::tempdir;
-use wax_bench_model::{DatasetPackManifest, MountRequest, OpenRequest, SearchRequest, WaxEngine};
+use wax_bench_model::{
+    DatasetPackManifest, MountRequest, OpenRequest, SearchRequest, VectorQueryMode, WaxEngine,
+};
 use wax_bench_packer::{pack_dataset, PackRequest};
 use wax_bench_text_engine::PackedTextEngine;
 
@@ -16,8 +18,14 @@ fn packed_engine_materializes_vector_lane_on_first_vector_query() {
     ))
     .unwrap();
 
-    assert!(manifest.files.iter().any(|file| file.kind == "document_vectors"));
-    assert!(manifest.files.iter().any(|file| file.kind == "query_vectors"));
+    assert!(manifest
+        .files
+        .iter()
+        .any(|file| file.kind == "document_vectors"));
+    assert!(manifest
+        .files
+        .iter()
+        .any(|file| file.kind == "query_vectors"));
 
     let mut engine = PackedTextEngine::default();
     engine
@@ -195,7 +203,47 @@ fn packed_engine_uses_persisted_vector_lane_without_document_id_sidecar() {
 }
 
 #[test]
-fn packed_engine_falls_back_to_documents_when_old_pack_has_no_vector_skeleton_or_document_ids() {
+fn packed_engine_hnsw_matches_exact_flat_top_hit_for_first_vector_query() {
+    let dataset_dir = tempdir().unwrap();
+    pack_dataset(&PackRequest::new(
+        "fixtures/bench/source/minimal",
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+
+    let mut exact_engine = PackedTextEngine::with_vector_mode(VectorQueryMode::ExactFlat);
+    exact_engine
+        .mount(MountRequest {
+            store_path: dataset_dir.path().to_path_buf(),
+        })
+        .unwrap();
+    exact_engine.open(OpenRequest).unwrap();
+    let exact = exact_engine
+        .search(SearchRequest {
+            query_text: "__ttfq_vector__".to_owned(),
+        })
+        .unwrap();
+
+    let mut hnsw_engine = PackedTextEngine::with_vector_mode(VectorQueryMode::Hnsw);
+    hnsw_engine
+        .mount(MountRequest {
+            store_path: dataset_dir.path().to_path_buf(),
+        })
+        .unwrap();
+    hnsw_engine.open(OpenRequest).unwrap();
+    let hnsw = hnsw_engine
+        .search(SearchRequest {
+            query_text: "__ttfq_vector__".to_owned(),
+        })
+        .unwrap();
+
+    assert_eq!(hnsw.hits.first(), exact.hits.first());
+}
+
+#[test]
+fn packed_engine_falls_back_to_exact_scan_when_ann_sidecars_are_missing() {
     let dataset_dir = tempdir().unwrap();
     pack_dataset(&PackRequest::new(
         "fixtures/bench/source/minimal",
@@ -209,8 +257,53 @@ fn packed_engine_falls_back_to_documents_when_old_pack_has_no_vector_skeleton_or
     let mut manifest: DatasetPackManifest =
         serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
     manifest.files.retain(|file| {
-        file.kind != "document_ids" && file.kind != "vector_lane_skeleton"
+        file.kind != "document_vectors_preview_q8"
+            && file.kind != "vector_hnsw_graph"
+            && file.kind != "vector_hnsw_data"
     });
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    fs::remove_file(dataset_dir.path().join("document_vectors.q8")).unwrap();
+    fs::remove_file(dataset_dir.path().join("vector_hnsw.hnsw.graph")).unwrap();
+    fs::remove_file(dataset_dir.path().join("vector_hnsw.hnsw.data")).unwrap();
+
+    let mut engine = PackedTextEngine::default();
+    engine
+        .mount(MountRequest {
+            store_path: dataset_dir.path().to_path_buf(),
+        })
+        .unwrap();
+    engine.open(OpenRequest).unwrap();
+
+    let first = engine
+        .search(SearchRequest {
+            query_text: "__ttfq_vector__".to_owned(),
+        })
+        .unwrap();
+
+    assert_eq!(first.hits.first().map(String::as_str), Some("doc-002"));
+}
+
+#[test]
+fn packed_engine_falls_back_to_documents_when_old_pack_has_no_vector_skeleton_or_document_ids() {
+    let dataset_dir = tempdir().unwrap();
+    pack_dataset(&PackRequest::new(
+        "fixtures/bench/source/minimal",
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+
+    let manifest_path = dataset_dir.path().join("manifest.json");
+    let mut manifest: DatasetPackManifest =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest
+        .files
+        .retain(|file| file.kind != "document_ids" && file.kind != "vector_lane_skeleton");
     fs::write(
         &manifest_path,
         serde_json::to_string_pretty(&manifest).unwrap(),
@@ -310,7 +403,12 @@ fn packed_engine_preserves_doc_id_tiebreak_for_equal_vector_scores() {
         .unwrap();
 
     assert_eq!(
-        first.hits.iter().take(2).map(String::as_str).collect::<Vec<_>>(),
+        first
+            .hits
+            .iter()
+            .take(2)
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
         vec!["doc-001", "doc-002"]
     );
 }

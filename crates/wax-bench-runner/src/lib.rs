@@ -9,6 +9,7 @@ use wax_bench_model::{MaterializationMode, MountRequest, OpenRequest, SearchRequ
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Workload {
     ContainerOpen,
+    MaterializeVector,
     TtfqText,
     TtfqVector,
     WarmText,
@@ -205,9 +206,15 @@ where
         collector.mark_metadata_ready();
 
         if let Some(query_text) = first_query_for_workload(&request.workload) {
+            if matches!(request.workload, Workload::MaterializeVector) {
+                collector.start_vector_materialization_measurement();
+            }
             self.engine.search(SearchRequest {
                 query_text: query_text.clone(),
             })?;
+            if matches!(request.workload, Workload::MaterializeVector) {
+                collector.mark_vector_materialization_done();
+            }
             trace.events.push(LifecycleEvent::SearchExecuted);
             trace.search_queries.push(query_text);
             if measured_query_for_workload(&request.workload).is_none() {
@@ -283,11 +290,12 @@ impl WaxEngine for NoopWaxEngine {
 fn first_query_for_workload(workload: &Workload) -> Option<String> {
     match workload {
         Workload::ContainerOpen => None,
+        Workload::MaterializeVector => Some("__materialize_vector_lane__".to_owned()),
         Workload::TtfqText => Some("__ttfq_text__".to_owned()),
         Workload::TtfqVector => Some("__ttfq_vector__".to_owned()),
         Workload::WarmText => Some("__ttfq_text__".to_owned()),
-        Workload::WarmVector => Some("__ttfq_vector__".to_owned()),
-        Workload::WarmHybrid => Some("__ttfq_hybrid__".to_owned()),
+        Workload::WarmVector => Some("__warmup_vector__".to_owned()),
+        Workload::WarmHybrid => Some("__warmup_hybrid__".to_owned()),
     }
 }
 

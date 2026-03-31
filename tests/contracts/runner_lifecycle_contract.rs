@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
+use wax_bench_metrics::{MemoryReading, MemorySampler, MetricCollector, MonotonicClock};
 use wax_bench_model::{
     EnginePhase, EngineStats, MaterializationMode, MountRequest, OpenRequest, OpenResult,
     SearchRequest, SearchResult, WaxEngine,
 };
-use wax_bench_metrics::{MemoryReading, MetricCollector, MonotonicClock, MemorySampler};
 use wax_bench_runner::{BenchmarkRunner, LifecycleEvent, RunRequest, Workload};
 
 #[test]
@@ -48,6 +48,83 @@ fn container_open_excludes_lane_materialization() {
         vec![LifecycleEvent::Mounted, LifecycleEvent::Opened]
     );
     assert!(trace.search_queries.is_empty());
+}
+
+#[test]
+fn materialize_vector_workload_only_materializes_vector_lane() {
+    let engine = RecordingEngine::default();
+    let mut runner = BenchmarkRunner::new(engine);
+
+    let trace = runner
+        .run(&RunRequest {
+            dataset_path: PathBuf::from("/tmp/wax-pack"),
+            workload: Workload::MaterializeVector,
+            materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
+        })
+        .unwrap();
+
+    assert_eq!(
+        trace.events,
+        vec![
+            LifecycleEvent::Mounted,
+            LifecycleEvent::Opened,
+            LifecycleEvent::SearchExecuted,
+        ]
+    );
+    assert_eq!(
+        trace.search_queries,
+        vec!["__materialize_vector_lane__".to_owned()]
+    );
+}
+
+#[test]
+fn materialize_vector_workload_records_vector_materialization_latency() {
+    let engine = RecordingEngine::default();
+    let mut runner = BenchmarkRunner::new(engine);
+    let mut collector = MetricCollector::new(
+        ScriptedClock::new(&[0, 1_000, 2_000, 3_000, 4_000]),
+        FixedMemorySampler,
+    );
+
+    let measured = runner
+        .run_with_metrics(
+            &RunRequest {
+                dataset_path: PathBuf::from("/tmp/wax-pack"),
+                workload: Workload::MaterializeVector,
+                materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
+            },
+            &mut collector,
+            None,
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(measured.metrics.vector_materialization_ms, Some(1.0));
+}
+
+#[test]
+fn forced_vector_lane_materialization_does_not_claim_materialize_vector_slice() {
+    let engine = RecordingEngine::default();
+    let mut runner = BenchmarkRunner::new(engine);
+    let mut collector = MetricCollector::new(
+        ScriptedClock::new(&[0, 1_000, 2_000, 3_000]),
+        FixedMemorySampler,
+    );
+
+    let measured = runner
+        .run_with_metrics(
+            &RunRequest {
+                dataset_path: PathBuf::from("/tmp/wax-pack"),
+                workload: Workload::TtfqText,
+                materialization_mode: MaterializationMode::ForceVectorLane,
+            },
+            &mut collector,
+            None,
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(measured.metrics.vector_materialization_ms, None);
 }
 
 #[test]
@@ -177,6 +254,25 @@ fn warm_text_workload_warms_then_measures_text_search() {
 }
 
 #[test]
+fn warm_vector_workload_warms_then_measures_vector_search() {
+    let engine = RecordingEngine::default();
+    let mut runner = BenchmarkRunner::new(engine);
+
+    let trace = runner
+        .run(&RunRequest {
+            dataset_path: PathBuf::from("/tmp/wax-pack"),
+            workload: Workload::WarmVector,
+            materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
+        })
+        .unwrap();
+
+    assert_eq!(
+        trace.search_queries,
+        vec!["__warmup_vector__".to_owned(), "__warm_vector__".to_owned()]
+    );
+}
+
+#[test]
 fn warm_hybrid_workload_warms_then_measures_hybrid_search() {
     let engine = RecordingEngine::default();
     let mut runner = BenchmarkRunner::new(engine);
@@ -191,7 +287,7 @@ fn warm_hybrid_workload_warms_then_measures_hybrid_search() {
 
     assert_eq!(
         trace.search_queries,
-        vec!["__ttfq_hybrid__".to_owned(), "__warm_hybrid__".to_owned()]
+        vec!["__warmup_hybrid__".to_owned(), "__warm_hybrid__".to_owned()]
     );
 }
 
@@ -276,5 +372,27 @@ impl MemorySampler for FixedMemorySampler {
         MemoryReading::Unavailable {
             reason: "test".to_owned(),
         }
+    }
+}
+
+struct ScriptedClock {
+    ticks: Vec<u64>,
+    index: usize,
+}
+
+impl ScriptedClock {
+    fn new(ticks: &[u64]) -> Self {
+        Self {
+            ticks: ticks.to_vec(),
+            index: 0,
+        }
+    }
+}
+
+impl MonotonicClock for ScriptedClock {
+    fn now_us(&mut self) -> u64 {
+        let value = self.ticks[self.index.min(self.ticks.len() - 1)];
+        self.index += 1;
+        value
     }
 }

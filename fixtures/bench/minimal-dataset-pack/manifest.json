@@ -70,6 +70,8 @@
     "embedding_dimensions": 384,
     "embedding_dtype": "f32",
     "distance_metric": "cosine",
+    "ann_index_backend": "hnsw_rs",
+    "ann_sidecar_reproducibility": "derived_nondeterministic",
     "query_vectors": {
       "precomputed_available": true,
       "runtime_embedding_supported": true

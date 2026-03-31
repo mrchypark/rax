@@ -17,6 +17,17 @@ fn dataset_manifest_round_trips_and_validates() {
 
     assert_eq!(reparsed.identity.dataset_id, "knowledge-small-clean-v1");
     assert_eq!(reparsed.query_sets[0].query_count, 3);
+    assert_eq!(
+        reparsed.vector_profile.ann_index_backend.as_deref(),
+        Some("hnsw_rs")
+    );
+    assert_eq!(
+        reparsed
+            .vector_profile
+            .ann_sidecar_reproducibility
+            .as_deref(),
+        Some("derived_nondeterministic")
+    );
 }
 
 #[test]
@@ -42,7 +53,9 @@ fn dataset_manifest_validation_rejects_duplicate_query_id() {
         checksum: "sha256:duplicate-query-ground-truth".to_owned(),
     });
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "duplicate query_id"
     );
 }
@@ -52,7 +65,9 @@ fn dataset_manifest_validation_rejects_inconsistent_embedding_dimensions() {
     let (mut manifest, _, manifest_root) = load_manifest();
     manifest.vector_profile.embedding_dimensions = 256;
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "embedding_dimensions does not match embedding_spec_id"
     );
 }
@@ -65,7 +80,9 @@ fn dataset_manifest_validation_rejects_missing_dirty_base_dataset() {
     manifest.dirty_profile.profile = "dirty_light".to_owned();
     manifest.dirty_profile.delete_ratio = 0.1;
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "dirty variants must declare base_dataset_id"
     );
 }
@@ -75,7 +92,9 @@ fn dataset_manifest_validation_rejects_missing_file_references() {
     let (mut manifest, _, manifest_root) = load_manifest();
     manifest.query_sets[0].ground_truth_path = "queries/missing.jsonl".to_owned();
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "ground_truth_path must reference a file entry"
     );
 }
@@ -85,7 +104,9 @@ fn dataset_manifest_validation_rejects_file_path_traversal() {
     let (mut manifest, _, manifest_root) = load_manifest();
     manifest.files[0].path = "../outside.ndjson".to_owned();
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "file paths must stay within the dataset pack root"
     );
 }
@@ -95,7 +116,9 @@ fn dataset_manifest_validation_rejects_missing_pack_file() {
     let (mut manifest, _, manifest_root) = load_manifest();
     manifest.files[0].path = "missing-docs.ndjson".to_owned();
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "file path must exist in the dataset pack"
     );
 }
@@ -105,7 +128,9 @@ fn dataset_manifest_validation_rejects_checksum_mismatch() {
     let (mut manifest, _, manifest_root) = load_manifest();
     manifest.files[0].checksum = "sha256:not-the-real-checksum".to_owned();
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "file checksum must match file contents"
     );
 }
@@ -115,7 +140,9 @@ fn dataset_manifest_validation_rejects_clean_profile_with_dirty_ratios() {
     let (mut manifest, _, manifest_root) = load_manifest();
     manifest.dirty_profile.delete_ratio = 0.1;
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "clean profile must use zero dirty ratios"
     );
 }
@@ -126,7 +153,9 @@ fn dataset_manifest_validation_rejects_disabled_vectors_with_payload() {
     manifest.vector_profile.enabled = false;
     manifest.corpus.vector_count = 1;
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "vector_count must be 0 when vectors are disabled"
     );
 }
@@ -134,10 +163,13 @@ fn dataset_manifest_validation_rejects_disabled_vectors_with_payload() {
 #[test]
 fn dataset_manifest_validation_rejects_duplicate_ground_truth_rows() {
     let (mut manifest, _, manifest_root) = load_manifest();
-    manifest.query_sets[0].ground_truth_path = "queries/duplicate-ground-truth-rows.jsonl".to_owned();
+    manifest.query_sets[0].ground_truth_path =
+        "queries/duplicate-ground-truth-rows.jsonl".to_owned();
     manifest.files[2].path = "queries/duplicate-ground-truth-rows.jsonl".to_owned();
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "ground_truth file contains duplicate query_id"
     );
 }
@@ -147,7 +179,9 @@ fn dataset_manifest_validation_rejects_unknown_query_class() {
     let (mut manifest, _, manifest_root) = load_manifest();
     manifest.query_sets[0].classes[0] = "mystery".to_owned();
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "invalid query class"
     );
 }
@@ -157,7 +191,9 @@ fn dataset_manifest_validation_rejects_wrong_file_kind_for_query_set() {
     let (mut manifest, _, manifest_root) = load_manifest();
     manifest.files[1].kind = "documents".to_owned();
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "query_set path must point to a query_set file"
     );
 }
@@ -167,7 +203,9 @@ fn dataset_manifest_validation_rejects_malformed_checksum() {
     let (mut manifest, _, manifest_root) = load_manifest();
     manifest.files[0].checksum = "md5:oops".to_owned();
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "file checksum must use sha256 format"
     );
 }
@@ -178,7 +216,9 @@ fn dataset_manifest_validation_rejects_duplicate_query_set_id() {
     let duplicate = manifest.query_sets[0].clone();
     manifest.query_sets.push(duplicate);
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "duplicate query_set_id"
     );
 }
@@ -188,7 +228,9 @@ fn dataset_manifest_validation_rejects_query_count_mismatch() {
     let (mut manifest, _, manifest_root) = load_manifest();
     manifest.query_sets[0].query_count = 2;
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "query_count must match query file contents"
     );
 }
@@ -200,8 +242,48 @@ fn dataset_manifest_validation_rejects_disabled_vectors_with_nonzero_dimensions(
     manifest.corpus.vector_count = 0;
     manifest.vector_profile.embedding_dimensions = 384;
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "embedding_dimensions must be 0 when vectors are disabled"
+    );
+}
+
+#[test]
+fn dataset_manifest_validation_rejects_hnsw_sidecars_without_explicit_reproducibility_policy() {
+    let (mut manifest, _, manifest_root) = load_manifest();
+    manifest.files.push(wax_bench_model::ManifestFile {
+        path: "vector_hnsw.hnsw.graph".to_owned(),
+        kind: "vector_hnsw_graph".to_owned(),
+        format: "hnsw-rs-graph".to_owned(),
+        record_count: 1000,
+        checksum: "sha256:graph".to_owned(),
+    });
+    manifest.vector_profile.ann_sidecar_reproducibility = None;
+    assert_eq!(
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
+        "hnsw sidecars must declare ann_sidecar_reproducibility=derived_nondeterministic"
+    );
+}
+
+#[test]
+fn dataset_manifest_validation_rejects_hnsw_sidecars_without_backend_label() {
+    let (mut manifest, _, manifest_root) = load_manifest();
+    manifest.files.push(wax_bench_model::ManifestFile {
+        path: "vector_hnsw.hnsw.graph".to_owned(),
+        kind: "vector_hnsw_graph".to_owned(),
+        format: "hnsw-rs-graph".to_owned(),
+        record_count: 1000,
+        checksum: "sha256:graph".to_owned(),
+    });
+    manifest.vector_profile.ann_index_backend = None;
+    assert_eq!(
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
+        "hnsw sidecars must declare ann_index_backend=hnsw_rs"
     );
 }
 
@@ -210,7 +292,9 @@ fn dataset_manifest_validation_rejects_variant_profile_mismatch() {
     let (mut manifest, _, manifest_root) = load_manifest();
     manifest.identity.variant_id = "dirty_light".to_owned();
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "variant_id must match dirty_profile.profile"
     );
 }
@@ -220,7 +304,9 @@ fn dataset_manifest_validation_rejects_clean_profile_with_wrong_compaction_state
     let (mut manifest, _, manifest_root) = load_manifest();
     manifest.dirty_profile.compaction_state = "pre_compaction".to_owned();
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "clean profile must use compaction_state=clean"
     );
 }
@@ -230,7 +316,9 @@ fn dataset_manifest_validation_rejects_invalid_dataset_tier() {
     let (mut manifest, _, manifest_root) = load_manifest();
     manifest.identity.dataset_tier = "tiny".to_owned();
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "invalid dataset_tier"
     );
 }
@@ -240,7 +328,9 @@ fn dataset_manifest_validation_rejects_invalid_embedding_dtype() {
     let (mut manifest, _, manifest_root) = load_manifest();
     manifest.vector_profile.embedding_dtype = "f16".to_owned();
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "invalid embedding_dtype"
     );
 }
@@ -250,7 +340,9 @@ fn dataset_manifest_validation_rejects_invalid_distance_metric() {
     let (mut manifest, _, manifest_root) = load_manifest();
     manifest.vector_profile.distance_metric = "manhattan".to_owned();
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "invalid distance_metric"
     );
 }
@@ -264,7 +356,9 @@ fn dataset_manifest_validation_rejects_invalid_compaction_state() {
     manifest.dirty_profile.delete_ratio = 0.1;
     manifest.dirty_profile.compaction_state = "unknown".to_owned();
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "invalid compaction_state"
     );
 }
@@ -281,7 +375,9 @@ fn dataset_manifest_validation_rejects_missing_vector_payload_checksum() {
     });
     manifest.checksums.logical_vector_payload_checksum = None;
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "vector payload checksum is required when vector payload exists"
     );
 }
@@ -291,7 +387,9 @@ fn dataset_manifest_validation_rejects_duplicate_file_path() {
     let (mut manifest, _, manifest_root) = load_manifest();
     manifest.files.push(manifest.files[0].clone());
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "duplicate file path"
     );
 }
@@ -302,7 +400,9 @@ fn dataset_manifest_validation_rejects_misaligned_ground_truth_file() {
     manifest.query_sets[0].ground_truth_path = "queries/mismatch-ground-truth.jsonl".to_owned();
     manifest.files[2].path = "queries/mismatch-ground-truth.jsonl".to_owned();
     assert_eq!(
-        validate_manifest(&manifest, &manifest_root).unwrap_err().message,
+        validate_manifest(&manifest, &manifest_root)
+            .unwrap_err()
+            .message,
         "ground_truth file must align with query ids"
     );
 }

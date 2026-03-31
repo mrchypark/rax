@@ -8,11 +8,13 @@ use wax_bench_artifacts::{
     ReplayConfigArtifact,
 };
 use wax_bench_metrics::{MemoryReading, MemorySampler, MetricCollector, MonotonicClock};
-use wax_bench_model::{BenchmarkId, DatasetPackManifest, MaterializationMode};
-use wax_bench_packer::PackRequest;
-use wax_bench_reducer::reduce_run_dir;
+use wax_bench_model::{BenchmarkId, DatasetPackManifest, MaterializationMode, VectorQueryMode};
+use wax_bench_packer::{AdhocPackRequest, PackRequest};
+use wax_bench_reducer::{
+    build_vector_lane_matrix_report, reduce_run_dir, render_vector_mode_compare_report,
+};
 use wax_bench_runner::{BenchmarkRunner, RunRequest, Workload};
-use wax_bench_text_engine::PackedTextEngine;
+use wax_bench_text_engine::{query_text_preview, PackedTextEngine};
 
 #[derive(Debug, Parser)]
 #[command(name = "wax-bench-cli")]
@@ -34,6 +36,14 @@ enum Command {
         #[arg(long)]
         variant: String,
     },
+    PackAdhoc {
+        #[arg(long)]
+        docs: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        tier: String,
+    },
     Run {
         #[arg(long)]
         dataset: PathBuf,
@@ -41,14 +51,36 @@ enum Command {
         workload: String,
         #[arg(long)]
         sample_count: u32,
+        #[arg(long, default_value = "auto")]
+        vector_mode: String,
         #[arg(long)]
         artifact_dir: Option<PathBuf>,
+    },
+    Query {
+        #[arg(long)]
+        dataset: PathBuf,
+        #[arg(long)]
+        text: String,
+        #[arg(long, default_value_t = 5)]
+        top_k: usize,
     },
     Reduce {
         #[arg(long)]
         input: PathBuf,
         #[arg(long)]
         baseline: Option<PathBuf>,
+    },
+    MatrixReport {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    ModeCompareReport {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
     Replay {
         #[arg(long)]
@@ -70,14 +102,21 @@ fn main() -> Result<(), String> {
                 .map_err(|error| error.message)?;
             Ok(())
         }
+        Some(Command::PackAdhoc { docs, out, tier }) => {
+            wax_bench_packer::pack_adhoc_dataset(&AdhocPackRequest::new(docs, out, tier))
+                .map_err(|error| error.message)?;
+            Ok(())
+        }
         Some(Command::Run {
             dataset,
             workload,
             sample_count,
+            vector_mode,
             artifact_dir,
         }) => {
             let workload = match workload.as_str() {
                 "container_open" => Workload::ContainerOpen,
+                "materialize_vector" => Workload::MaterializeVector,
                 "ttfq_text" => Workload::TtfqText,
                 "ttfq_vector" => Workload::TtfqVector,
                 "warm_text" => Workload::WarmText,
@@ -85,6 +124,7 @@ fn main() -> Result<(), String> {
                 "warm_hybrid" => Workload::WarmHybrid,
                 _ => return Err("unsupported workload".to_owned()),
             };
+            let vector_mode = parse_vector_mode(&vector_mode)?;
             let manifest_text = std::fs::read_to_string(dataset.join("manifest.json"))
                 .map_err(|error| error.to_string())?;
             let manifest: DatasetPackManifest =
@@ -102,14 +142,14 @@ fn main() -> Result<(), String> {
             };
             let measured = if use_test_mode {
                 wax_bench_runner::run_benchmark_samples_with_runner_factory(
-                    || BenchmarkRunner::new(PackedTextEngine::default()),
+                    || BenchmarkRunner::new(PackedTextEngine::with_vector_mode(vector_mode)),
                     &request,
                     sample_count,
                     || MetricCollector::new(DeterministicClock::new(), TestMemorySampler),
                 )
             } else {
                 wax_bench_runner::run_benchmark_samples_with_runner_factory(
-                    || BenchmarkRunner::new(PackedTextEngine::default()),
+                    || BenchmarkRunner::new(PackedTextEngine::with_vector_mode(vector_mode)),
                     &request,
                     sample_count,
                     || MetricCollector::new(SystemClock::new(), UnavailableMemorySampler),
@@ -128,6 +168,7 @@ fn main() -> Result<(), String> {
                 workload_id: workload_label(&request.workload).to_owned(),
                 sample_count,
                 materialization_mode: request.materialization_mode,
+                vector_mode,
                 artifact_dir: artifact_dir.display().to_string(),
             };
             write_run_bundle_with_replay_config(
@@ -141,6 +182,18 @@ fn main() -> Result<(), String> {
             .map_err(|error| error.to_string())?;
             Ok(())
         }
+        Some(Command::Query {
+            dataset,
+            text,
+            top_k,
+        }) => {
+            let hits = query_text_preview(&dataset, &text, top_k)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&hits).map_err(|error| error.to_string())?
+            );
+            Ok(())
+        }
         Some(Command::Reduce { input, baseline }) => {
             let report = reduce_run_dir(input.as_path(), baseline.as_deref())
                 .map_err(|error| error.message)?;
@@ -150,6 +203,24 @@ fn main() -> Result<(), String> {
             )
             .map_err(|error| error.to_string())?;
             println!("{}", report.markdown);
+            Ok(())
+        }
+        Some(Command::MatrixReport { input, output }) => {
+            let report =
+                build_vector_lane_matrix_report(input.as_path()).map_err(|error| error.message)?;
+            if let Some(output) = output {
+                std::fs::write(&output, &report.markdown).map_err(|error| error.to_string())?;
+            }
+            println!("{}", report.markdown);
+            Ok(())
+        }
+        Some(Command::ModeCompareReport { input, output }) => {
+            let markdown =
+                render_vector_mode_compare_report(input.as_path()).map_err(|error| error.message)?;
+            if let Some(output) = output {
+                std::fs::write(&output, &markdown).map_err(|error| error.to_string())?;
+            }
+            println!("{}", markdown);
             Ok(())
         }
         Some(Command::Replay { input }) => {
@@ -164,9 +235,20 @@ fn main() -> Result<(), String> {
     }
 }
 
+fn parse_vector_mode(value: &str) -> Result<VectorQueryMode, String> {
+    match value {
+        "auto" => Ok(VectorQueryMode::Auto),
+        "exact_flat" => Ok(VectorQueryMode::ExactFlat),
+        "hnsw" => Ok(VectorQueryMode::Hnsw),
+        "preview_q8" => Ok(VectorQueryMode::PreviewQ8),
+        _ => Err("unsupported vector_mode".to_owned()),
+    }
+}
+
 fn workload_label(workload: &Workload) -> &'static str {
     match workload {
         Workload::ContainerOpen => "container_open",
+        Workload::MaterializeVector => "materialize_vector",
         Workload::TtfqText => "ttfq_text",
         Workload::TtfqVector => "ttfq_vector",
         Workload::WarmText => "warm_text",

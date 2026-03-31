@@ -6,7 +6,7 @@ use wax_bench_model::DatasetPackManifest;
 use wax_bench_packer::{pack_dataset, PackRequest};
 
 #[test]
-fn dataset_packer_produces_byte_stable_manifest_for_same_source_and_config() {
+fn dataset_packer_produces_stable_logical_manifest_for_same_source_and_config() {
     let source = Path::new("fixtures/bench/source/minimal");
     let out_a = tempdir().unwrap();
     let out_b = tempdir().unwrap();
@@ -14,8 +14,18 @@ fn dataset_packer_produces_byte_stable_manifest_for_same_source_and_config() {
     pack_dataset(&PackRequest::new(source, out_a.path(), "small", "clean")).unwrap();
     pack_dataset(&PackRequest::new(source, out_b.path(), "small", "clean")).unwrap();
 
-    let manifest_a = fs::read_to_string(out_a.path().join("manifest.json")).unwrap();
-    let manifest_b = fs::read_to_string(out_b.path().join("manifest.json")).unwrap();
+    let mut manifest_a: DatasetPackManifest =
+        serde_json::from_str(&fs::read_to_string(out_a.path().join("manifest.json")).unwrap())
+            .unwrap();
+    let mut manifest_b: DatasetPackManifest =
+        serde_json::from_str(&fs::read_to_string(out_b.path().join("manifest.json")).unwrap())
+            .unwrap();
+
+    normalize_derived_ann_sidecars(&mut manifest_a);
+    normalize_derived_ann_sidecars(&mut manifest_b);
+
+    let manifest_a = serde_json::to_string_pretty(&manifest_a).unwrap();
+    let manifest_b = serde_json::to_string_pretty(&manifest_b).unwrap();
 
     assert_eq!(manifest_a, manifest_b);
 }
@@ -97,10 +107,17 @@ fn dataset_packer_emits_sidecar_artifacts_for_text_and_vector_lanes() {
     let source = Path::new("fixtures/bench/source/minimal");
     let out_dir = tempdir().unwrap();
 
-    let manifest = pack_dataset(&PackRequest::new(source, out_dir.path(), "small", "clean")).unwrap();
+    let manifest =
+        pack_dataset(&PackRequest::new(source, out_dir.path(), "small", "clean")).unwrap();
 
-    assert!(manifest.files.iter().any(|file| file.kind == "text_postings"));
-    assert!(manifest.files.iter().any(|file| file.kind == "document_ids"));
+    assert!(manifest
+        .files
+        .iter()
+        .any(|file| file.kind == "text_postings"));
+    assert!(manifest
+        .files
+        .iter()
+        .any(|file| file.kind == "document_ids"));
     assert!(out_dir.path().join("text_postings.jsonl").exists());
     assert!(out_dir.path().join("document_ids.jsonl").exists());
 }
@@ -110,13 +127,87 @@ fn dataset_packer_emits_persisted_vector_lane_skeleton() {
     let source = Path::new("fixtures/bench/source/minimal");
     let out_dir = tempdir().unwrap();
 
-    let manifest = pack_dataset(&PackRequest::new(source, out_dir.path(), "small", "clean")).unwrap();
+    let manifest =
+        pack_dataset(&PackRequest::new(source, out_dir.path(), "small", "clean")).unwrap();
 
     assert!(manifest
         .files
         .iter()
         .any(|file| file.kind == "vector_lane_skeleton"));
     assert!(out_dir.path().join("vector_lane.skel").exists());
+}
+
+#[test]
+fn dataset_packer_emits_quantized_vector_preview_sidecar() {
+    let source = Path::new("fixtures/bench/source/minimal");
+    let out_dir = tempdir().unwrap();
+
+    let manifest =
+        pack_dataset(&PackRequest::new(source, out_dir.path(), "small", "clean")).unwrap();
+
+    assert!(manifest
+        .files
+        .iter()
+        .any(|file| file.kind == "document_vectors_preview_q8"));
+    assert!(out_dir.path().join("document_vectors.q8").exists());
+}
+
+#[test]
+fn dataset_packer_emits_persisted_vector_hnsw_sidecars() {
+    let source = Path::new("fixtures/bench/source/minimal");
+    let out_dir = tempdir().unwrap();
+
+    let manifest =
+        pack_dataset(&PackRequest::new(source, out_dir.path(), "small", "clean")).unwrap();
+
+    assert!(manifest
+        .files
+        .iter()
+        .any(|file| file.kind == "vector_hnsw_graph"));
+    assert!(manifest
+        .files
+        .iter()
+        .any(|file| file.kind == "vector_hnsw_data"));
+    assert!(out_dir.path().join("vector_hnsw.hnsw.graph").exists());
+    assert!(out_dir.path().join("vector_hnsw.hnsw.data").exists());
+}
+
+#[test]
+fn dataset_packer_reuses_stable_hnsw_sidecar_paths_when_output_dir_is_dirty() {
+    let source = Path::new("fixtures/bench/source/minimal");
+    let out_dir = tempdir().unwrap();
+
+    fs::write(
+        out_dir.path().join("vector_hnsw.hnsw.graph"),
+        b"stale-graph",
+    )
+    .unwrap();
+    fs::write(out_dir.path().join("vector_hnsw.hnsw.data"), b"stale-data").unwrap();
+
+    let manifest =
+        pack_dataset(&PackRequest::new(source, out_dir.path(), "small", "clean")).unwrap();
+
+    let graph = manifest
+        .files
+        .iter()
+        .find(|file| file.kind == "vector_hnsw_graph")
+        .unwrap();
+    let data = manifest
+        .files
+        .iter()
+        .find(|file| file.kind == "vector_hnsw_data")
+        .unwrap();
+
+    assert_eq!(graph.path, "vector_hnsw.hnsw.graph");
+    assert_eq!(data.path, "vector_hnsw.hnsw.data");
+    assert_ne!(
+        fs::read(out_dir.path().join(&graph.path)).unwrap(),
+        b"stale-graph"
+    );
+    assert_ne!(
+        fs::read(out_dir.path().join(&data.path)).unwrap(),
+        b"stale-data"
+    );
 }
 
 #[test]
@@ -175,7 +266,10 @@ fn dataset_packer_rejects_vector_enabled_source_without_vector_query() {
     ))
     .unwrap_err();
 
-    assert_eq!(error.message, "vector-enabled datasets require a vector query");
+    assert_eq!(
+        error.message,
+        "vector-enabled datasets require a vector query"
+    );
 }
 
 #[test]
@@ -243,4 +337,13 @@ fn dataset_packer_rejects_malformed_embedding_spec_for_vector_payloads() {
 fn read_manifest(out_dir: &Path) -> DatasetPackManifest {
     let text = fs::read_to_string(out_dir.join("manifest.json")).unwrap();
     serde_json::from_str(&text).unwrap()
+}
+
+fn normalize_derived_ann_sidecars(manifest: &mut DatasetPackManifest) {
+    for file in &mut manifest.files {
+        if matches!(file.kind.as_str(), "vector_hnsw_graph" | "vector_hnsw_data") {
+            file.checksum = "sha256:derived-ann-sidecar".to_owned();
+        }
+    }
+    manifest.checksums.manifest_payload_checksum = "sha256:normalized-for-test".to_owned();
 }

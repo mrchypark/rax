@@ -26,6 +26,7 @@ fn metric_collector_records_core_ttfq_slices() {
         SampleMetrics {
             container_open_ms: 4.0,
             metadata_readiness_ms: 9.0,
+            vector_materialization_ms: None,
             total_ttfq_ms: 15.0,
             total_ttfq_recorded: true,
             search_latency_ms: None,
@@ -94,6 +95,23 @@ fn metric_collector_records_warm_search_latency_separately() {
     assert_eq!(snapshot.metadata_readiness_ms, 5.0);
     assert!(!snapshot.total_ttfq_recorded);
     assert_eq!(snapshot.search_latency_ms, Some(0.25));
+}
+
+#[test]
+fn metric_collector_records_vector_materialization_separately() {
+    let clock = SequenceClock::new([0, 2_000, 3_000, 4_500, 6_000]);
+    let sampler = FixedMemorySampler::available(1024);
+    let mut collector = MetricCollector::new(clock, sampler);
+
+    collector.start_run();
+    collector.mark_container_open_done();
+    collector.mark_metadata_ready();
+    collector.start_vector_materialization_measurement();
+    collector.mark_vector_materialization_done();
+
+    let snapshot = collector.finish(None, None);
+
+    assert_eq!(snapshot.vector_materialization_ms, Some(1.5));
 }
 
 struct SequenceClock {

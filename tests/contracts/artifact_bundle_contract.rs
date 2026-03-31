@@ -16,6 +16,7 @@ fn sample_artifact_serializes_identity_and_explicit_missing_metrics() {
         metrics: SampleMetricSlices {
             container_open_ms: MetricValue::available(4.2),
             metadata_readiness_ms: MetricValue::available(4.8),
+            vector_materialization_ms: MetricValue::unavailable("not_measured"),
             total_ttfq_ms: MetricValue::unavailable("not_measured"),
             search_latency_ms: MetricValue::available(0.9),
         },
@@ -50,6 +51,9 @@ fn run_summary_matches_expected_fixture() {
         p50_container_open_ms: MetricValue::available(0.2),
         p95_container_open_ms: MetricValue::available(0.4),
         p99_container_open_ms: MetricValue::unavailable("insufficient_samples"),
+        p50_vector_materialization_ms: MetricValue::available(0.0),
+        p95_vector_materialization_ms: MetricValue::available(0.0),
+        p99_vector_materialization_ms: MetricValue::unavailable("insufficient_samples"),
         p50_total_ttfq_ms: MetricValue::available(6.1),
         p95_total_ttfq_ms: MetricValue::available(7.4),
         p99_total_ttfq_ms: MetricValue::unavailable("insufficient_samples"),

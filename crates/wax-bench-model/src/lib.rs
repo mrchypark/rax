@@ -64,6 +64,19 @@ pub enum PreviewMode {
     WithPreview,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumIter, Default)]
+pub enum VectorQueryMode {
+    #[serde(rename = "auto")]
+    #[default]
+    Auto,
+    #[serde(rename = "exact_flat")]
+    ExactFlat,
+    #[serde(rename = "hnsw")]
+    Hnsw,
+    #[serde(rename = "preview_q8")]
+    PreviewQ8,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumIter)]
 pub enum QueryEmbeddingMode {
     #[serde(rename = "none")]
@@ -157,9 +170,7 @@ pub fn build_vector_lane_skeleton(doc_ids: &[String], dimensions: u32) -> Vec<u8
     bytes
 }
 
-pub fn parse_vector_lane_skeleton_header(
-    bytes: &[u8],
-) -> Result<VectorLaneSkeletonHeader, String> {
+pub fn parse_vector_lane_skeleton_header(bytes: &[u8]) -> Result<VectorLaneSkeletonHeader, String> {
     if bytes.len() < VECTOR_LANE_SKELETON_HEADER_SIZE {
         return Err("vector lane skeleton header is truncated".to_owned());
     }
@@ -353,6 +364,10 @@ pub struct VectorProfile {
     pub embedding_dimensions: u32,
     pub embedding_dtype: String,
     pub distance_metric: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ann_index_backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ann_sidecar_reproducibility: Option<String>,
     pub query_vectors: QueryVectorProfile,
 }
 

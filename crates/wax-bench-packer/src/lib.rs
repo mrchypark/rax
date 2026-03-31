@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use hnsw_rs::api::AnnT;
+use hnsw_rs::prelude::{DistCosine, Hnsw};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use wax_bench_model::{
@@ -31,6 +33,35 @@ impl PackRequest {
             out_dir: out_dir.into(),
             tier: tier.into(),
             variant: variant.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdhocPackRequest {
+    pub docs_path: PathBuf,
+    pub out_dir: PathBuf,
+    pub tier: String,
+    pub variant: String,
+    pub dataset_family: String,
+    pub dataset_version: String,
+    pub embedding_spec_id: String,
+}
+
+impl AdhocPackRequest {
+    pub fn new(
+        docs_path: impl Into<PathBuf>,
+        out_dir: impl Into<PathBuf>,
+        tier: impl Into<String>,
+    ) -> Self {
+        Self {
+            docs_path: docs_path.into(),
+            out_dir: out_dir.into(),
+            tier: tier.into(),
+            variant: "clean".to_owned(),
+            dataset_family: "adhoc".to_owned(),
+            dataset_version: "v1".to_owned(),
+            embedding_spec_id: "minilm-l6-384-f32-cosine".to_owned(),
         }
     }
 }
@@ -74,8 +105,11 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
     )];
     let document_id_bytes = build_document_id_payload(&document_records)
         .map_err(|_| PackError::new("failed to serialize document id payload"))?;
-    fs::write(request.out_dir.join("document_ids.jsonl"), &document_id_bytes)
-        .map_err(|_| PackError::new("failed to write document id payload"))?;
+    fs::write(
+        request.out_dir.join("document_ids.jsonl"),
+        &document_id_bytes,
+    )
+    .map_err(|_| PackError::new("failed to write document id payload"))?;
     files.push(build_manifest_file(
         "document_ids.jsonl",
         "document_ids",
@@ -85,8 +119,11 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
     ));
     let text_posting_bytes = build_text_postings_payload(&document_records)
         .map_err(|_| PackError::new("failed to serialize text postings payload"))?;
-    fs::write(request.out_dir.join("text_postings.jsonl"), &text_posting_bytes)
-        .map_err(|_| PackError::new("failed to write text postings payload"))?;
+    fs::write(
+        request.out_dir.join("text_postings.jsonl"),
+        &text_posting_bytes,
+    )
+    .map_err(|_| PackError::new("failed to write text postings payload"))?;
     files.push(build_manifest_file(
         "text_postings.jsonl",
         "text_postings",
@@ -99,8 +136,11 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
     let mut vector_payload_hasher = Sha256::new();
     let document_vector_bytes = build_document_vector_payload(&document_records, dimensions);
     let document_vector_path = "document_vectors.f32";
-    fs::write(request.out_dir.join(document_vector_path), &document_vector_bytes)
-        .map_err(|_| PackError::new("failed to write document vector payload"))?;
+    fs::write(
+        request.out_dir.join(document_vector_path),
+        &document_vector_bytes,
+    )
+    .map_err(|_| PackError::new("failed to write document vector payload"))?;
     vector_payload_hasher.update(&document_vector_bytes);
     files.push(build_manifest_file(
         document_vector_path,
@@ -108,6 +148,43 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
         "f32le-row-major",
         document_records.len() as u64,
         &document_vector_bytes,
+    ));
+    let (hnsw_graph_path, hnsw_graph_bytes, hnsw_data_path, hnsw_data_bytes) =
+        build_hnsw_vector_sidecar(
+            &request.out_dir,
+            &document_vector_bytes,
+            dimensions as usize,
+            document_records.len(),
+        )?;
+    files.push(build_manifest_file(
+        &hnsw_graph_path,
+        "vector_hnsw_graph",
+        "hnsw-rs-graph",
+        document_records.len() as u64,
+        &hnsw_graph_bytes,
+    ));
+    files.push(build_manifest_file(
+        &hnsw_data_path,
+        "vector_hnsw_data",
+        "hnsw-rs-data",
+        document_records.len() as u64,
+        &hnsw_data_bytes,
+    ));
+    let document_vector_preview_bytes =
+        build_quantized_vector_preview_payload(&document_vector_bytes)
+            .map_err(|_| PackError::new("failed to build quantized vector preview payload"))?;
+    let document_vector_preview_path = "document_vectors.q8";
+    fs::write(
+        request.out_dir.join(document_vector_preview_path),
+        &document_vector_preview_bytes,
+    )
+    .map_err(|_| PackError::new("failed to write quantized vector preview payload"))?;
+    files.push(build_manifest_file(
+        document_vector_preview_path,
+        "document_vectors_preview_q8",
+        "i8-row-major",
+        document_records.len() as u64,
+        &document_vector_preview_bytes,
     ));
     let vector_lane_skeleton_bytes = build_vector_lane_skeleton(
         &document_records
@@ -153,8 +230,11 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
             &query_bytes,
         ));
         let query_vector_path = format!("{}.vectors.jsonl", source_query_set.name);
-        fs::write(request.out_dir.join(&query_vector_path), &query_vector_bytes)
-            .map_err(|_| PackError::new("failed to write query vector payload"))?;
+        fs::write(
+            request.out_dir.join(&query_vector_path),
+            &query_vector_bytes,
+        )
+        .map_err(|_| PackError::new("failed to write query vector payload"))?;
         files.push(build_manifest_file(
             &query_vector_path,
             "query_vectors",
@@ -258,6 +338,269 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
                 "sha256:{:x}",
                 vector_payload_hasher.finalize()
             )),
+            fairness_fingerprint: checksum_label(&logical_query_fingerprint),
+        },
+    };
+
+    manifest.checksums.manifest_payload_checksum = checksum_label(
+        &serde_json::to_vec(&manifest)
+            .map_err(|_| PackError::new("failed to serialize manifest checksum payload"))?,
+    );
+
+    let manifest_text = serde_json::to_string_pretty(&manifest)
+        .map_err(|_| PackError::new("failed to serialize manifest"))?;
+    fs::write(request.out_dir.join("manifest.json"), manifest_text)
+        .map_err(|_| PackError::new("failed to write manifest"))?;
+
+    validate_manifest(&manifest, &request.out_dir)
+        .map_err(|error| PackError::new(error.message))?;
+
+    Ok(manifest)
+}
+
+pub fn pack_adhoc_dataset(request: &AdhocPackRequest) -> Result<DatasetPackManifest, PackError> {
+    fs::create_dir_all(&request.out_dir)
+        .map_err(|_| PackError::new("failed to create output directory"))?;
+    let dimensions = require_embedding_dimensions(&request.embedding_spec_id)?;
+
+    let document_bytes = copy_file(&request.docs_path, &request.out_dir.join("docs.ndjson"))?;
+    let document_stats = analyze_documents(&document_bytes)?;
+    let document_records = load_document_records(&document_bytes)?;
+
+    let mut files = vec![build_manifest_file(
+        "docs.ndjson",
+        "documents",
+        "ndjson",
+        document_stats.doc_count,
+        &document_bytes,
+    )];
+    let document_id_bytes = build_document_id_payload(&document_records)
+        .map_err(|_| PackError::new("failed to serialize document id payload"))?;
+    fs::write(
+        request.out_dir.join("document_ids.jsonl"),
+        &document_id_bytes,
+    )
+    .map_err(|_| PackError::new("failed to write document id payload"))?;
+    files.push(build_manifest_file(
+        "document_ids.jsonl",
+        "document_ids",
+        "jsonl",
+        document_records.len() as u64,
+        &document_id_bytes,
+    ));
+    let text_posting_bytes = build_text_postings_payload(&document_records)
+        .map_err(|_| PackError::new("failed to serialize text postings payload"))?;
+    fs::write(
+        request.out_dir.join("text_postings.jsonl"),
+        &text_posting_bytes,
+    )
+    .map_err(|_| PackError::new("failed to write text postings payload"))?;
+    files.push(build_manifest_file(
+        "text_postings.jsonl",
+        "text_postings",
+        "jsonl",
+        non_empty_line_count(&text_posting_bytes),
+        &text_posting_bytes,
+    ));
+    let (query_bytes, ground_truth_bytes) = build_adhoc_query_files(&document_records)?;
+    let query_path = "queries/adhoc.jsonl";
+    let ground_truth_path = "queries/adhoc-ground-truth.jsonl";
+    fs::create_dir_all(request.out_dir.join("queries"))
+        .map_err(|_| PackError::new("failed to create adhoc query directory"))?;
+    fs::write(request.out_dir.join(query_path), &query_bytes)
+        .map_err(|_| PackError::new("failed to write adhoc query set"))?;
+    fs::write(request.out_dir.join(ground_truth_path), &ground_truth_bytes)
+        .map_err(|_| PackError::new("failed to write adhoc ground truth"))?;
+    files.push(build_manifest_file(
+        query_path,
+        "query_set",
+        "jsonl",
+        non_empty_line_count(&query_bytes),
+        &query_bytes,
+    ));
+    files.push(build_manifest_file(
+        ground_truth_path,
+        "ground_truth",
+        "jsonl",
+        non_empty_line_count(&ground_truth_bytes),
+        &ground_truth_bytes,
+    ));
+    let query_vector_bytes = build_query_vector_payload(&query_bytes, dimensions)?;
+    let query_vector_path = "adhoc.vectors.jsonl";
+    fs::write(request.out_dir.join(query_vector_path), &query_vector_bytes)
+        .map_err(|_| PackError::new("failed to write adhoc query vector payload"))?;
+    files.push(build_manifest_file(
+        query_vector_path,
+        "query_vectors",
+        "jsonl",
+        non_empty_line_count(&query_vector_bytes),
+        &query_vector_bytes,
+    ));
+
+    let document_vector_bytes = build_document_vector_payload(&document_records, dimensions);
+    fs::write(
+        request.out_dir.join("document_vectors.f32"),
+        &document_vector_bytes,
+    )
+    .map_err(|_| PackError::new("failed to write document vector payload"))?;
+    files.push(build_manifest_file(
+        "document_vectors.f32",
+        "document_vectors",
+        "f32le-row-major",
+        document_records.len() as u64,
+        &document_vector_bytes,
+    ));
+    let (hnsw_graph_path, hnsw_graph_bytes, hnsw_data_path, hnsw_data_bytes) =
+        build_hnsw_vector_sidecar(
+            &request.out_dir,
+            &document_vector_bytes,
+            dimensions as usize,
+            document_records.len(),
+        )?;
+    files.push(build_manifest_file(
+        &hnsw_graph_path,
+        "vector_hnsw_graph",
+        "hnsw-rs-graph",
+        document_records.len() as u64,
+        &hnsw_graph_bytes,
+    ));
+    files.push(build_manifest_file(
+        &hnsw_data_path,
+        "vector_hnsw_data",
+        "hnsw-rs-data",
+        document_records.len() as u64,
+        &hnsw_data_bytes,
+    ));
+    let document_vector_preview_bytes =
+        build_quantized_vector_preview_payload(&document_vector_bytes)
+            .map_err(|_| PackError::new("failed to build quantized vector preview payload"))?;
+    fs::write(
+        request.out_dir.join("document_vectors.q8"),
+        &document_vector_preview_bytes,
+    )
+    .map_err(|_| PackError::new("failed to write quantized vector preview payload"))?;
+    files.push(build_manifest_file(
+        "document_vectors.q8",
+        "document_vectors_preview_q8",
+        "i8-row-major",
+        document_records.len() as u64,
+        &document_vector_preview_bytes,
+    ));
+    let vector_lane_skeleton_bytes = build_vector_lane_skeleton(
+        &document_records
+            .iter()
+            .map(|record| record.doc_id.clone())
+            .collect::<Vec<_>>(),
+        dimensions,
+    );
+    fs::write(
+        request.out_dir.join("vector_lane.skel"),
+        &vector_lane_skeleton_bytes,
+    )
+    .map_err(|_| PackError::new("failed to write vector lane skeleton"))?;
+    files.push(build_manifest_file(
+        "vector_lane.skel",
+        "vector_lane_skeleton",
+        "wax-vector-lane-skeleton-v1",
+        document_records.len() as u64,
+        &vector_lane_skeleton_bytes,
+    ));
+
+    let vector_profile = build_vector_profile(&request.embedding_spec_id);
+    let clean_dataset_id = dataset_id(
+        &request.dataset_family,
+        &request.tier,
+        "clean",
+        &request.dataset_version,
+    );
+    let dirty_profile = build_dirty_profile(&request.variant, &clean_dataset_id)?;
+    let metadata_profile = MetadataProfile {
+        facets: Vec::new(),
+        selectivity_exemplars: wax_bench_model::SelectivityExemplars {
+            broad: "unsupported".to_owned(),
+            medium: "unsupported".to_owned(),
+            narrow: "unsupported".to_owned(),
+            zero_hit: "unsupported".to_owned(),
+        },
+    };
+    let logical_metadata_checksum = checksum_label(
+        &serde_json::to_vec(&metadata_profile)
+            .map_err(|_| PackError::new("failed to serialize metadata profile for checksum"))?,
+    );
+    let logical_query_fingerprint = query_bytes.clone();
+    let query_summary = analyze_query_set(&query_bytes)?;
+
+    let mut manifest = DatasetPackManifest {
+        schema_version: "wax_dataset_pack_v1".to_owned(),
+        generated_at: "2026-03-31T00:00:00Z".to_owned(),
+        generator: ManifestGenerator {
+            name: "wax-bench-packer".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+        },
+        identity: DatasetIdentity {
+            dataset_id: dataset_id(
+                &request.dataset_family,
+                &request.tier,
+                &request.variant,
+                &request.dataset_version,
+            ),
+            dataset_version: request.dataset_version.clone(),
+            dataset_family: request.dataset_family.clone(),
+            dataset_tier: request.tier.clone(),
+            variant_id: request.variant.clone(),
+            embedding_spec_id: request.embedding_spec_id.clone(),
+            embedding_model_version: "adhoc".to_owned(),
+            embedding_model_hash: "sha256:adhoc".to_owned(),
+            corpus_checksum: checksum_label(&document_bytes),
+            query_checksum: checksum_label(&query_bytes),
+        },
+        environment_constraints: EnvironmentConstraints {
+            min_ram_gb: 1,
+            recommended_ram_gb: 2,
+            notes: Some("adhoc pack defaults".to_owned()),
+        },
+        corpus: CorpusProfile {
+            doc_count: document_stats.doc_count,
+            vector_count: if vector_profile.enabled {
+                document_stats.doc_count
+            } else {
+                0
+            },
+            total_text_bytes: document_stats.total_text_bytes,
+            avg_doc_length: document_stats.avg_doc_length,
+            median_doc_length: document_stats.median_doc_length,
+            p95_doc_length: document_stats.p95_doc_length,
+            max_doc_length: document_stats.max_doc_length,
+            languages: vec![LanguageShare {
+                code: "und".to_owned(),
+                ratio: 1.0,
+            }],
+        },
+        text_profile: TextProfile {
+            length_buckets: document_stats.length_buckets,
+            tokenization_notes: Some("adhoc defaults".to_owned()),
+        },
+        metadata_profile,
+        vector_profile,
+        dirty_profile,
+        files,
+        query_sets: vec![QuerySetEntry {
+            query_set_id: format!(
+                "{}-{}-adhoc-{}",
+                request.dataset_family, request.tier, request.dataset_version
+            ),
+            path: query_path.to_owned(),
+            ground_truth_path: ground_truth_path.to_owned(),
+            query_count: query_summary.query_count,
+            classes: query_summary.classes.into_iter().collect(),
+            difficulty_distribution: query_summary.difficulty_distribution,
+        }],
+        checksums: ManifestChecksums {
+            manifest_payload_checksum: "sha256:pending".to_owned(),
+            logical_documents_checksum: checksum_label(&document_bytes),
+            logical_metadata_checksum,
+            logical_query_definitions_checksum: checksum_label(&logical_query_fingerprint),
+            logical_vector_payload_checksum: Some(checksum_label(&document_vector_bytes)),
             fairness_fingerprint: checksum_label(&logical_query_fingerprint),
         },
     };
@@ -504,6 +847,116 @@ fn build_document_vector_payload(records: &[DocumentStub], dimensions: u32) -> V
     bytes
 }
 
+fn build_quantized_vector_preview_payload(vector_bytes: &[u8]) -> Result<Vec<u8>, PackError> {
+    if !vector_bytes.len().is_multiple_of(4) {
+        return Err(PackError::new(
+            "document vector payload must be aligned to f32",
+        ));
+    }
+
+    let mut out = Vec::with_capacity(vector_bytes.len() / 4);
+    for chunk in vector_bytes.chunks_exact(4) {
+        let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        let scaled = (value.clamp(-1.0, 1.0) * 127.0).round() as i8;
+        out.push(scaled as u8);
+    }
+    Ok(out)
+}
+
+fn build_hnsw_vector_sidecar(
+    out_dir: &Path,
+    vector_bytes: &[u8],
+    dimensions: usize,
+    doc_count: usize,
+) -> Result<(String, Vec<u8>, String, Vec<u8>), PackError> {
+    const HNSW_MAX_CONNECTION: usize = 16;
+    const HNSW_MAX_LAYER: usize = 16;
+    const HNSW_EF_CONSTRUCTION: usize = 64;
+    const HNSW_BASENAME: &str = "vector_hnsw";
+    let graph_path = out_dir.join(format!("{HNSW_BASENAME}.hnsw.graph"));
+    let data_path = out_dir.join(format!("{HNSW_BASENAME}.hnsw.data"));
+
+    if graph_path.exists() {
+        fs::remove_file(&graph_path)
+            .map_err(|_| PackError::new("failed to clear previous HNSW graph sidecar"))?;
+    }
+    if data_path.exists() {
+        fs::remove_file(&data_path)
+            .map_err(|_| PackError::new("failed to clear previous HNSW data sidecar"))?;
+    }
+
+    let hnsw = Hnsw::<f32, DistCosine>::new(
+        HNSW_MAX_CONNECTION,
+        doc_count.max(1),
+        HNSW_MAX_LAYER,
+        HNSW_EF_CONSTRUCTION,
+        DistCosine {},
+    );
+
+    for (index, row) in vector_bytes.chunks_exact(dimensions * 4).enumerate() {
+        let mut vector = Vec::with_capacity(dimensions);
+        for chunk in row.chunks_exact(4) {
+            vector.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        hnsw.insert((&vector, index));
+    }
+
+    let dump_basename = hnsw
+        .file_dump(out_dir, HNSW_BASENAME)
+        .map_err(|error| PackError::new(error.to_string()))?;
+    if dump_basename != HNSW_BASENAME {
+        return Err(PackError::new(
+            "unexpected HNSW basename returned during sidecar dump",
+        ));
+    }
+    let graph_path = format!("{dump_basename}.hnsw.graph");
+    let data_path = format!("{dump_basename}.hnsw.data");
+    let graph_bytes = fs::read(out_dir.join(&graph_path))
+        .map_err(|_| PackError::new("failed to read HNSW graph sidecar"))?;
+    let data_bytes = fs::read(out_dir.join(&data_path))
+        .map_err(|_| PackError::new("failed to read HNSW data sidecar"))?;
+
+    Ok((graph_path, graph_bytes, data_path, data_bytes))
+}
+
+fn build_adhoc_query_files(records: &[DocumentStub]) -> Result<(Vec<u8>, Vec<u8>), PackError> {
+    let first = records
+        .first()
+        .ok_or_else(|| PackError::new("documents file must contain at least one record"))?;
+    let query_text = if first.text.trim().is_empty() {
+        first.doc_id.clone()
+    } else {
+        first.text.clone()
+    };
+    let top_k = records.len().min(10) as u32;
+    let query_line = serde_json::json!({
+        "query_id": "adhoc-q-001",
+        "query_class": "hybrid",
+        "difficulty": "easy",
+        "query_text": query_text,
+        "top_k": top_k.max(1),
+        "filter_spec": {},
+        "preview_expected": true,
+        "embedding_available": true,
+        "lane_eligibility": {
+            "text": true,
+            "vector": true,
+            "hybrid": true,
+        }
+    });
+    let ground_truth_line = serde_json::json!({
+        "query_id": "adhoc-q-001",
+    });
+
+    let mut query_bytes = serde_json::to_vec(&query_line)
+        .map_err(|_| PackError::new("failed to serialize adhoc query"))?;
+    query_bytes.push(b'\n');
+    let mut ground_truth_bytes = serde_json::to_vec(&ground_truth_line)
+        .map_err(|_| PackError::new("failed to serialize adhoc ground truth"))?;
+    ground_truth_bytes.push(b'\n');
+    Ok((query_bytes, ground_truth_bytes))
+}
+
 fn build_query_vector_payload(bytes: &[u8], dimensions: u32) -> Result<Vec<u8>, PackError> {
     let mut out = Vec::new();
     for record in load_query_vector_stubs(bytes)? {
@@ -528,6 +981,8 @@ fn build_vector_profile(embedding_spec_id: &str) -> VectorProfile {
         embedding_dimensions: embedding_dimensions_from_spec_id(embedding_spec_id).unwrap_or(0),
         embedding_dtype: embedding_dtype_from_spec_id(embedding_spec_id).to_owned(),
         distance_metric: distance_metric_from_spec_id(embedding_spec_id).to_owned(),
+        ann_index_backend: Some("hnsw_rs".to_owned()),
+        ann_sidecar_reproducibility: Some("derived_nondeterministic".to_owned()),
         query_vectors: QueryVectorProfile {
             precomputed_available: false,
             runtime_embedding_supported: true,
@@ -642,6 +1097,30 @@ fn validate_vector_profile(manifest: &DatasetPackManifest) -> Result<(), Validat
         }
     }
 
+    let has_hnsw_sidecars = manifest.files.iter().any(|file| {
+        matches!(
+            file.kind.as_str(),
+            "vector_hnsw_graph" | "vector_hnsw_data"
+        )
+    });
+    if has_hnsw_sidecars {
+        if manifest.vector_profile.ann_index_backend.as_deref() != Some("hnsw_rs") {
+            return Err(ValidationError::new(
+                "hnsw sidecars must declare ann_index_backend=hnsw_rs",
+            ));
+        }
+        if manifest
+            .vector_profile
+            .ann_sidecar_reproducibility
+            .as_deref()
+            != Some("derived_nondeterministic")
+        {
+            return Err(ValidationError::new(
+                "hnsw sidecars must declare ann_sidecar_reproducibility=derived_nondeterministic",
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -742,6 +1221,9 @@ fn validate_file_references(manifest: &DatasetPackManifest) -> Result<(), Valida
                 | "text_postings"
                 | "document_ids"
                 | "document_vectors"
+                | "vector_hnsw_graph"
+                | "vector_hnsw_data"
+                | "document_vectors_preview_q8"
                 | "vector_lane_skeleton"
                 | "query_vectors"
                 | "prebuilt_store"
@@ -1007,7 +1489,10 @@ fn build_text_postings_payload(records: &[DocumentStub]) -> Result<Vec<u8>, serd
         let mut seen = HashSet::new();
         for token in tokenize(&record.text) {
             if seen.insert(token.clone()) {
-                postings.entry(token).or_default().push(record.doc_id.clone());
+                postings
+                    .entry(token)
+                    .or_default()
+                    .push(record.doc_id.clone());
             }
         }
     }
@@ -1036,8 +1521,8 @@ fn embed_text(text: &str, dimensions: u32) -> Vec<f32> {
         let mut digest = Sha256::new();
         digest.update(token.as_bytes());
         let bytes = digest.finalize();
-        let bucket = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize
-            % dimensions;
+        let bucket =
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize % dimensions;
         vector[bucket] += 1.0;
     }
 

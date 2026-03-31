@@ -19,6 +19,18 @@
     "status": "unavailable",
     "reason": "insufficient_samples"
   },
+  "p50_vector_materialization_ms": {
+    "status": "available",
+    "value": 0.0
+  },
+  "p95_vector_materialization_ms": {
+    "status": "available",
+    "value": 0.0
+  },
+  "p99_vector_materialization_ms": {
+    "status": "unavailable",
+    "reason": "insufficient_samples"
+  },
   "p50_total_ttfq_ms": {
     "status": "available",
     "value": 6.1

@@ -81,3 +81,7 @@ path = "tests/contracts/text_engine_contract.rs"
 [[test]]
 name = "vector_engine_contract"
 path = "tests/contracts/vector_engine_contract.rs"
+
+[[test]]
+name = "release_matrix_contract"
+path = "tests/contracts/release_matrix_contract.rs"

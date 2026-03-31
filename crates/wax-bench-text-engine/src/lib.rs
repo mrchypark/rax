@@ -1,27 +1,72 @@
+use std::cell::UnsafeCell;
 use std::collections::HashMap;
-use std::fs::File;
 use std::fs;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use bytemuck::try_cast_slice;
+use hnsw_rs::prelude::{DistCosine, Hnsw, HnswIo};
 use memmap2::{Mmap, MmapOptions};
+use serde::Serialize;
+use self_cell::self_cell;
 use serde::Deserialize;
+use serde_json::{Map, Value};
 use wax_bench_model::{
     build_vector_lane_skeleton, parse_vector_lane_skeleton_header, vector_lane_doc_id_offsets,
     DatasetPackManifest, EnginePhase, EngineStats, MountRequest, OpenRequest, OpenResult,
-    SearchRequest, SearchResult, VectorLaneSkeletonHeader, WaxEngine,
+    SearchRequest, SearchResult, VectorLaneSkeletonHeader, VectorQueryMode, WaxEngine,
 };
 
-#[derive(Debug, Default)]
+type BorrowedHnsw<'a> = Hnsw<'a, f32, DistCosine>;
+
+struct HnswIoOwner(UnsafeCell<HnswIo>);
+
+impl HnswIoOwner {
+    fn new(mount_root: &Path, basename: &str) -> Self {
+        Self(UnsafeCell::new(HnswIo::new(mount_root, basename)))
+    }
+
+    fn load<'a>(&'a self) -> Result<BorrowedHnsw<'a>, String> {
+        // SAFETY: self_cell constructs the dependent exactly once while the owner is pinned
+        // in place. No other references to the wrapped HnswIo exist during this call.
+        unsafe {
+            (&mut *self.0.get())
+                .load_hnsw::<f32, DistCosine>()
+                .map_err(|error| error.to_string())
+        }
+    }
+}
+
+self_cell!(
+    struct HnswIndexCell {
+        owner: HnswIoOwner,
+
+        #[not_covariant]
+        dependent: BorrowedHnsw,
+    }
+);
+
 pub struct PackedTextEngine {
     mounted_path: Option<PathBuf>,
     phase: EnginePhase,
     manifest: Option<DatasetPackManifest>,
     text_lane: Option<TextLane>,
     vector_lane: Option<VectorLane>,
+    vector_mode: VectorQueryMode,
 }
 
 impl PackedTextEngine {
+    pub fn with_vector_mode(vector_mode: VectorQueryMode) -> Self {
+        Self {
+            mounted_path: None,
+            phase: EnginePhase::New,
+            manifest: None,
+            text_lane: None,
+            vector_lane: None,
+            vector_mode,
+        }
+    }
+
     pub fn is_text_lane_materialized(&self) -> bool {
         self.text_lane.is_some()
     }
@@ -65,6 +110,56 @@ impl PackedTextEngine {
     }
 }
 
+impl Default for PackedTextEngine {
+    fn default() -> Self {
+        Self::with_vector_mode(VectorQueryMode::Auto)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TextQueryHit {
+    pub rank: usize,
+    pub doc_id: String,
+    pub text: String,
+    pub document: Value,
+}
+
+pub fn query_text_preview(
+    dataset_path: &Path,
+    query_text: &str,
+    top_k: usize,
+) -> Result<Vec<TextQueryHit>, String> {
+    let manifest_text =
+        fs::read_to_string(dataset_path.join("manifest.json")).map_err(|error| error.to_string())?;
+    let manifest: DatasetPackManifest =
+        serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
+    let text_lane = TextLane::load(dataset_path, &manifest)?;
+    let documents = load_documents_by_id(&dataset_path.join("docs.ndjson"))?;
+
+    let doc_ids = text_lane.search_with_limit(query_text, top_k);
+    doc_ids
+        .into_iter()
+        .enumerate()
+        .map(|(index, doc_id)| {
+            let document = documents
+                .get(&doc_id)
+                .cloned()
+                .ok_or_else(|| format!("document missing for hit doc_id: {doc_id}"))?;
+            let text = document
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("text missing for hit doc_id: {doc_id}"))?
+                .to_owned();
+            Ok(TextQueryHit {
+                rank: index + 1,
+                doc_id,
+                text,
+                document,
+            })
+        })
+        .collect()
+}
+
 impl WaxEngine for PackedTextEngine {
     type Error = String;
 
@@ -105,13 +200,24 @@ impl WaxEngine for PackedTextEngine {
             self.ensure_vector_lane()?;
             return Ok(SearchResult { hits: Vec::new() });
         }
-        if matches!(request.query_text.as_str(), "__ttfq_vector__" | "__warm_vector__") {
+        if request.query_text == "__ttfq_vector__" {
+            let vector_mode = self.vector_mode;
             let lane = self.ensure_vector_lane()?;
             return Ok(SearchResult {
-                hits: lane.search_first_vector_query(),
+                hits: lane.search_first_vector_query(vector_mode),
             });
         }
-        if matches!(request.query_text.as_str(), "__ttfq_hybrid__" | "__warm_hybrid__") {
+        if matches!(
+            request.query_text.as_str(),
+            "__warmup_vector__" | "__warm_vector__"
+        ) {
+            let vector_mode = self.vector_mode;
+            let lane = self.ensure_vector_lane()?;
+            return Ok(SearchResult {
+                hits: lane.search_first_vector_query(vector_mode),
+            });
+        }
+        if request.query_text == "__ttfq_hybrid__" {
             self.ensure_text_lane()?;
             self.ensure_vector_lane()?;
             let text_lane = self
@@ -123,12 +229,33 @@ impl WaxEngine for PackedTextEngine {
                 .as_ref()
                 .ok_or_else(|| "vector lane not materialized".to_owned())?;
             return Ok(SearchResult {
-                hits: search_first_hybrid_query(text_lane, vector_lane),
+                hits: search_first_hybrid_query(text_lane, vector_lane, self.vector_mode),
+            });
+        }
+        if matches!(
+            request.query_text.as_str(),
+            "__warmup_hybrid__" | "__warm_hybrid__"
+        ) {
+            self.ensure_text_lane()?;
+            self.ensure_vector_lane()?;
+            let text_lane = self
+                .text_lane
+                .as_ref()
+                .ok_or_else(|| "text lane not materialized".to_owned())?;
+            let vector_lane = self
+                .vector_lane
+                .as_ref()
+                .ok_or_else(|| "vector lane not materialized".to_owned())?;
+            return Ok(SearchResult {
+                hits: search_first_hybrid_query(text_lane, vector_lane, self.vector_mode),
             });
         }
 
         let lane = self.ensure_text_lane()?;
-        let hits = if matches!(request.query_text.as_str(), "__ttfq_text__" | "__warm_text__") {
+        let hits = if matches!(
+            request.query_text.as_str(),
+            "__ttfq_text__" | "__warm_text__"
+        ) {
             lane.search_first_text_query()
         } else {
             lane.search(&request.query_text)
@@ -153,7 +280,6 @@ struct TextLane {
     inverted: HashMap<String, Vec<String>>,
 }
 
-#[derive(Debug)]
 struct VectorLane {
     first_vector_query: Vec<f32>,
     first_vector_top_k: usize,
@@ -163,6 +289,8 @@ struct VectorLane {
     skeleton_header: VectorLaneSkeletonHeader,
     doc_id_offsets: Vec<u64>,
     doc_vectors: Mmap,
+    hnsw_index: Option<HnswIndexCell>,
+    preview_vectors: Option<Mmap>,
     dimensions: usize,
 }
 
@@ -194,12 +322,13 @@ impl TextLane {
             .iter()
             .map(|query_set| mount_root.join(&query_set.path))
             .collect::<Vec<_>>();
-        if query_paths.is_empty() {
-            return Err("query_set missing from manifest".to_owned());
-        }
-
-        let (first_text_query, first_text_top_k) = load_first_text_query(&query_paths)?;
-        let first_hybrid_query = load_first_hybrid_text_query(&query_paths)?;
+        let (first_text_query, first_text_top_k, first_hybrid_query) = if query_paths.is_empty() {
+            (String::new(), 0, None)
+        } else {
+            let (first_text_query, first_text_top_k) = load_first_text_query(&query_paths)?;
+            let first_hybrid_query = load_first_hybrid_text_query(&query_paths)?;
+            (first_text_query, first_text_top_k, first_hybrid_query)
+        };
         let inverted = load_text_postings(&postings_path)?;
 
         Ok(Self {
@@ -254,6 +383,17 @@ impl VectorLane {
             .find(|file| file.kind == "document_vectors")
             .map(|file| mount_root.join(&file.path))
             .ok_or_else(|| "document_vectors file missing from manifest".to_owned())?;
+        let preview_vectors_path = manifest
+            .files
+            .iter()
+            .find(|file| file.kind == "document_vectors_preview_q8")
+            .map(|file| mount_root.join(&file.path));
+        let hnsw_graph_basename = manifest
+            .files
+            .iter()
+            .find(|file| file.kind == "vector_hnsw_graph")
+            .and_then(|file| file.path.strip_suffix(".hnsw.graph"))
+            .map(str::to_owned);
         let query_vectors_path = manifest
             .files
             .iter()
@@ -279,39 +419,92 @@ impl VectorLane {
 
         let doc_vectors = map_read_only(&document_vectors_path)?;
         validate_document_vectors(doc_vectors.as_ref(), dimensions, doc_count)?;
+        let hnsw_index = hnsw_graph_basename
+            .as_deref()
+            .map(|basename| load_hnsw_index(mount_root, basename))
+            .transpose()?;
+        let preview_vectors = preview_vectors_path
+            .map(|path| -> Result<Mmap, String> {
+                let mapped = map_read_only(&path)?;
+                validate_preview_vectors(mapped.as_ref(), dimensions, doc_count)?;
+                Ok(mapped)
+            })
+            .transpose()?;
         let first_vector_query = load_first_vector_query(&query_vectors_path)?;
         let first_hybrid_query = load_first_hybrid_vector_query(&query_vectors_path)?;
 
         Ok(Self {
             first_vector_query: first_vector_query.vector,
             first_vector_top_k: first_vector_query.top_k,
-            first_hybrid_query: first_hybrid_query.as_ref().map(|query| query.vector.clone()),
+            first_hybrid_query: first_hybrid_query
+                .as_ref()
+                .map(|query| query.vector.clone()),
             first_hybrid_top_k: first_hybrid_query.map(|query| query.top_k).unwrap_or(0),
             doc_ids,
             skeleton_header,
             doc_id_offsets,
             doc_vectors,
+            hnsw_index,
+            preview_vectors,
             dimensions,
         })
     }
 
-    fn search_first_vector_query(&self) -> Vec<String> {
+    fn search_first_vector_query(&self, mode: VectorQueryMode) -> Vec<String> {
         if self.first_vector_top_k == 0 {
             return Vec::new();
         }
 
-        self.search_with_query(&self.first_vector_query, self.first_vector_top_k)
+        self.search_with_query(&self.first_vector_query, self.first_vector_top_k, mode)
     }
 
-    fn search_with_query(&self, query: &[f32], limit: usize) -> Vec<String> {
+    fn search_with_query(&self, query: &[f32], limit: usize, mode: VectorQueryMode) -> Vec<String> {
         if limit == 0 || self.dimensions == 0 {
             return Vec::new();
         }
 
+        match mode {
+            VectorQueryMode::ExactFlat => self.search_exact(query, limit),
+            VectorQueryMode::Hnsw => self.search_with_hnsw_or_exact(query, limit),
+            VectorQueryMode::PreviewQ8 => self.search_with_preview_or_exact(query, limit),
+            VectorQueryMode::Auto => self.search_with_auto_mode(query, limit),
+        }
+    }
+
+    fn search_with_auto_mode(&self, query: &[f32], limit: usize) -> Vec<String> {
+        if self.hnsw_index.is_some() {
+            return self.search_with_hnsw(query, limit);
+        }
+        if self.preview_vectors.is_some() {
+            return self.search_with_quantized_preview(query, limit);
+        }
+
+        self.search_exact(query, limit)
+    }
+
+    fn search_with_preview_or_exact(&self, query: &[f32], limit: usize) -> Vec<String> {
+        if self.preview_vectors.is_some() {
+            return self.search_with_quantized_preview(query, limit);
+        }
+
+        self.search_exact(query, limit)
+    }
+
+    fn search_with_hnsw_or_exact(&self, query: &[f32], limit: usize) -> Vec<String> {
+        if self.hnsw_index.is_some() {
+            return self.search_with_hnsw(query, limit);
+        }
+
+        self.search_exact(query, limit)
+    }
+
+    fn search_exact(&self, query: &[f32], limit: usize) -> Vec<String> {
         let mut hits = Vec::with_capacity(limit.min(self.skeleton_header.doc_count as usize));
-        let vector_values =
-            try_cast_slice::<u8, f32>(self.doc_vectors.as_ref()).expect("validated vector mmap");
-        for (index, vector) in vector_values.chunks_exact(self.dimensions).enumerate() {
+        for (index, vector) in self
+            .vector_values()
+            .chunks_exact(self.dimensions)
+            .enumerate()
+        {
             let score = dot_product(query, vector);
             self.collect_top_hit(&mut hits, limit, index, score);
         }
@@ -322,7 +515,70 @@ impl VectorLane {
             .collect()
     }
 
-    fn collect_top_hit(&self, hits: &mut Vec<(usize, f32)>, limit: usize, index: usize, score: f32) {
+    fn search_with_quantized_preview(&self, query: &[f32], limit: usize) -> Vec<String> {
+        let preview_vectors = self
+            .preview_vectors
+            .as_ref()
+            .expect("preview path checked by caller");
+        let preview_limit = self.preview_limit(limit);
+        let mut candidates = Vec::with_capacity(preview_limit);
+        for (index, vector) in preview_vectors
+            .as_ref()
+            .chunks_exact(self.dimensions)
+            .enumerate()
+        {
+            let score = dot_product_i8_preview(query, vector);
+            self.collect_top_hit(&mut candidates, preview_limit, index, score);
+        }
+
+        let mut reranked = Vec::with_capacity(candidates.len());
+        for (index, _) in candidates {
+            let start = index * self.dimensions;
+            let end = start + self.dimensions;
+            let exact_score = dot_product(query, &self.vector_values()[start..end]);
+            reranked.push((index, exact_score));
+        }
+
+        reranked.sort_by(|left, right| self.compare_hits(*left, *right));
+        reranked
+            .into_iter()
+            .take(limit)
+            .map(|(index, _)| self.doc_id(index).to_owned())
+            .collect()
+    }
+
+    fn search_with_hnsw(&self, query: &[f32], limit: usize) -> Vec<String> {
+        let candidate_limit = self.hnsw_candidate_limit(limit);
+        let ef_search = candidate_limit.max(limit).max(32);
+        let neighbours = self
+            .hnsw_index
+            .as_ref()
+            .expect("checked by caller")
+            .with_dependent(|_, hnsw_index| hnsw_index.search(query, candidate_limit, ef_search));
+        let mut reranked = Vec::with_capacity(neighbours.len());
+        for neighbour in neighbours {
+            let index = neighbour.d_id;
+            let start = index * self.dimensions;
+            let end = start + self.dimensions;
+            let exact_score = dot_product(query, &self.vector_values()[start..end]);
+            reranked.push((index, exact_score));
+        }
+
+        reranked.sort_by(|left, right| self.compare_hits(*left, *right));
+        reranked
+            .into_iter()
+            .take(limit)
+            .map(|(index, _)| self.doc_id(index).to_owned())
+            .collect()
+    }
+
+    fn collect_top_hit(
+        &self,
+        hits: &mut Vec<(usize, f32)>,
+        limit: usize,
+        index: usize,
+        score: f32,
+    ) {
         let candidate = (index, score);
         if hits.len() < limit {
             hits.push(candidate);
@@ -361,6 +617,20 @@ impl VectorLane {
         let blob = &self.doc_ids.as_slice()
             [blob_base..blob_base + self.skeleton_header.doc_id_blob_length as usize];
         &blob[start..end]
+    }
+
+    fn vector_values(&self) -> &[f32] {
+        try_cast_slice::<u8, f32>(self.doc_vectors.as_ref()).expect("validated vector mmap")
+    }
+
+    fn preview_limit(&self, limit: usize) -> usize {
+        let doc_count = self.skeleton_header.doc_count as usize;
+        limit.saturating_mul(16).max(64).min(doc_count)
+    }
+
+    fn hnsw_candidate_limit(&self, limit: usize) -> usize {
+        let doc_count = self.skeleton_header.doc_count as usize;
+        limit.saturating_mul(8).max(64).min(doc_count)
     }
 }
 
@@ -471,7 +741,11 @@ struct FirstTextQuery {
     top_k: usize,
 }
 
-fn validate_document_vectors(bytes: &[u8], dimensions: usize, doc_count: usize) -> Result<(), String> {
+fn validate_document_vectors(
+    bytes: &[u8],
+    dimensions: usize,
+    doc_count: usize,
+) -> Result<(), String> {
     if dimensions == 0 {
         return Ok(());
     }
@@ -482,6 +756,20 @@ fn validate_document_vectors(bytes: &[u8], dimensions: usize, doc_count: usize) 
         .map_err(|_| "document vector payload alignment is invalid".to_owned())?;
     if values.len() != doc_count * dimensions {
         return Err("document vector payload row count does not match manifest".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_preview_vectors(
+    bytes: &[u8],
+    dimensions: usize,
+    doc_count: usize,
+) -> Result<(), String> {
+    if dimensions == 0 {
+        return Ok(());
+    }
+    if bytes.len() != doc_count * dimensions {
+        return Err("preview vector payload row count does not match manifest".to_owned());
     }
     Ok(())
 }
@@ -522,7 +810,11 @@ fn load_first_hybrid_vector_query(paths: &[PathBuf]) -> Result<Option<FirstVecto
     Ok(None)
 }
 
-fn search_first_hybrid_query(text_lane: &TextLane, vector_lane: &VectorLane) -> Vec<String> {
+fn search_first_hybrid_query(
+    text_lane: &TextLane,
+    vector_lane: &VectorLane,
+    vector_mode: VectorQueryMode,
+) -> Vec<String> {
     let Some(hybrid_text_query) = text_lane.first_hybrid_query.as_ref() else {
         return Vec::new();
     };
@@ -534,7 +826,7 @@ fn search_first_hybrid_query(text_lane: &TextLane, vector_lane: &VectorLane) -> 
         .max(vector_lane.first_hybrid_top_k)
         .max(1);
     let text_hits = text_lane.search_with_limit(hybrid_text_query, limit);
-    let vector_hits = vector_lane.search_with_query(hybrid_vector_query, limit);
+    let vector_hits = vector_lane.search_with_query(hybrid_vector_query, limit, vector_mode);
     fuse_ranked_hits(&text_hits, &vector_hits, limit)
 }
 
@@ -555,11 +847,22 @@ fn fuse_ranked_hits(text_hits: &[String], vector_hits: &[String], limit: usize) 
             .unwrap()
             .then_with(|| left.0.cmp(&right.0))
     });
-    fused.into_iter().take(limit).map(|(doc_id, _)| doc_id).collect()
+    fused
+        .into_iter()
+        .take(limit)
+        .map(|(doc_id, _)| doc_id)
+        .collect()
 }
 
 fn dot_product(left: &[f32], right: &[f32]) -> f32 {
     left.iter().zip(right).map(|(l, r)| l * r).sum()
+}
+
+fn dot_product_i8_preview(left: &[f32], right: &[u8]) -> f32 {
+    left.iter()
+        .zip(right)
+        .map(|(l, r)| l * (*r as i8 as f32))
+        .sum()
 }
 
 fn load_vector_lane_skeleton(
@@ -583,7 +886,13 @@ fn load_vector_lane_skeleton(
         let documents_path = mount_root.join("docs.ndjson");
         load_document_ids_from_documents(&documents_path)?
     };
-    Ok(ByteStorage::Owned(build_vector_lane_skeleton(&doc_ids, dimensions)))
+    Ok(ByteStorage::Owned(build_vector_lane_skeleton(
+        &doc_ids, dimensions,
+    )))
+}
+
+fn load_hnsw_index(mount_root: &Path, basename: &str) -> Result<HnswIndexCell, String> {
+    HnswIndexCell::try_new(HnswIoOwner::new(mount_root, basename), |owner| owner.load())
 }
 
 fn map_read_only(path: &Path) -> Result<Mmap, String> {
@@ -602,6 +911,27 @@ fn load_document_ids_from_documents(path: &Path) -> Result<Vec<String>, String> 
                 .map_err(|error| error.to_string())
         })
         .collect()
+}
+
+fn load_documents_by_id(path: &Path) -> Result<HashMap<String, Value>, String> {
+    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let mut documents = HashMap::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let value: Value = serde_json::from_str(line).map_err(|error| error.to_string())?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| "document line must be a json object".to_owned())?;
+        let doc_id = object
+            .get("doc_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "document line missing doc_id".to_owned())?;
+        documents.insert(doc_id.to_owned(), Value::Object(clone_object(object)));
+    }
+    Ok(documents)
+}
+
+fn clone_object(object: &Map<String, Value>) -> Map<String, Value> {
+    object.iter().map(|(key, value)| (key.clone(), value.clone())).collect()
 }
 
 #[derive(Debug, Deserialize)]

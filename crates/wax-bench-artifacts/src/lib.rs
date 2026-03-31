@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use wax_bench_metrics::{MemoryReading, SampleMetrics};
-use wax_bench_model::{BenchmarkId, MaterializationMode};
+use wax_bench_model::{BenchmarkId, MaterializationMode, VectorQueryMode};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -29,6 +29,7 @@ impl<T> MetricValue<T> {
 pub struct SampleMetricSlices {
     pub container_open_ms: MetricValue<f64>,
     pub metadata_readiness_ms: MetricValue<f64>,
+    pub vector_materialization_ms: MetricValue<f64>,
     pub total_ttfq_ms: MetricValue<f64>,
     pub search_latency_ms: MetricValue<f64>,
 }
@@ -49,6 +50,9 @@ pub struct RunSummaryArtifact {
     pub p50_container_open_ms: MetricValue<f64>,
     pub p95_container_open_ms: MetricValue<f64>,
     pub p99_container_open_ms: MetricValue<f64>,
+    pub p50_vector_materialization_ms: MetricValue<f64>,
+    pub p95_vector_materialization_ms: MetricValue<f64>,
+    pub p99_vector_materialization_ms: MetricValue<f64>,
     pub p50_total_ttfq_ms: MetricValue<f64>,
     pub p95_total_ttfq_ms: MetricValue<f64>,
     pub p99_total_ttfq_ms: MetricValue<f64>,
@@ -63,6 +67,7 @@ pub struct ReplayConfigArtifact {
     pub workload_id: String,
     pub sample_count: u32,
     pub materialization_mode: MaterializationMode,
+    pub vector_mode: VectorQueryMode,
     pub artifact_dir: String,
 }
 
@@ -110,7 +115,7 @@ impl ArtifactError {
 
 pub fn render_markdown_summary(summary: &RunSummaryArtifact) -> String {
     format!(
-        "# Benchmark Summary\n\n- Run: {}\n- Dataset: {}\n- Workload: {}\n- Samples: {}\n- p50 container_open_ms: {}\n- p95 container_open_ms: {}\n- p99 container_open_ms: {}\n- p50 total_ttfq_ms: {}\n- p95 total_ttfq_ms: {}\n- p99 total_ttfq_ms: {}\n- p50 search_latency_ms: {}\n- p95 search_latency_ms: {}\n- p99 search_latency_ms: {}\n",
+        "# Benchmark Summary\n\n- Run: {}\n- Dataset: {}\n- Workload: {}\n- Samples: {}\n- p50 container_open_ms: {}\n- p95 container_open_ms: {}\n- p99 container_open_ms: {}\n- p50 vector_materialization_ms: {}\n- p95 vector_materialization_ms: {}\n- p99 vector_materialization_ms: {}\n- p50 total_ttfq_ms: {}\n- p95 total_ttfq_ms: {}\n- p99 total_ttfq_ms: {}\n- p50 search_latency_ms: {}\n- p95 search_latency_ms: {}\n- p99 search_latency_ms: {}\n",
         summary.run_id,
         summary.benchmark.dataset_id,
         summary.benchmark.workload_id,
@@ -118,6 +123,9 @@ pub fn render_markdown_summary(summary: &RunSummaryArtifact) -> String {
         metric_value_label(&summary.p50_container_open_ms),
         metric_value_label(&summary.p95_container_open_ms),
         metric_value_label(&summary.p99_container_open_ms),
+        metric_value_label(&summary.p50_vector_materialization_ms),
+        metric_value_label(&summary.p95_vector_materialization_ms),
+        metric_value_label(&summary.p99_vector_materialization_ms),
         metric_value_label(&summary.p50_total_ttfq_ms),
         metric_value_label(&summary.p95_total_ttfq_ms),
         metric_value_label(&summary.p99_total_ttfq_ms),
@@ -139,6 +147,7 @@ pub fn write_run_bundle(
         workload_id: benchmark.workload_id.clone(),
         sample_count: measured_runs.len() as u32,
         materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
+        vector_mode: VectorQueryMode::Auto,
         artifact_dir: out_dir.display().to_string(),
     };
     write_run_bundle_with_replay_config(
@@ -173,10 +182,12 @@ pub fn write_run_bundle_with_replay_config(
             metrics: SampleMetricSlices {
                 container_open_ms: MetricValue::available(metrics.container_open_ms),
                 metadata_readiness_ms: MetricValue::available(metrics.metadata_readiness_ms),
+                vector_materialization_ms: metric_value_from_option(
+                    metrics.vector_materialization_ms,
+                    "not_measured",
+                ),
                 total_ttfq_ms: metric_value_from_option(
-                    metrics
-                        .total_ttfq_recorded
-                        .then_some(metrics.total_ttfq_ms),
+                    metrics.total_ttfq_recorded.then_some(metrics.total_ttfq_ms),
                     "not_measured",
                 ),
                 search_latency_ms: metric_value_from_option(
@@ -295,9 +306,22 @@ pub fn render_replay_command(replay: &ReplayConfigArtifact) -> Result<String, St
         .as_deref()
         .ok_or_else(|| "replay dataset_path missing".to_owned())?;
     Ok(format!(
-        "cargo run -p wax-bench-cli -- run --dataset {} --workload {} --sample-count {} --artifact-dir {}",
-        dataset_path, replay.workload_id, replay.sample_count, replay.artifact_dir
+        "cargo run -p wax-bench-cli -- run --dataset {} --workload {} --sample-count {} --vector-mode {} --artifact-dir {}",
+        dataset_path,
+        replay.workload_id,
+        replay.sample_count,
+        vector_mode_label(replay.vector_mode),
+        replay.artifact_dir
     ))
+}
+
+fn vector_mode_label(mode: VectorQueryMode) -> &'static str {
+    match mode {
+        VectorQueryMode::Auto => "auto",
+        VectorQueryMode::ExactFlat => "exact_flat",
+        VectorQueryMode::Hnsw => "hnsw",
+        VectorQueryMode::PreviewQ8 => "preview_q8",
+    }
 }
 
 fn build_run_summary(
@@ -320,6 +344,13 @@ fn build_run_summary(
             MetricValue::Unavailable { .. } => None,
         })
         .collect();
+    let mut vector_materializations: Vec<f64> = sample_artifacts
+        .iter()
+        .filter_map(|artifact| match artifact.metrics.vector_materialization_ms {
+            MetricValue::Available { value } => Some(value),
+            MetricValue::Unavailable { .. } => None,
+        })
+        .collect();
     let mut search_latencies: Vec<f64> = sample_artifacts
         .iter()
         .filter_map(|artifact| match artifact.metrics.search_latency_ms {
@@ -329,6 +360,7 @@ fn build_run_summary(
         .collect();
     container_opens.sort_by(|left, right| left.partial_cmp(right).unwrap());
     totals.sort_by(|left, right| left.partial_cmp(right).unwrap());
+    vector_materializations.sort_by(|left, right| left.partial_cmp(right).unwrap());
     search_latencies.sort_by(|left, right| left.partial_cmp(right).unwrap());
 
     RunSummaryArtifact {
@@ -339,6 +371,9 @@ fn build_run_summary(
         p50_container_open_ms: percentile_metric(&container_opens, 0.50, 1),
         p95_container_open_ms: percentile_metric(&container_opens, 0.95, 1),
         p99_container_open_ms: percentile_metric(&container_opens, 0.99, 4),
+        p50_vector_materialization_ms: percentile_metric(&vector_materializations, 0.50, 1),
+        p95_vector_materialization_ms: percentile_metric(&vector_materializations, 0.95, 1),
+        p99_vector_materialization_ms: percentile_metric(&vector_materializations, 0.99, 4),
         p50_total_ttfq_ms: percentile_metric(&totals, 0.50, 1),
         p95_total_ttfq_ms: percentile_metric(&totals, 0.95, 1),
         p99_total_ttfq_ms: percentile_metric(&totals, 0.99, 4),

@@ -59,13 +59,11 @@ fn engine_trait_supports_runner_lifecycle_surface() {
     assert_eq!(initial_stats.phase, EnginePhase::New);
     assert_eq!(initial_stats.last_mounted_path, None);
 
-    assert!(
-        engine
-            .search(SearchRequest {
-                query_text: "cold open".to_owned(),
-            })
-            .is_err()
-    );
+    assert!(engine
+        .search(SearchRequest {
+            query_text: "cold open".to_owned(),
+        })
+        .is_err());
 
     engine
         .mount(MountRequest {
@@ -80,9 +78,11 @@ fn engine_trait_supports_runner_lifecycle_surface() {
         Some(std::path::Path::new("/tmp/store.wax"))
     );
 
-    assert!(engine.mount(MountRequest {
-        store_path: PathBuf::from("/tmp/store.wax"),
-    }).is_err());
+    assert!(engine
+        .mount(MountRequest {
+            store_path: PathBuf::from("/tmp/store.wax"),
+        })
+        .is_err());
     let mounted_stats_after_failed_mount = engine.get_stats();
 
     assert_eq!(mounted_stats_after_failed_mount, mounted_stats);
@@ -113,5 +113,8 @@ fn engine_trait_supports_runner_lifecycle_surface() {
     );
     assert_eq!(search.hits, vec!["cold open".to_owned()]);
     assert_eq!(stats.phase, EnginePhase::Open);
-    assert_eq!(stats.last_mounted_path.as_deref(), Some(std::path::Path::new("/tmp/store.wax")));
+    assert_eq!(
+        stats.last_mounted_path.as_deref(),
+        Some(std::path::Path::new("/tmp/store.wax"))
+    );
 }

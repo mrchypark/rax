@@ -4,7 +4,7 @@ use wax_bench_artifacts::{
     ArtifactBundleStatus, MetricValue, ReplayConfigArtifact,
 };
 use wax_bench_metrics::{CompilerOptimization, MemoryReading, SampleMetrics, ThermalState};
-use wax_bench_model::{BenchmarkId, MaterializationMode};
+use wax_bench_model::{BenchmarkId, MaterializationMode, VectorQueryMode};
 
 #[test]
 fn artifact_checksum_mismatch_is_detected() {
@@ -89,7 +89,7 @@ fn run_config_can_be_replayed_exactly() {
     assert_eq!(bundle.manifest.replay, replay);
     assert_eq!(
         render_replay_command(&bundle.manifest.replay).unwrap(),
-        "cargo run -p wax-bench-cli -- run --dataset fixtures/bench/out/minimal-pack --workload ttfq_text --sample-count 2 --artifact-dir /tmp/replayed-artifacts"
+        "cargo run -p wax-bench-cli -- run --dataset fixtures/bench/out/minimal-pack --workload ttfq_text --sample-count 2 --vector-mode auto --artifact-dir /tmp/replayed-artifacts"
     );
 }
 
@@ -128,6 +128,7 @@ fn replay_config(artifact_dir: &str) -> ReplayConfigArtifact {
         workload_id: "ttfq_text".to_owned(),
         sample_count: 2,
         materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
+        vector_mode: VectorQueryMode::Auto,
         artifact_dir: artifact_dir.to_owned(),
     }
 }
@@ -136,6 +137,7 @@ fn sample(total_ttfq_ms: f64) -> SampleMetrics {
     SampleMetrics {
         container_open_ms: 1.0,
         metadata_readiness_ms: 1.0,
+        vector_materialization_ms: None,
         total_ttfq_ms,
         total_ttfq_recorded: true,
         search_latency_ms: None,

@@ -22,6 +22,7 @@ pub enum ThermalState {
 pub struct SampleMetrics {
     pub container_open_ms: f64,
     pub metadata_readiness_ms: f64,
+    pub vector_materialization_ms: Option<f64>,
     pub total_ttfq_ms: f64,
     pub total_ttfq_recorded: bool,
     pub search_latency_ms: Option<f64>,
@@ -44,6 +45,8 @@ pub struct MetricCollector<C, M> {
     start_us: Option<u64>,
     container_open_us: Option<u64>,
     metadata_readiness_us: Option<u64>,
+    vector_materialization_start_us: Option<u64>,
+    vector_materialization_done_us: Option<u64>,
     query_done_us: Option<u64>,
     search_start_us: Option<u64>,
     search_done_us: Option<u64>,
@@ -62,6 +65,8 @@ where
             start_us: None,
             container_open_us: None,
             metadata_readiness_us: None,
+            vector_materialization_start_us: None,
+            vector_materialization_done_us: None,
             query_done_us: None,
             search_start_us: None,
             search_done_us: None,
@@ -81,6 +86,17 @@ where
     pub fn mark_metadata_ready(&mut self) {
         let start_us = self.start_us.expect("start_run must be called first");
         self.metadata_readiness_us = Some(self.clock.now_us() - start_us);
+    }
+
+    pub fn start_vector_materialization_measurement(&mut self) {
+        self.vector_materialization_start_us = Some(self.clock.now_us());
+    }
+
+    pub fn mark_vector_materialization_done(&mut self) {
+        let start_us = self
+            .vector_materialization_start_us
+            .expect("start_vector_materialization_measurement must be called first");
+        self.vector_materialization_done_us = Some(self.clock.now_us() - start_us);
     }
 
     pub fn mark_query_done(&mut self) {
@@ -111,6 +127,7 @@ where
         SampleMetrics {
             container_open_ms: duration_ms(self.container_open_us.unwrap_or(0)),
             metadata_readiness_ms: duration_ms(self.metadata_readiness_us.unwrap_or(0)),
+            vector_materialization_ms: self.vector_materialization_done_us.map(duration_ms),
             total_ttfq_ms: duration_ms(self.query_done_us.unwrap_or(0)),
             total_ttfq_recorded: self.query_done_us.is_some(),
             search_latency_ms: self.search_done_us.map(duration_ms),

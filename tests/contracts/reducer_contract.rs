@@ -19,7 +19,13 @@ fn reducer_computes_percentiles_from_sample_bundle() {
             sample_index: 0,
         },
         "sha256:fairness-a",
-        &[sample(1.0), sample(2.0), sample(3.0), sample(4.0), sample(5.0)],
+        &[
+            sample(1.0),
+            sample(2.0),
+            sample(3.0),
+            sample(4.0),
+            sample(5.0),
+        ],
     )
     .unwrap();
 
@@ -35,6 +41,10 @@ fn reducer_computes_percentiles_from_sample_bundle() {
     assert_eq!(
         report.summary.p95_total_ttfq_ms,
         MetricValue::available(5.0)
+    );
+    assert_eq!(
+        report.summary.p95_vector_materialization_ms,
+        MetricValue::available(0.5)
     );
     assert_eq!(
         report.summary.p99_total_ttfq_ms,
@@ -107,6 +117,7 @@ fn reducer_preserves_unavailable_percentiles_for_empty_measurements() {
         metrics: SampleMetricSlices {
             container_open_ms: MetricValue::available(1.0),
             metadata_readiness_ms: MetricValue::available(1.0),
+            vector_materialization_ms: MetricValue::unavailable("not_measured"),
             total_ttfq_ms: MetricValue::unavailable("not_measured"),
             search_latency_ms: MetricValue::available(0.7),
         },
@@ -120,6 +131,9 @@ fn reducer_preserves_unavailable_percentiles_for_empty_measurements() {
         p50_container_open_ms: MetricValue::available(1.0),
         p95_container_open_ms: MetricValue::available(1.0),
         p99_container_open_ms: MetricValue::unavailable("insufficient_samples"),
+        p50_vector_materialization_ms: MetricValue::unavailable("insufficient_samples"),
+        p95_vector_materialization_ms: MetricValue::unavailable("insufficient_samples"),
+        p99_vector_materialization_ms: MetricValue::unavailable("insufficient_samples"),
         p50_total_ttfq_ms: MetricValue::unavailable("insufficient_samples"),
         p95_total_ttfq_ms: MetricValue::unavailable("insufficient_samples"),
         p99_total_ttfq_ms: MetricValue::unavailable("insufficient_samples"),
@@ -179,6 +193,7 @@ fn sample(total_ttfq_ms: f64) -> SampleMetrics {
     SampleMetrics {
         container_open_ms: 1.0,
         metadata_readiness_ms: 1.0,
+        vector_materialization_ms: Some(0.5),
         total_ttfq_ms,
         total_ttfq_recorded: true,
         search_latency_ms: None,

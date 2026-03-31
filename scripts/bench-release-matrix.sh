@@ -15,7 +15,7 @@ mkdir -p "$ARTIFACT_ROOT"
 
 cargo build --release -p wax-bench-cli
 
-for WORKLOAD in container_open ttfq_text ttfq_vector warm_text warm_vector warm_hybrid; do
+for WORKLOAD in container_open materialize_vector ttfq_text ttfq_vector warm_text warm_vector warm_hybrid; do
   RUN_DIR="$ARTIFACT_ROOT/$WORKLOAD"
   rm -rf "$RUN_DIR"
   "$BIN" run \
@@ -25,3 +25,7 @@ for WORKLOAD in container_open ttfq_text ttfq_vector warm_text warm_vector warm_
     --artifact-dir "$RUN_DIR"
   "$BIN" reduce --input "$RUN_DIR"
 done
+
+"$BIN" matrix-report \
+  --input "$ARTIFACT_ROOT" \
+  --output "$ARTIFACT_ROOT/vector-lane-summary.md"
