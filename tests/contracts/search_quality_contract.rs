@@ -173,6 +173,8 @@ fn search_quality_summary_computes_ranked_metrics_from_qrels() {
 
     assert_eq!(summary.query_count, 2);
     assert_eq!(summary.unrated_hit_count, 2);
+    assert_eq!(summary.unrated_hits_by_query["q-001"], vec!["miss-001"]);
+    assert_eq!(summary.unrated_hits_by_query["q-002"], vec!["miss-002"]);
     assert_eq!(summary.ndcg_at_10, 1.0);
     assert_eq!(summary.recall_at_100, 1.0);
     assert_eq!(summary.mrr_at_10, 1.0);
@@ -214,5 +216,39 @@ fn quality_summary_from_paths_rejects_results_missing_query_coverage() {
             .unwrap_err()
             .message,
         "results file must align with query ids"
+    );
+}
+
+#[test]
+fn quality_summary_from_paths_rejects_duplicate_query_ids_in_query_set() {
+    let root = tempdir().unwrap();
+    let query_set_path = root.path().join("queries.jsonl");
+    let qrels_path = root.path().join("qrels.jsonl");
+    let results_path = root.path().join("results.json");
+
+    fs::write(
+        &query_set_path,
+        concat!(
+            "{\"query_id\":\"q-001\",\"query_class\":\"keyword\",\"difficulty\":\"easy\"}\n",
+            "{\"query_id\":\"q-001\",\"query_class\":\"keyword\",\"difficulty\":\"easy\"}\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &qrels_path,
+        "{\"query_id\":\"q-001\",\"doc_id\":\"doc-001\",\"relevance\":3}\n",
+    )
+    .unwrap();
+    fs::write(
+        &results_path,
+        "[{\"query_id\":\"q-001\",\"hits\":[{\"doc_id\":\"doc-001\"}]}]",
+    )
+    .unwrap();
+
+    assert_eq!(
+        compute_search_quality_summary_from_paths(&query_set_path, &qrels_path, &results_path)
+            .unwrap_err()
+            .message,
+        "query_set file contains duplicate query_id"
     );
 }

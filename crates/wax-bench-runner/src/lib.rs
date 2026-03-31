@@ -15,6 +15,7 @@ pub enum Workload {
     WarmText,
     WarmVector,
     WarmHybrid,
+    WarmHybridWithPreviews,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -296,6 +297,7 @@ fn first_query_for_workload(workload: &Workload) -> Option<String> {
         Workload::WarmText => Some("__ttfq_text__".to_owned()),
         Workload::WarmVector => Some("__warmup_vector__".to_owned()),
         Workload::WarmHybrid => Some("__warmup_hybrid__".to_owned()),
+        Workload::WarmHybridWithPreviews => Some("__warmup_hybrid_with_previews__".to_owned()),
     }
 }
 
@@ -304,6 +306,7 @@ fn measured_query_for_workload(workload: &Workload) -> Option<String> {
         Workload::WarmText => Some("__warm_text__".to_owned()),
         Workload::WarmVector => Some("__warm_vector__".to_owned()),
         Workload::WarmHybrid => Some("__warm_hybrid__".to_owned()),
+        Workload::WarmHybridWithPreviews => Some("__warm_hybrid_with_previews__".to_owned()),
         _ => None,
     }
 }

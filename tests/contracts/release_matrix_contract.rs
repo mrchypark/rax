@@ -54,6 +54,11 @@ fn reducer_renders_vector_mode_compare_report_for_hnsw_and_exact_flat() {
             "warm_hybrid",
             sample(0.0, 0.0, Some(if mode == "hnsw" { 0.7 } else { 1.1 })),
         );
+        write_run(
+            &artifact_root.path().join(mode),
+            "warm_hybrid_with_previews",
+            sample(0.0, 0.0, Some(if mode == "hnsw" { 0.9 } else { 1.4 })),
+        );
     }
 
     let markdown = render_vector_mode_compare_report(artifact_root.path()).unwrap();
@@ -66,6 +71,7 @@ fn reducer_renders_vector_mode_compare_report_for_hnsw_and_exact_flat() {
     assert!(markdown.contains("| ttfq_vector | 4.000 | 2.000 | -2.000 |"));
     assert!(markdown.contains("| warm_vector | 0.900 | 0.500 | -0.400 |"));
     assert!(markdown.contains("| warm_hybrid | 1.100 | 0.700 | -0.400 |"));
+    assert!(markdown.contains("| warm_hybrid_with_previews | 1.400 | 0.900 | -0.500 |"));
 }
 
 fn write_run(root: &std::path::Path, workload_id: &str, sample: SampleMetrics) {

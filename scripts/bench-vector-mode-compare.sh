@@ -16,7 +16,7 @@ mkdir -p "$ARTIFACT_ROOT"
 cargo build --release -p wax-bench-cli
 
 for VECTOR_MODE in exact_flat hnsw; do
-  for WORKLOAD in materialize_vector ttfq_vector warm_vector warm_hybrid; do
+  for WORKLOAD in materialize_vector ttfq_vector warm_vector warm_hybrid warm_hybrid_with_previews; do
     RUN_DIR="$ARTIFACT_ROOT/$VECTOR_MODE/$WORKLOAD"
     rm -rf "$RUN_DIR"
     "$BIN" run \

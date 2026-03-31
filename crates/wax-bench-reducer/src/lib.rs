@@ -75,6 +75,7 @@ pub struct VectorLaneMatrixReport {
 pub struct SearchQualitySummary {
     pub query_count: u32,
     pub unrated_hit_count: u32,
+    pub unrated_hits_by_query: BTreeMap<String, Vec<String>>,
     pub ndcg_at_10: f64,
     pub ndcg_at_20: f64,
     pub recall_at_10: f64,
@@ -181,6 +182,7 @@ pub fn render_vector_mode_compare_report(artifact_root: &Path) -> Result<String,
         "ttfq_vector",
         "warm_vector",
         "warm_hybrid",
+        "warm_hybrid_with_previews",
     ];
     let exact =
         build_named_workload_report(&artifact_root.join("exact_flat"), &compare_workload_order)?;
@@ -214,6 +216,7 @@ pub fn compute_search_quality_summary(
     }
 
     let mut unrated_hit_count = 0u32;
+    let mut unrated_hits_by_query = BTreeMap::<String, Vec<String>>::new();
     let mut ndcg_at_10 = 0.0;
     let mut ndcg_at_20 = 0.0;
     let mut recall_at_10 = 0.0;
@@ -236,10 +239,13 @@ pub fn compute_search_quality_summary(
             .filter(|relevance| **relevance > 0)
             .count();
 
-        unrated_hit_count += hits
+        let unrated_hits = hits
             .iter()
             .filter(|doc_id| !qrels_for_query.contains_key((*doc_id).as_str()))
-            .count() as u32;
+            .cloned()
+            .collect::<Vec<_>>();
+        unrated_hit_count += unrated_hits.len() as u32;
+        unrated_hits_by_query.insert(query_id.clone(), unrated_hits);
 
         ndcg_at_10 += ndcg_at_k(qrels_for_query, hits, 10);
         ndcg_at_20 += ndcg_at_k(qrels_for_query, hits, 20);
@@ -255,6 +261,7 @@ pub fn compute_search_quality_summary(
     Ok(SearchQualitySummary {
         query_count: query_ids.len() as u32,
         unrated_hit_count,
+        unrated_hits_by_query,
         ndcg_at_10: ndcg_at_10 / query_count,
         ndcg_at_20: ndcg_at_20 / query_count,
         recall_at_10: recall_at_10 / query_count,
@@ -375,12 +382,18 @@ fn read_query_ids(path: &Path) -> Result<Vec<String>, ReduceError> {
 
     let text =
         fs::read_to_string(path).map_err(|_| ReduceError::new("failed to read query_set file"))?;
-    parse_jsonl::<QuerySetRecord>(&text, "query_set file contains invalid json").map(|records| {
-        records
-            .into_iter()
-            .map(|record| record.query_id)
-            .collect::<Vec<_>>()
-    })
+    let records = parse_jsonl::<QuerySetRecord>(&text, "query_set file contains invalid json")?;
+    let mut query_ids = Vec::with_capacity(records.len());
+    let mut seen_query_ids = HashSet::new();
+    for record in records {
+        if !seen_query_ids.insert(record.query_id.clone()) {
+            return Err(ReduceError::new(
+                "query_set file contains duplicate query_id",
+            ));
+        }
+        query_ids.push(record.query_id);
+    }
+    Ok(query_ids)
 }
 
 fn read_qrels(path: &Path) -> Result<Vec<QrelRecord>, ReduceError> {

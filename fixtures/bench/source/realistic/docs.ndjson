@@ -1,0 +1,8 @@
+{"doc_id":"doc-101","text":"Wax performance report cold open p95 on Apple Silicon measured 9.2 ms after v2 improvements.","workspace_id":"perf","tags":["wax","performance","cold-open"]}
+{"doc_id":"doc-102","text":"Wax performance report warm hybrid with previews measured 6.1 ms p95 on Apple Silicon.","workspace_id":"perf","tags":["wax","performance","hybrid"]}
+{"doc_id":"doc-103","text":"Vector search engines compare USearch HNSW CPU backend against Metal brute-force GPU backend.","workspace_id":"vector","tags":["vector","hnsw","metal"]}
+{"doc_id":"doc-104","text":".wax containers can store SQLite FTS5 blobs inside lex segments while vectors live separately.","workspace_id":"format","tags":["sqlite","fts5","format"]}
+{"doc_id":"doc-105","text":"Offline search quality evaluation uses qrels, nDCG, recall, MRR, and judged query sets.","workspace_id":"eval","tags":["qrels","ndcg","mrr"]}
+{"doc_id":"doc-106","text":"Hybrid search fusion combines text and vector candidates and may rerank results for better relevance.","workspace_id":"search","tags":["hybrid","fusion","rerank"]}
+{"doc_id":"doc-107","text":"Vector mode compare exact flat versus HNSW benchmarks warm vector and warm hybrid latency.","workspace_id":"vector","tags":["exact-flat","hnsw","latency"]}
+{"doc_id":"doc-108","text":"Preview rendering fetches documents by doc id and includes text snippets in the response.","workspace_id":"ux","tags":["preview","documents","response"]}

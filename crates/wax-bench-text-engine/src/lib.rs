@@ -11,10 +11,12 @@ use self_cell::self_cell;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use wax_bench_model::{
     build_vector_lane_skeleton, parse_vector_lane_skeleton_header, vector_lane_doc_id_offsets,
     DatasetPackManifest, EnginePhase, EngineStats, MountRequest, OpenRequest, OpenResult,
-    SearchRequest, SearchResult, VectorLaneSkeletonHeader, VectorQueryMode, WaxEngine,
+    RankedDocumentHit, RankedQueryResult, SearchRequest, SearchResult, VectorLaneSkeletonHeader,
+    VectorQueryMode, WaxEngine,
 };
 
 type BorrowedHnsw<'a> = Hnsw<'a, f32, DistCosine>;
@@ -52,6 +54,7 @@ pub struct PackedTextEngine {
     manifest: Option<DatasetPackManifest>,
     text_lane: Option<TextLane>,
     vector_lane: Option<VectorLane>,
+    preview_store: Option<HashMap<String, Value>>,
     vector_mode: VectorQueryMode,
 }
 
@@ -63,6 +66,7 @@ impl PackedTextEngine {
             manifest: None,
             text_lane: None,
             vector_lane: None,
+            preview_store: None,
             vector_mode,
         }
     }
@@ -108,6 +112,15 @@ impl PackedTextEngine {
             .as_ref()
             .ok_or_else(|| "vector lane not materialized".to_owned())
     }
+
+    fn ensure_preview_store(&mut self) -> Result<&mut HashMap<String, Value>, String> {
+        if self.preview_store.is_none() {
+            self.preview_store = Some(HashMap::new());
+        }
+        self.preview_store
+            .as_mut()
+            .ok_or_else(|| "preview store not materialized".to_owned())
+    }
 }
 
 impl Default for PackedTextEngine {
@@ -134,9 +147,8 @@ pub fn query_text_preview(
     let manifest: DatasetPackManifest =
         serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
     let text_lane = TextLane::load(dataset_path, &manifest)?;
-    let documents = load_documents_by_id(&dataset_path.join("docs.ndjson"))?;
-
     let doc_ids = text_lane.search_with_limit(query_text, top_k);
+    let documents = load_documents_by_id(&dataset_path.join("docs.ndjson"), &doc_ids)?;
     doc_ids
         .into_iter()
         .enumerate()
@@ -160,6 +172,55 @@ pub fn query_text_preview(
         .collect()
 }
 
+pub fn query_batch_ranked_results(
+    dataset_path: &Path,
+    query_set_path: &Path,
+    vector_mode: VectorQueryMode,
+) -> Result<Vec<RankedQueryResult>, String> {
+    let manifest_text = fs::read_to_string(dataset_path.join("manifest.json"))
+        .map_err(|error| error.to_string())?;
+    let manifest: DatasetPackManifest =
+        serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
+    let text_lane = TextLane::load(dataset_path, &manifest)?;
+    let vector_lane = VectorLane::load(dataset_path, &manifest)?;
+    let query_vectors = load_query_vector_records(query_set_path, vector_lane.dimensions)?;
+    let queries = load_query_records(query_set_path)?;
+
+    if queries.len() != query_vectors.len() {
+        return Err("query_set and query vector records must align".to_owned());
+    }
+
+    queries
+        .into_iter()
+        .zip(query_vectors)
+        .map(|(query, vector_record)| {
+            let limit = query.top_k as usize;
+            let hits = if query.lane_eligibility.hybrid {
+                search_query_hybrid(
+                    &text_lane,
+                    &vector_lane,
+                    &query.query_text,
+                    &vector_record.vector,
+                    limit,
+                    vector_mode,
+                )
+            } else if query.lane_eligibility.vector && !query.lane_eligibility.text {
+                vector_lane.search_with_query(&vector_record.vector, limit, vector_mode)
+            } else {
+                text_lane.search_with_limit(&query.query_text, limit)
+            };
+
+            Ok(RankedQueryResult {
+                query_id: vector_record.query_id,
+                hits: hits
+                    .into_iter()
+                    .map(|doc_id| RankedDocumentHit { doc_id })
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
 impl WaxEngine for PackedTextEngine {
     type Error = String;
 
@@ -169,6 +230,7 @@ impl WaxEngine for PackedTextEngine {
         self.manifest = None;
         self.text_lane = None;
         self.vector_lane = None;
+        self.preview_store = None;
         Ok(())
     }
 
@@ -249,6 +311,27 @@ impl WaxEngine for PackedTextEngine {
             return Ok(SearchResult {
                 hits: search_first_hybrid_query(text_lane, vector_lane, self.vector_mode),
             });
+        }
+        if matches!(
+            request.query_text.as_str(),
+            "__warmup_hybrid_with_previews__" | "__warm_hybrid_with_previews__"
+        ) {
+            self.ensure_text_lane()?;
+            self.ensure_vector_lane()?;
+            let docs_path = self.mount_root()?.join("docs.ndjson");
+            let hits = {
+                let text_lane = self
+                    .text_lane
+                    .as_ref()
+                    .ok_or_else(|| "text lane not materialized".to_owned())?;
+                let vector_lane = self
+                    .vector_lane
+                    .as_ref()
+                    .ok_or_else(|| "vector lane not materialized".to_owned())?;
+                search_first_hybrid_query(text_lane, vector_lane, self.vector_mode)
+            };
+            materialize_document_previews(self.ensure_preview_store()?, &docs_path, &hits)?;
+            return Ok(SearchResult { hits });
         }
 
         let lane = self.ensure_text_lane()?;
@@ -649,6 +732,14 @@ fn load_first_text_query(paths: &[PathBuf]) -> Result<(String, usize), String> {
     Err("no text-eligible query found".to_owned())
 }
 
+fn load_query_records(path: &Path) -> Result<Vec<QueryRecord>, String> {
+    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).map_err(|error| error.to_string()))
+        .collect()
+}
+
 fn load_first_hybrid_text_query(paths: &[PathBuf]) -> Result<Option<FirstTextQuery>, String> {
     for path in paths {
         let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
@@ -699,6 +790,7 @@ fn tokenize(text: &str) -> Vec<String> {
 
 #[derive(Debug, Deserialize)]
 struct QueryRecord {
+    query_id: String,
     query_text: String,
     top_k: u32,
     lane_eligibility: LaneEligibility,
@@ -713,6 +805,7 @@ struct LaneEligibility {
 
 #[derive(Debug, Deserialize)]
 struct QueryVectorRecord {
+    query_id: String,
     top_k: u32,
     vector: Vec<f32>,
     lane_eligibility: LaneEligibility,
@@ -792,6 +885,26 @@ fn load_first_vector_query(paths: &[PathBuf]) -> Result<FirstVectorQuery, String
     Err("no vector-eligible query found".to_owned())
 }
 
+fn load_query_vector_records(
+    query_set_path: &Path,
+    dimensions: usize,
+) -> Result<Vec<QueryVectorRecord>, String> {
+    let text = fs::read_to_string(query_set_path).map_err(|error| error.to_string())?;
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let query: QueryRecord =
+                serde_json::from_str(line).map_err(|error| error.to_string())?;
+            Ok(QueryVectorRecord {
+                query_id: query.query_id,
+                top_k: query.top_k,
+                vector: embed_text(&query.query_text, dimensions as u32),
+                lane_eligibility: query.lane_eligibility,
+            })
+        })
+        .collect()
+}
+
 fn load_first_hybrid_vector_query(paths: &[PathBuf]) -> Result<Option<FirstVectorQuery>, String> {
     for path in paths {
         let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
@@ -827,6 +940,19 @@ fn search_first_hybrid_query(
         .max(1);
     let text_hits = text_lane.search_with_limit(hybrid_text_query, limit);
     let vector_hits = vector_lane.search_with_query(hybrid_vector_query, limit, vector_mode);
+    fuse_ranked_hits(&text_hits, &vector_hits, limit)
+}
+
+fn search_query_hybrid(
+    text_lane: &TextLane,
+    vector_lane: &VectorLane,
+    query_text: &str,
+    query_vector: &[f32],
+    limit: usize,
+    vector_mode: VectorQueryMode,
+) -> Vec<String> {
+    let text_hits = text_lane.search_with_limit(query_text, limit);
+    let vector_hits = vector_lane.search_with_query(query_vector, limit, vector_mode);
     fuse_ranked_hits(&text_hits, &vector_hits, limit)
 }
 
@@ -913,8 +1039,43 @@ fn load_document_ids_from_documents(path: &Path) -> Result<Vec<String>, String> 
         .collect()
 }
 
-fn load_documents_by_id(path: &Path) -> Result<HashMap<String, Value>, String> {
+fn materialize_document_previews(
+    documents: &mut HashMap<String, Value>,
+    path: &Path,
+    doc_ids: &[String],
+) -> Result<(), String> {
+    let missing = doc_ids
+        .iter()
+        .filter(|doc_id| !documents.contains_key(doc_id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        let loaded = load_documents_by_id(path, &missing)?;
+        for (doc_id, document) in loaded {
+            documents.insert(doc_id, document);
+        }
+    }
+    for doc_id in doc_ids {
+        let document = documents
+            .get(doc_id)
+            .ok_or_else(|| format!("document missing for hit doc_id: {doc_id}"))?;
+        document
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("text missing for hit doc_id: {doc_id}"))?;
+    }
+    Ok(())
+}
+
+fn load_documents_by_id(
+    path: &Path,
+    target_doc_ids: &[String],
+) -> Result<HashMap<String, Value>, String> {
     let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let mut remaining = target_doc_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
     let mut documents = HashMap::new();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         let value: Value = serde_json::from_str(line).map_err(|error| error.to_string())?;
@@ -925,7 +1086,12 @@ fn load_documents_by_id(path: &Path) -> Result<HashMap<String, Value>, String> {
             .get("doc_id")
             .and_then(Value::as_str)
             .ok_or_else(|| "document line missing doc_id".to_owned())?;
-        documents.insert(doc_id.to_owned(), Value::Object(clone_object(object)));
+        if remaining.remove(doc_id) {
+            documents.insert(doc_id.to_owned(), Value::Object(clone_object(object)));
+            if remaining.is_empty() {
+                break;
+            }
+        }
     }
     Ok(documents)
 }
@@ -935,6 +1101,32 @@ fn clone_object(object: &Map<String, Value>) -> Map<String, Value> {
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
+}
+
+fn embed_text(text: &str, dimensions: u32) -> Vec<f32> {
+    let dimensions = dimensions as usize;
+    if dimensions == 0 {
+        return Vec::new();
+    }
+
+    let mut vector = vec![0.0f32; dimensions];
+    for token in tokenize(text) {
+        let mut digest = Sha256::new();
+        digest.update(token.as_bytes());
+        let bytes = digest.finalize();
+        let bucket =
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize % dimensions;
+        vector[bucket] += 1.0;
+    }
+
+    let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for value in &mut vector {
+            *value /= norm;
+        }
+    }
+
+    vector
 }
 
 #[derive(Debug, Deserialize)]

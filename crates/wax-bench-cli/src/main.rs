@@ -15,7 +15,7 @@ use wax_bench_reducer::{
     render_vector_mode_compare_report,
 };
 use wax_bench_runner::{BenchmarkRunner, RunRequest, Workload};
-use wax_bench_text_engine::{query_text_preview, PackedTextEngine};
+use wax_bench_text_engine::{query_batch_ranked_results, query_text_preview, PackedTextEngine};
 
 #[derive(Debug, Parser)]
 #[command(name = "wax-bench-cli")]
@@ -64,6 +64,16 @@ enum Command {
         text: String,
         #[arg(long, default_value_t = 5)]
         top_k: usize,
+    },
+    QueryBatch {
+        #[arg(long)]
+        dataset: PathBuf,
+        #[arg(long)]
+        query_set: PathBuf,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long, default_value = "auto")]
+        vector_mode: String,
     },
     QualityReport {
         #[arg(long)]
@@ -133,6 +143,7 @@ fn main() -> Result<(), String> {
                 "warm_text" => Workload::WarmText,
                 "warm_vector" => Workload::WarmVector,
                 "warm_hybrid" => Workload::WarmHybrid,
+                "warm_hybrid_with_previews" => Workload::WarmHybridWithPreviews,
                 _ => return Err("unsupported workload".to_owned()),
             };
             let vector_mode = parse_vector_mode(&vector_mode)?;
@@ -203,6 +214,22 @@ fn main() -> Result<(), String> {
                 "{}",
                 serde_json::to_string_pretty(&hits).map_err(|error| error.to_string())?
             );
+            Ok(())
+        }
+        Some(Command::QueryBatch {
+            dataset,
+            query_set,
+            output,
+            vector_mode,
+        }) => {
+            let results =
+                query_batch_ranked_results(&dataset, &query_set, parse_vector_mode(&vector_mode)?)?;
+            let rendered =
+                serde_json::to_string_pretty(&results).map_err(|error| error.to_string())?;
+            if let Some(output) = output {
+                std::fs::write(output, &rendered).map_err(|error| error.to_string())?;
+            }
+            println!("{rendered}");
             Ok(())
         }
         Some(Command::QualityReport {
@@ -281,6 +308,7 @@ fn workload_label(workload: &Workload) -> &'static str {
         Workload::WarmText => "warm_text",
         Workload::WarmVector => "warm_vector",
         Workload::WarmHybrid => "warm_hybrid",
+        Workload::WarmHybridWithPreviews => "warm_hybrid_with_previews",
     }
 }
 

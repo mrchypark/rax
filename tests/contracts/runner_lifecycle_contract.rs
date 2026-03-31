@@ -291,6 +291,28 @@ fn warm_hybrid_workload_warms_then_measures_hybrid_search() {
     );
 }
 
+#[test]
+fn warm_hybrid_with_previews_workload_warms_then_measures_previewed_hybrid_search() {
+    let engine = RecordingEngine::default();
+    let mut runner = BenchmarkRunner::new(engine);
+
+    let trace = runner
+        .run(&RunRequest {
+            dataset_path: PathBuf::from("/tmp/wax-pack"),
+            workload: Workload::WarmHybridWithPreviews,
+            materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
+        })
+        .unwrap();
+
+    assert_eq!(
+        trace.search_queries,
+        vec![
+            "__warmup_hybrid_with_previews__".to_owned(),
+            "__warm_hybrid_with_previews__".to_owned()
+        ]
+    );
+}
+
 #[derive(Default)]
 struct RecordingEngine {
     phase: EnginePhase,

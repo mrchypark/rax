@@ -160,6 +160,115 @@ fn local_e2e_smoke_queries_packed_dataset_with_document_preview() {
 }
 
 #[test]
+fn local_e2e_smoke_runs_warm_hybrid_with_previews_workload() {
+    let dataset_dir = tempdir().unwrap();
+    let artifact_dir = tempdir().unwrap();
+
+    pack_dataset(&PackRequest::new(
+        "fixtures/bench/source/minimal",
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+
+    let run = Command::new("cargo")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("WAX_BENCH_TEST_MODE", "1")
+        .args([
+            "run",
+            "-p",
+            "wax-bench-cli",
+            "--",
+            "run",
+            "--dataset",
+            dataset_dir.path().to_str().unwrap(),
+            "--workload",
+            "warm_hybrid_with_previews",
+            "--sample-count",
+            "1",
+            "--artifact-dir",
+            artifact_dir.path().to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
+
+    assert!(run.success());
+    assert!(artifact_dir.path().join("summary.json").exists());
+}
+
+#[test]
+fn local_e2e_smoke_batches_queries_for_realistic_judged_dataset() {
+    let dataset_dir = tempdir().unwrap();
+    let output_dir = tempdir().unwrap();
+
+    pack_dataset(&PackRequest::new(
+        "fixtures/bench/source/realistic",
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+
+    let results_path = output_dir.path().join("results.json");
+    let batch = Command::new("cargo")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args([
+            "run",
+            "-p",
+            "wax-bench-cli",
+            "--",
+            "query-batch",
+            "--dataset",
+            dataset_dir.path().to_str().unwrap(),
+            "--query-set",
+            dataset_dir
+                .path()
+                .join("queries/core.jsonl")
+                .to_str()
+                .unwrap(),
+            "--output",
+            results_path.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
+    assert!(batch.success());
+
+    let quality = Command::new("cargo")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args([
+            "run",
+            "-p",
+            "wax-bench-cli",
+            "--",
+            "quality-report",
+            "--query-set",
+            dataset_dir
+                .path()
+                .join("queries/core.jsonl")
+                .to_str()
+                .unwrap(),
+            "--qrels",
+            dataset_dir
+                .path()
+                .join("queries/core-qrels.jsonl")
+                .to_str()
+                .unwrap(),
+            "--results",
+            results_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(quality.status.success());
+    let stdout = String::from_utf8(quality.stdout).unwrap();
+    assert!(stdout.contains("\"query_count\": 5"));
+    assert!(stdout.contains("\"ndcg_at_10\""));
+    assert!(stdout.contains("\"unrated_hits_by_query\""));
+    assert!(stdout.contains("\"q-101\""));
+}
+
+#[test]
 fn local_e2e_smoke_packs_adhoc_docs_then_queries_them() {
     let source_dir = tempdir().unwrap();
     let dataset_dir = tempdir().unwrap();
