@@ -2,9 +2,7 @@ use tempfile::tempdir;
 use wax_bench_artifacts::write_run_bundle;
 use wax_bench_metrics::{CompilerOptimization, MemoryReading, SampleMetrics, ThermalState};
 use wax_bench_model::BenchmarkId;
-use wax_bench_reducer::{
-    render_vector_lane_matrix_report, render_vector_mode_compare_report,
-};
+use wax_bench_reducer::{render_vector_lane_matrix_report, render_vector_mode_compare_report};
 
 #[test]
 fn reducer_renders_vector_lane_matrix_for_release_artifacts() {
@@ -15,7 +13,11 @@ fn reducer_renders_vector_lane_matrix_for_release_artifacts() {
         sample(0.8, 1.2, None),
     );
     write_run(artifact_root.path(), "ttfq_vector", sample(0.3, 4.0, None));
-    write_run(artifact_root.path(), "warm_vector", sample(0.0, 0.0, Some(0.7)));
+    write_run(
+        artifact_root.path(),
+        "warm_vector",
+        sample(0.0, 0.0, Some(0.7)),
+    );
 
     let markdown = render_vector_lane_matrix_report(artifact_root.path()).unwrap();
 
@@ -56,7 +58,9 @@ fn reducer_renders_vector_mode_compare_report_for_hnsw_and_exact_flat() {
 
     let markdown = render_vector_mode_compare_report(artifact_root.path()).unwrap();
 
-    assert!(markdown.contains("| Workload | exact_flat p95 | hnsw p95 | delta_ms (hnsw-exact_flat) |"));
+    assert!(
+        markdown.contains("| Workload | exact_flat p95 | hnsw p95 | delta_ms (hnsw-exact_flat) |")
+    );
     assert!(markdown.contains("## p95 total_ttfq_ms"));
     assert!(markdown.contains("## p95 search_latency_ms"));
     assert!(markdown.contains("| ttfq_vector | 4.000 | 2.000 | -2.000 |"));

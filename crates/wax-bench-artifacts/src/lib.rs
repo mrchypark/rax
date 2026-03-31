@@ -346,10 +346,12 @@ fn build_run_summary(
         .collect();
     let mut vector_materializations: Vec<f64> = sample_artifacts
         .iter()
-        .filter_map(|artifact| match artifact.metrics.vector_materialization_ms {
-            MetricValue::Available { value } => Some(value),
-            MetricValue::Unavailable { .. } => None,
-        })
+        .filter_map(
+            |artifact| match artifact.metrics.vector_materialization_ms {
+                MetricValue::Available { value } => Some(value),
+                MetricValue::Unavailable { .. } => None,
+            },
+        )
         .collect();
     let mut search_latencies: Vec<f64> = sample_artifacts
         .iter()

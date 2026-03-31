@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, HashSet};
+use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -5,6 +7,7 @@ use wax_bench_artifacts::{
     list_sample_artifact_paths, read_run_summary, render_markdown_summary, MetricValue,
     RunSummaryArtifact, SampleArtifact,
 };
+use wax_bench_model::{QrelRecord, RankedQueryResult};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReducedSummary {
@@ -66,6 +69,20 @@ pub struct VectorLaneMatrixReport {
     pub dataset_id: String,
     pub rows: Vec<VectorLaneMatrixRow>,
     pub markdown: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchQualitySummary {
+    pub query_count: u32,
+    pub unrated_hit_count: u32,
+    pub ndcg_at_10: f64,
+    pub ndcg_at_20: f64,
+    pub recall_at_10: f64,
+    pub recall_at_100: f64,
+    pub precision_at_10: f64,
+    pub mrr_at_10: f64,
+    pub success_at_1: f64,
+    pub success_at_3: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,17 +171,19 @@ pub fn reduce_run_dir(
     Ok(candidate)
 }
 
-pub fn render_vector_lane_matrix_report(
-    artifact_root: &Path,
-) -> Result<String, ReduceError> {
+pub fn render_vector_lane_matrix_report(artifact_root: &Path) -> Result<String, ReduceError> {
     Ok(build_vector_lane_matrix_report(artifact_root)?.markdown)
 }
 
-pub fn render_vector_mode_compare_report(
-    artifact_root: &Path,
-) -> Result<String, ReduceError> {
-    let compare_workload_order = ["materialize_vector", "ttfq_vector", "warm_vector", "warm_hybrid"];
-    let exact = build_named_workload_report(&artifact_root.join("exact_flat"), &compare_workload_order)?;
+pub fn render_vector_mode_compare_report(artifact_root: &Path) -> Result<String, ReduceError> {
+    let compare_workload_order = [
+        "materialize_vector",
+        "ttfq_vector",
+        "warm_vector",
+        "warm_hybrid",
+    ];
+    let exact =
+        build_named_workload_report(&artifact_root.join("exact_flat"), &compare_workload_order)?;
     let hnsw = build_named_workload_report(&artifact_root.join("hnsw"), &compare_workload_order)?;
 
     if exact.dataset_id != hnsw.dataset_id {
@@ -179,6 +198,85 @@ pub fn render_vector_mode_compare_report(
     }
 
     Ok(render_vector_mode_compare_markdown(&exact, &hnsw))
+}
+
+pub fn compute_search_quality_summary(
+    qrels: &[QrelRecord],
+    results: &[RankedQueryResult],
+) -> Result<SearchQualitySummary, ReduceError> {
+    let qrels_by_query = group_qrels(qrels)?;
+    let results_by_query = group_results(results, &qrels_by_query)?;
+    let mut query_ids = qrels_by_query.keys().cloned().collect::<Vec<_>>();
+    query_ids.sort();
+
+    if query_ids.is_empty() {
+        return Err(ReduceError::new("qrels must not be empty"));
+    }
+
+    let mut unrated_hit_count = 0u32;
+    let mut ndcg_at_10 = 0.0;
+    let mut ndcg_at_20 = 0.0;
+    let mut recall_at_10 = 0.0;
+    let mut recall_at_100 = 0.0;
+    let mut precision_at_10 = 0.0;
+    let mut mrr_at_10 = 0.0;
+    let mut success_at_1 = 0.0;
+    let mut success_at_3 = 0.0;
+
+    for query_id in &query_ids {
+        let qrels_for_query = qrels_by_query
+            .get(query_id)
+            .expect("query id derived from qrels map");
+        let hits = results_by_query
+            .get(query_id)
+            .map(|result| result.as_slice())
+            .unwrap_or(&[]);
+        let relevant_doc_count = qrels_for_query
+            .values()
+            .filter(|relevance| **relevance > 0)
+            .count();
+
+        unrated_hit_count += hits
+            .iter()
+            .filter(|doc_id| !qrels_for_query.contains_key((*doc_id).as_str()))
+            .count() as u32;
+
+        ndcg_at_10 += ndcg_at_k(qrels_for_query, hits, 10);
+        ndcg_at_20 += ndcg_at_k(qrels_for_query, hits, 20);
+        recall_at_10 += recall_at_k(qrels_for_query, hits, 10, relevant_doc_count);
+        recall_at_100 += recall_at_k(qrels_for_query, hits, 100, relevant_doc_count);
+        precision_at_10 += precision_at_k(qrels_for_query, hits, 10);
+        mrr_at_10 += reciprocal_rank_at_k(qrels_for_query, hits, 10);
+        success_at_1 += success_at_k(qrels_for_query, hits, 1);
+        success_at_3 += success_at_k(qrels_for_query, hits, 3);
+    }
+
+    let query_count = query_ids.len() as f64;
+    Ok(SearchQualitySummary {
+        query_count: query_ids.len() as u32,
+        unrated_hit_count,
+        ndcg_at_10: ndcg_at_10 / query_count,
+        ndcg_at_20: ndcg_at_20 / query_count,
+        recall_at_10: recall_at_10 / query_count,
+        recall_at_100: recall_at_100 / query_count,
+        precision_at_10: precision_at_10 / query_count,
+        mrr_at_10: mrr_at_10 / query_count,
+        success_at_1: success_at_1 / query_count,
+        success_at_3: success_at_3 / query_count,
+    })
+}
+
+pub fn compute_search_quality_summary_from_paths(
+    query_set_path: &Path,
+    qrels_path: &Path,
+    results_path: &Path,
+) -> Result<SearchQualitySummary, ReduceError> {
+    let query_ids = read_query_ids(query_set_path)?;
+    let qrels = read_qrels(qrels_path)?;
+    validate_qrel_query_coverage(&query_ids, &qrels)?;
+    let results = read_ranked_query_results(results_path)?;
+    validate_result_query_coverage(&query_ids, &results)?;
+    compute_search_quality_summary(&qrels, &results)
 }
 
 pub fn build_vector_lane_matrix_report(
@@ -269,6 +367,205 @@ fn build_named_workload_report(
     })
 }
 
+fn read_query_ids(path: &Path) -> Result<Vec<String>, ReduceError> {
+    #[derive(Deserialize)]
+    struct QuerySetRecord {
+        query_id: String,
+    }
+
+    let text =
+        fs::read_to_string(path).map_err(|_| ReduceError::new("failed to read query_set file"))?;
+    parse_jsonl::<QuerySetRecord>(&text, "query_set file contains invalid json").map(|records| {
+        records
+            .into_iter()
+            .map(|record| record.query_id)
+            .collect::<Vec<_>>()
+    })
+}
+
+fn read_qrels(path: &Path) -> Result<Vec<QrelRecord>, ReduceError> {
+    let text =
+        fs::read_to_string(path).map_err(|_| ReduceError::new("failed to read qrels file"))?;
+    parse_jsonl::<QrelRecord>(&text, "qrels file contains invalid json")
+}
+
+fn read_ranked_query_results(path: &Path) -> Result<Vec<RankedQueryResult>, ReduceError> {
+    let text =
+        fs::read_to_string(path).map_err(|_| ReduceError::new("failed to read results file"))?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(ReduceError::new("results file must not be empty"));
+    }
+    if trimmed.starts_with('[') {
+        serde_json::from_str(trimmed)
+            .map_err(|_| ReduceError::new("results file contains invalid json"))
+    } else {
+        parse_jsonl::<RankedQueryResult>(&text, "results file contains invalid json")
+    }
+}
+
+fn parse_jsonl<T>(text: &str, invalid_message: &str) -> Result<Vec<T>, ReduceError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).map_err(|_| ReduceError::new(invalid_message)))
+        .collect()
+}
+
+fn group_qrels(
+    qrels: &[QrelRecord],
+) -> Result<BTreeMap<String, BTreeMap<String, u8>>, ReduceError> {
+    let mut grouped = BTreeMap::<String, BTreeMap<String, u8>>::new();
+    for qrel in qrels {
+        if qrel.relevance > 3 {
+            return Err(ReduceError::new("qrels contain invalid relevance"));
+        }
+        let docs = grouped.entry(qrel.query_id.clone()).or_default();
+        if docs.insert(qrel.doc_id.clone(), qrel.relevance).is_some() {
+            return Err(ReduceError::new("qrels contain duplicate query_id/doc_id"));
+        }
+    }
+    Ok(grouped)
+}
+
+fn validate_qrel_query_coverage(
+    query_ids: &[String],
+    qrels: &[QrelRecord],
+) -> Result<(), ReduceError> {
+    let expected = query_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let judged = qrels
+        .iter()
+        .map(|qrel| qrel.query_id.as_str())
+        .collect::<HashSet<_>>();
+    if expected != judged {
+        return Err(ReduceError::new("qrels file must align with query ids"));
+    }
+    Ok(())
+}
+
+fn validate_result_query_coverage(
+    query_ids: &[String],
+    results: &[RankedQueryResult],
+) -> Result<(), ReduceError> {
+    let expected = query_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let returned = results
+        .iter()
+        .map(|result| result.query_id.as_str())
+        .collect::<HashSet<_>>();
+    if expected != returned {
+        return Err(ReduceError::new("results file must align with query ids"));
+    }
+    Ok(())
+}
+
+fn group_results(
+    results: &[RankedQueryResult],
+    qrels_by_query: &BTreeMap<String, BTreeMap<String, u8>>,
+) -> Result<BTreeMap<String, Vec<String>>, ReduceError> {
+    let mut grouped = BTreeMap::<String, Vec<String>>::new();
+    for result in results {
+        if !qrels_by_query.contains_key(result.query_id.as_str()) {
+            return Err(ReduceError::new("results contain unknown query_id"));
+        }
+        let mut seen_doc_ids = HashSet::new();
+        let doc_ids = result
+            .hits
+            .iter()
+            .map(|hit| {
+                if !seen_doc_ids.insert(hit.doc_id.as_str()) {
+                    Err(ReduceError::new(
+                        "results contain duplicate doc_id within query_id",
+                    ))
+                } else {
+                    Ok(hit.doc_id.clone())
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if grouped.insert(result.query_id.clone(), doc_ids).is_some() {
+            return Err(ReduceError::new("results contain duplicate query_id"));
+        }
+    }
+    Ok(grouped)
+}
+
+fn ndcg_at_k(qrels: &BTreeMap<String, u8>, hits: &[String], k: usize) -> f64 {
+    let dcg = discounted_gain(
+        &hits
+            .iter()
+            .take(k)
+            .map(|doc_id| *qrels.get(doc_id.as_str()).unwrap_or(&0))
+            .collect::<Vec<_>>(),
+    );
+    let mut ideal = qrels.values().copied().collect::<Vec<_>>();
+    ideal.sort_unstable_by(|left, right| right.cmp(left));
+    let idcg = discounted_gain(&ideal.into_iter().take(k).collect::<Vec<_>>());
+    if idcg == 0.0 {
+        0.0
+    } else {
+        dcg / idcg
+    }
+}
+
+fn discounted_gain(relevances: &[u8]) -> f64 {
+    relevances
+        .iter()
+        .enumerate()
+        .map(|(index, relevance)| {
+            let gain = (2_u32.pow(*relevance as u32) - 1) as f64;
+            let discount = (index as f64 + 2.0).log2();
+            gain / discount
+        })
+        .sum()
+}
+
+fn recall_at_k(
+    qrels: &BTreeMap<String, u8>,
+    hits: &[String],
+    k: usize,
+    relevant_doc_count: usize,
+) -> f64 {
+    if relevant_doc_count == 0 {
+        return 0.0;
+    }
+    let retrieved = hits
+        .iter()
+        .take(k)
+        .filter(|doc_id| qrels.get(doc_id.as_str()).copied().unwrap_or(0) > 0)
+        .count();
+    retrieved as f64 / relevant_doc_count as f64
+}
+
+fn precision_at_k(qrels: &BTreeMap<String, u8>, hits: &[String], k: usize) -> f64 {
+    let retrieved = hits
+        .iter()
+        .take(k)
+        .filter(|doc_id| qrels.get(doc_id.as_str()).copied().unwrap_or(0) > 0)
+        .count();
+    retrieved as f64 / k as f64
+}
+
+fn reciprocal_rank_at_k(qrels: &BTreeMap<String, u8>, hits: &[String], k: usize) -> f64 {
+    hits.iter()
+        .take(k)
+        .position(|doc_id| qrels.get(doc_id.as_str()).copied().unwrap_or(0) > 0)
+        .map(|index| 1.0 / (index as f64 + 1.0))
+        .unwrap_or(0.0)
+}
+
+fn success_at_k(qrels: &BTreeMap<String, u8>, hits: &[String], k: usize) -> f64 {
+    if hits
+        .iter()
+        .take(k)
+        .any(|doc_id| qrels.get(doc_id.as_str()).copied().unwrap_or(0) > 0)
+    {
+        1.0
+    } else {
+        0.0
+    }
+}
+
 fn build_named_workload_rows(
     artifact_root: &Path,
     workload_order: &[&str],
@@ -349,9 +646,7 @@ fn render_vector_lane_matrix_markdown(dataset_id: &str, rows: &[VectorLaneMatrix
     markdown.push_str(
         "| Workload | p50 vector_materialization_ms | p95 vector_materialization_ms | p50 total_ttfq_ms | p95 total_ttfq_ms | p50 search_latency_ms | p95 search_latency_ms |\n",
     );
-    markdown.push_str(
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n",
-    );
+    markdown.push_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n");
     for row in rows {
         markdown.push_str(&format!(
             "| {} | {} | {} | {} | {} | {} | {} |\n",

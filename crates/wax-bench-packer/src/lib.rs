@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use wax_bench_model::{
     build_vector_lane_skeleton, CorpusProfile, DatasetIdentity, DatasetPackManifest,
     DifficultyDistribution, DirtyProfile, EnvironmentConstraints, LanguageShare, LengthBuckets,
-    ManifestChecksums, ManifestFile, ManifestGenerator, MetadataProfile, QuerySetEntry,
+    ManifestChecksums, ManifestFile, ManifestGenerator, MetadataProfile, QrelRecord, QuerySetEntry,
     QueryVectorProfile, SegmentTopologyEntry, TextProfile, VectorProfile,
 };
 
@@ -216,6 +216,14 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
             &request.source_dir.join(&source_query_set.ground_truth_path),
             &request.out_dir.join(&source_query_set.ground_truth_path),
         )?;
+        let qrels_bytes = if let Some(qrels_path) = &source_query_set.qrels_path {
+            Some(copy_file(
+                &request.source_dir.join(qrels_path),
+                &request.out_dir.join(qrels_path),
+            )?)
+        } else {
+            None
+        };
 
         let query_summary = analyze_query_set(&query_bytes)?;
         let query_vector_bytes = build_query_vector_payload(&query_bytes, dimensions)?;
@@ -249,6 +257,16 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
             non_empty_line_count(&ground_truth_bytes),
             &ground_truth_bytes,
         ));
+        if let (Some(qrels_path), Some(qrels_bytes)) = (&source_query_set.qrels_path, &qrels_bytes)
+        {
+            files.push(build_manifest_file(
+                qrels_path,
+                "qrels",
+                "jsonl",
+                non_empty_line_count(qrels_bytes),
+                qrels_bytes,
+            ));
+        }
 
         query_sets.push(QuerySetEntry {
             query_set_id: format!(
@@ -257,6 +275,7 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
             ),
             path: source_query_set.path,
             ground_truth_path: source_query_set.ground_truth_path,
+            qrels_path: source_query_set.qrels_path,
             query_count: query_summary.query_count,
             classes: query_summary.classes.into_iter().collect(),
             difficulty_distribution: query_summary.difficulty_distribution,
@@ -591,6 +610,7 @@ pub fn pack_adhoc_dataset(request: &AdhocPackRequest) -> Result<DatasetPackManif
             ),
             path: query_path.to_owned(),
             ground_truth_path: ground_truth_path.to_owned(),
+            qrels_path: None,
             query_count: query_summary.query_count,
             classes: query_summary.classes.into_iter().collect(),
             difficulty_distribution: query_summary.difficulty_distribution,
@@ -653,6 +673,8 @@ struct SourceQuerySet {
     name: String,
     path: String,
     ground_truth_path: String,
+    #[serde(default)]
+    qrels_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -713,6 +735,9 @@ fn validate_query_ids(
             return Err(ValidationError::new(
                 "ground_truth file must align with query ids",
             ));
+        }
+        if let Some(qrels_path) = &query_set.qrels_path {
+            validate_qrels(pack_root.join(qrels_path), &query_ids)?;
         }
 
         for query_id in query_ids {
@@ -1097,12 +1122,10 @@ fn validate_vector_profile(manifest: &DatasetPackManifest) -> Result<(), Validat
         }
     }
 
-    let has_hnsw_sidecars = manifest.files.iter().any(|file| {
-        matches!(
-            file.kind.as_str(),
-            "vector_hnsw_graph" | "vector_hnsw_data"
-        )
-    });
+    let has_hnsw_sidecars = manifest
+        .files
+        .iter()
+        .any(|file| matches!(file.kind.as_str(), "vector_hnsw_graph" | "vector_hnsw_data"));
     if has_hnsw_sidecars {
         if manifest.vector_profile.ann_index_backend.as_deref() != Some("hnsw_rs") {
             return Err(ValidationError::new(
@@ -1218,6 +1241,7 @@ fn validate_file_references(manifest: &DatasetPackManifest) -> Result<(), Valida
                 | "metadata"
                 | "query_set"
                 | "ground_truth"
+                | "qrels"
                 | "text_postings"
                 | "document_ids"
                 | "document_vectors"
@@ -1244,6 +1268,13 @@ fn validate_file_references(manifest: &DatasetPackManifest) -> Result<(), Valida
                 "ground_truth_path must reference a file entry",
             ));
         }
+        if let Some(qrels_path) = &query_set.qrels_path {
+            if !file_paths.contains(qrels_path.as_str()) {
+                return Err(ValidationError::new(
+                    "qrels_path must reference a file entry",
+                ));
+            }
+        }
 
         let query_file = manifest
             .files
@@ -1265,6 +1296,18 @@ fn validate_file_references(manifest: &DatasetPackManifest) -> Result<(), Valida
             return Err(ValidationError::new(
                 "ground_truth_path must point to a ground_truth file",
             ));
+        }
+        if let Some(qrels_path) = &query_set.qrels_path {
+            let qrels_file = manifest
+                .files
+                .iter()
+                .find(|file| file.path == *qrels_path)
+                .expect("qrels_path must exist after membership check");
+            if qrels_file.kind != "qrels" {
+                return Err(ValidationError::new(
+                    "qrels_path must point to a qrels file",
+                ));
+            }
         }
     }
 
@@ -1390,6 +1433,47 @@ fn load_ground_truth_ids(path: PathBuf) -> Result<Vec<String>, ValidationError> 
     }
 
     Ok(query_ids)
+}
+
+fn validate_qrels(path: PathBuf, query_ids: &[String]) -> Result<(), ValidationError> {
+    let qrels = load_qrels(path)?;
+    let expected_query_ids = query_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut qrel_query_ids = HashSet::new();
+    let mut seen_pairs = HashSet::new();
+
+    for qrel in qrels {
+        if qrel.relevance > 3 {
+            return Err(ValidationError::new(
+                "qrels file contains invalid relevance",
+            ));
+        }
+        if !expected_query_ids.contains(qrel.query_id.as_str()) {
+            return Err(ValidationError::new("qrels file must align with query ids"));
+        }
+        qrel_query_ids.insert(qrel.query_id.clone());
+        if !seen_pairs.insert((qrel.query_id, qrel.doc_id)) {
+            return Err(ValidationError::new(
+                "qrels file contains duplicate query_id/doc_id",
+            ));
+        }
+    }
+    if qrel_query_ids.len() != expected_query_ids.len() {
+        return Err(ValidationError::new("qrels file must align with query ids"));
+    }
+
+    Ok(())
+}
+
+fn load_qrels(path: PathBuf) -> Result<Vec<QrelRecord>, ValidationError> {
+    let text = fs::read_to_string(&path)
+        .map_err(|_| ValidationError::new("qrels file must be readable"))?;
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str(line)
+                .map_err(|_| ValidationError::new("qrels file contains invalid json"))
+        })
+        .collect()
 }
 
 fn is_pack_relative_path(path: &str) -> bool {

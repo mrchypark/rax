@@ -8,3 +8,4 @@ publish = false
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 wax-bench-artifacts = { path = "../wax-bench-artifacts" }
+wax-bench-model = { path = "../wax-bench-model" }

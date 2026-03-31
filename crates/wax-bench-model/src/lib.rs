@@ -412,9 +412,29 @@ pub struct QuerySetEntry {
     pub query_set_id: String,
     pub path: String,
     pub ground_truth_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qrels_path: Option<String>,
     pub query_count: u64,
     pub classes: Vec<String>,
     pub difficulty_distribution: DifficultyDistribution,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QrelRecord {
+    pub query_id: String,
+    pub doc_id: String,
+    pub relevance: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RankedDocumentHit {
+    pub doc_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RankedQueryResult {
+    pub query_id: String,
+    pub hits: Vec<RankedDocumentHit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

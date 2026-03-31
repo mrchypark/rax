@@ -20,6 +20,7 @@ resolver = "2"
 [dev-dependencies]
 serde = "1.0.228"
 serde_json = "1.0.145"
+sha2 = "0.10.9"
 strum = "0.27.2"
 tempfile = "3.23.0"
 wax-bench-artifacts = { path = "crates/wax-bench-artifacts" }
@@ -85,3 +86,7 @@ path = "tests/contracts/vector_engine_contract.rs"
 [[test]]
 name = "release_matrix_contract"
 path = "tests/contracts/release_matrix_contract.rs"
+
+[[test]]
+name = "search_quality_contract"
+path = "tests/contracts/search_quality_contract.rs"

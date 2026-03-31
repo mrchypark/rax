@@ -37,6 +37,7 @@ fn dataset_manifest_validation_rejects_duplicate_query_id() {
         query_set_id: "knowledge-small-duplicate-v1".to_owned(),
         path: "queries/duplicate.jsonl".to_owned(),
         ground_truth_path: "queries/duplicate-query-ground-truth.jsonl".to_owned(),
+        qrels_path: None,
         query_count: 3,
         classes: vec!["keyword".to_owned()],
         difficulty_distribution: wax_bench_model::DifficultyDistribution {

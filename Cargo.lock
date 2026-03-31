@@ -727,6 +727,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
  "strum",
  "tempfile",
  "wax-bench-artifacts",
@@ -1149,6 +1150,7 @@ dependencies = [
  "serde",
  "serde_json",
  "wax-bench-artifacts",
+ "wax-bench-model",
 ]
 
 [[package]]

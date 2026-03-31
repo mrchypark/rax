@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use bytemuck::try_cast_slice;
 use hnsw_rs::prelude::{DistCosine, Hnsw, HnswIo};
 use memmap2::{Mmap, MmapOptions};
-use serde::Serialize;
 use self_cell::self_cell;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::{Map, Value};
 use wax_bench_model::{
     build_vector_lane_skeleton, parse_vector_lane_skeleton_header, vector_lane_doc_id_offsets,
@@ -129,8 +129,8 @@ pub fn query_text_preview(
     query_text: &str,
     top_k: usize,
 ) -> Result<Vec<TextQueryHit>, String> {
-    let manifest_text =
-        fs::read_to_string(dataset_path.join("manifest.json")).map_err(|error| error.to_string())?;
+    let manifest_text = fs::read_to_string(dataset_path.join("manifest.json"))
+        .map_err(|error| error.to_string())?;
     let manifest: DatasetPackManifest =
         serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
     let text_lane = TextLane::load(dataset_path, &manifest)?;
@@ -931,7 +931,10 @@ fn load_documents_by_id(path: &Path) -> Result<HashMap<String, Value>, String> {
 }
 
 fn clone_object(object: &Map<String, Value>) -> Map<String, Value> {
-    object.iter().map(|(key, value)| (key.clone(), value.clone())).collect()
+    object
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]

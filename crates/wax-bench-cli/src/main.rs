@@ -11,7 +11,8 @@ use wax_bench_metrics::{MemoryReading, MemorySampler, MetricCollector, Monotonic
 use wax_bench_model::{BenchmarkId, DatasetPackManifest, MaterializationMode, VectorQueryMode};
 use wax_bench_packer::{AdhocPackRequest, PackRequest};
 use wax_bench_reducer::{
-    build_vector_lane_matrix_report, reduce_run_dir, render_vector_mode_compare_report,
+    build_vector_lane_matrix_report, compute_search_quality_summary_from_paths, reduce_run_dir,
+    render_vector_mode_compare_report,
 };
 use wax_bench_runner::{BenchmarkRunner, RunRequest, Workload};
 use wax_bench_text_engine::{query_text_preview, PackedTextEngine};
@@ -63,6 +64,16 @@ enum Command {
         text: String,
         #[arg(long, default_value_t = 5)]
         top_k: usize,
+    },
+    QualityReport {
+        #[arg(long)]
+        query_set: PathBuf,
+        #[arg(long)]
+        qrels: PathBuf,
+        #[arg(long)]
+        results: PathBuf,
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
     Reduce {
         #[arg(long)]
@@ -194,6 +205,22 @@ fn main() -> Result<(), String> {
             );
             Ok(())
         }
+        Some(Command::QualityReport {
+            query_set,
+            qrels,
+            results,
+            output,
+        }) => {
+            let summary = compute_search_quality_summary_from_paths(&query_set, &qrels, &results)
+                .map_err(|error| error.message)?;
+            let rendered =
+                serde_json::to_string_pretty(&summary).map_err(|error| error.to_string())?;
+            if let Some(output) = output {
+                std::fs::write(output, &rendered).map_err(|error| error.to_string())?;
+            }
+            println!("{rendered}");
+            Ok(())
+        }
         Some(Command::Reduce { input, baseline }) => {
             let report = reduce_run_dir(input.as_path(), baseline.as_deref())
                 .map_err(|error| error.message)?;
@@ -215,8 +242,8 @@ fn main() -> Result<(), String> {
             Ok(())
         }
         Some(Command::ModeCompareReport { input, output }) => {
-            let markdown =
-                render_vector_mode_compare_report(input.as_path()).map_err(|error| error.message)?;
+            let markdown = render_vector_mode_compare_report(input.as_path())
+                .map_err(|error| error.message)?;
             if let Some(output) = output {
                 std::fs::write(&output, &markdown).map_err(|error| error.to_string())?;
             }
