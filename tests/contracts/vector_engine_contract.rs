@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::fs;
 
 use tempfile::tempdir;
@@ -5,7 +6,63 @@ use wax_bench_model::{
     DatasetPackManifest, MountRequest, OpenRequest, SearchRequest, VectorQueryMode, WaxEngine,
 };
 use wax_bench_packer::{pack_dataset, PackRequest};
-use wax_bench_text_engine::PackedTextEngine;
+use wax_bench_text_engine::{profile_first_vector_query, PackedTextEngine};
+
+fn write_large_auto_source(source_dir: &std::path::Path, doc_count: usize) {
+    fs::write(
+        source_dir.join("source.json"),
+        r#"{
+  "dataset_family": "knowledge",
+  "dataset_version": "v1",
+  "generated_at": "2026-03-30T00:00:00Z",
+  "embedding_spec_id": "minilm-l6-384-f32-cosine",
+  "embedding_model_version": "2026-03-15",
+  "embedding_model_hash": "sha256:model",
+  "environment_constraints": { "min_ram_gb": 4, "recommended_ram_gb": 8 },
+  "languages": [{ "code": "en", "ratio": 1.0 }],
+  "metadata_profile": {
+    "facets": [],
+    "selectivity_exemplars": {
+      "broad": "workspace_id = w1",
+      "medium": "workspace_id = w1",
+      "narrow": "workspace_id = w1",
+      "zero_hit": "workspace_id = missing"
+    }
+  },
+  "query_sets": [
+    { "name": "core", "path": "queries/core.jsonl", "ground_truth_path": "queries/core-ground-truth.jsonl" }
+  ]
+}"#,
+    )
+    .unwrap();
+
+    let mut docs = String::new();
+    for index in 0..doc_count {
+        let text = if index == 0 {
+            "vector target warm hybrid exact first hnsw later"
+        } else {
+            "background filler document"
+        };
+        writeln!(
+            &mut docs,
+            "{{\"doc_id\":\"doc-{index:03}\",\"text\":\"{text}\"}}"
+        )
+        .unwrap();
+    }
+    fs::write(source_dir.join("docs.ndjson"), docs).unwrap();
+
+    fs::create_dir_all(source_dir.join("queries")).unwrap();
+    fs::write(
+        source_dir.join("queries/core.jsonl"),
+        "{\"query_id\":\"q-001\",\"query_class\":\"hybrid\",\"difficulty\":\"easy\",\"query_text\":\"vector target warm hybrid\",\"top_k\":5,\"filter_spec\":{},\"preview_expected\":true,\"embedding_available\":true,\"lane_eligibility\":{\"text\":true,\"vector\":true,\"hybrid\":true}}\n",
+    )
+    .unwrap();
+    fs::write(
+        source_dir.join("queries/core-ground-truth.jsonl"),
+        "{\"query_id\":\"q-001\",\"doc_ids\":[\"doc-000\"]}\n",
+    )
+    .unwrap();
+}
 
 #[test]
 fn packed_engine_materializes_vector_lane_on_first_vector_query() {
@@ -488,4 +545,256 @@ fn packed_engine_replaces_worse_hit_when_top_k_buffer_is_full() {
         .unwrap();
 
     assert_eq!(first.hits, vec!["doc-003".to_owned()]);
+}
+
+#[test]
+fn packed_engine_warm_text_does_not_materialize_vector_lane() {
+    let dataset_dir = tempdir().unwrap();
+    pack_dataset(&PackRequest::new(
+        "fixtures/bench/source/minimal",
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+
+    let mut engine = PackedTextEngine::default();
+    engine
+        .mount(MountRequest {
+            store_path: dataset_dir.path().to_path_buf(),
+        })
+        .unwrap();
+    engine.open(OpenRequest).unwrap();
+
+    assert!(!engine.is_text_lane_materialized());
+    assert!(!engine.is_vector_lane_materialized());
+
+    let result = engine
+        .search(SearchRequest {
+            query_text: "__warm_text__".to_owned(),
+        })
+        .unwrap();
+
+    assert!(engine.is_text_lane_materialized());
+    assert!(!engine.is_vector_lane_materialized());
+    assert_eq!(result.hits.first().map(String::as_str), Some("doc-001"));
+}
+
+#[test]
+fn vector_query_profile_uses_exact_breakdown_for_small_pack_auto_mode() {
+    let dataset_dir = tempdir().unwrap();
+    pack_dataset(&PackRequest::new(
+        "fixtures/bench/source/minimal",
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+
+    let profile = profile_first_vector_query(dataset_dir.path(), VectorQueryMode::Auto).unwrap();
+
+    assert_eq!(profile.selected_mode, VectorQueryMode::ExactFlat);
+    assert!(profile.vector_lane_load_ms >= 0.0);
+    assert!(profile.hnsw_sidecar_load_ms.is_none());
+    assert!(profile.total_search_ms >= 0.0);
+    assert!(profile.exact_scan_ms.is_some());
+    assert!(profile.approximate_search_ms.is_none());
+    assert!(profile.rerank_ms.is_none());
+    assert_eq!(profile.hits.first().map(String::as_str), Some("doc-002"));
+}
+
+#[test]
+fn vector_query_profile_uses_exact_breakdown_for_large_pack_auto_mode() {
+    let source_dir = tempdir().unwrap();
+    let dataset_dir = tempdir().unwrap();
+    write_large_auto_source(source_dir.path(), 96);
+    pack_dataset(&PackRequest::new(
+        source_dir.path(),
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+
+    let profile = profile_first_vector_query(dataset_dir.path(), VectorQueryMode::Auto).unwrap();
+
+    assert_eq!(profile.selected_mode, VectorQueryMode::ExactFlat);
+    assert!(profile.vector_lane_load_ms >= 0.0);
+    assert!(profile.hnsw_sidecar_load_ms.is_none());
+    assert!(profile.total_search_ms >= 0.0);
+    assert!(profile.exact_scan_ms.is_some());
+    assert!(profile.approximate_search_ms.is_none());
+    assert!(profile.rerank_ms.is_none());
+    assert_eq!(profile.hits.first().map(String::as_str), Some("doc-000"));
+}
+
+#[test]
+fn vector_query_profile_reports_hnsw_breakdown_when_forced() {
+    let dataset_dir = tempdir().unwrap();
+    pack_dataset(&PackRequest::new(
+        "fixtures/bench/source/minimal",
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+
+    let profile = profile_first_vector_query(dataset_dir.path(), VectorQueryMode::Hnsw).unwrap();
+
+    assert_eq!(profile.selected_mode, VectorQueryMode::Hnsw);
+    assert!(profile.vector_lane_load_ms >= 0.0);
+    assert!(profile.hnsw_sidecar_load_ms.is_some());
+    assert!(profile.total_search_ms >= 0.0);
+    assert!(profile.exact_scan_ms.is_none());
+    assert!(profile.approximate_search_ms.is_some());
+    assert!(profile.rerank_ms.is_some());
+    assert!(profile.candidate_count >= profile.hits.len());
+    assert_eq!(profile.hits.first().map(String::as_str), Some("doc-002"));
+}
+
+#[test]
+fn packed_engine_auto_keeps_hnsw_sidecar_cold_until_second_vector_query() {
+    let source_dir = tempdir().unwrap();
+    let dataset_dir = tempdir().unwrap();
+    write_large_auto_source(source_dir.path(), 96);
+    pack_dataset(&PackRequest::new(
+        source_dir.path(),
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+
+    let mut engine = PackedTextEngine::default();
+    engine
+        .mount(MountRequest {
+            store_path: dataset_dir.path().to_path_buf(),
+        })
+        .unwrap();
+    engine.open(OpenRequest).unwrap();
+
+    assert!(!engine.is_vector_lane_materialized());
+    assert!(!engine.is_vector_hnsw_sidecar_materialized());
+
+    let first = engine
+        .search(SearchRequest {
+            query_text: "__ttfq_vector__".to_owned(),
+        })
+        .unwrap();
+
+    assert_eq!(first.hits.first().map(String::as_str), Some("doc-000"));
+    assert!(engine.is_vector_lane_materialized());
+    assert!(!engine.is_vector_hnsw_sidecar_materialized());
+
+    let second = engine
+        .search(SearchRequest {
+            query_text: "__warm_vector__".to_owned(),
+        })
+        .unwrap();
+
+    assert_eq!(second.hits.first().map(String::as_str), Some("doc-000"));
+    assert!(engine.is_vector_hnsw_sidecar_materialized());
+}
+
+#[test]
+fn packed_engine_auto_warmup_vector_primes_hnsw_sidecar_for_measured_query() {
+    let source_dir = tempdir().unwrap();
+    let dataset_dir = tempdir().unwrap();
+    write_large_auto_source(source_dir.path(), 96);
+    pack_dataset(&PackRequest::new(
+        source_dir.path(),
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+
+    let mut engine = PackedTextEngine::default();
+    engine
+        .mount(MountRequest {
+            store_path: dataset_dir.path().to_path_buf(),
+        })
+        .unwrap();
+    engine.open(OpenRequest).unwrap();
+
+    let warmup = engine
+        .search(SearchRequest {
+            query_text: "__warmup_vector__".to_owned(),
+        })
+        .unwrap();
+
+    assert_eq!(warmup.hits.first().map(String::as_str), Some("doc-000"));
+    assert!(engine.is_vector_hnsw_sidecar_materialized());
+}
+
+#[test]
+fn packed_engine_auto_keeps_hnsw_sidecar_cold_until_second_hybrid_query() {
+    let source_dir = tempdir().unwrap();
+    let dataset_dir = tempdir().unwrap();
+    write_large_auto_source(source_dir.path(), 96);
+    pack_dataset(&PackRequest::new(
+        source_dir.path(),
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+
+    let mut engine = PackedTextEngine::default();
+    engine
+        .mount(MountRequest {
+            store_path: dataset_dir.path().to_path_buf(),
+        })
+        .unwrap();
+    engine.open(OpenRequest).unwrap();
+
+    let first = engine
+        .search(SearchRequest {
+            query_text: "__ttfq_hybrid__".to_owned(),
+        })
+        .unwrap();
+
+    assert_eq!(first.hits.first().map(String::as_str), Some("doc-000"));
+    assert!(engine.is_vector_lane_materialized());
+    assert!(!engine.is_vector_hnsw_sidecar_materialized());
+
+    let second = engine
+        .search(SearchRequest {
+            query_text: "__warm_hybrid__".to_owned(),
+        })
+        .unwrap();
+
+    assert_eq!(second.hits.first().map(String::as_str), Some("doc-000"));
+    assert!(engine.is_vector_hnsw_sidecar_materialized());
+}
+
+#[test]
+fn packed_engine_auto_warmup_hybrid_primes_hnsw_sidecar_for_measured_query() {
+    let source_dir = tempdir().unwrap();
+    let dataset_dir = tempdir().unwrap();
+    write_large_auto_source(source_dir.path(), 96);
+    pack_dataset(&PackRequest::new(
+        source_dir.path(),
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+
+    let mut engine = PackedTextEngine::default();
+    engine
+        .mount(MountRequest {
+            store_path: dataset_dir.path().to_path_buf(),
+        })
+        .unwrap();
+    engine.open(OpenRequest).unwrap();
+
+    let warmup = engine
+        .search(SearchRequest {
+            query_text: "__warmup_hybrid__".to_owned(),
+        })
+        .unwrap();
+
+    assert_eq!(warmup.hits.first().map(String::as_str), Some("doc-000"));
+    assert!(engine.is_vector_hnsw_sidecar_materialized());
 }

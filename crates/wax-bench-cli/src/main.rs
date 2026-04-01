@@ -15,7 +15,9 @@ use wax_bench_reducer::{
     render_vector_mode_compare_report,
 };
 use wax_bench_runner::{BenchmarkRunner, RunRequest, Workload};
-use wax_bench_text_engine::{query_batch_ranked_results, query_text_preview, PackedTextEngine};
+use wax_bench_text_engine::{
+    profile_first_vector_query, query_batch_ranked_results, query_text_preview, PackedTextEngine,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "wax-bench-cli")]
@@ -74,6 +76,16 @@ enum Command {
         output: Option<PathBuf>,
         #[arg(long, default_value = "auto")]
         vector_mode: String,
+    },
+    ProfileVectorQuery {
+        #[arg(long)]
+        dataset: PathBuf,
+        #[arg(long, default_value = "auto")]
+        vector_mode: String,
+        #[arg(long, default_value_t = 1)]
+        sample_count: u32,
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
     QualityReport {
         #[arg(long)]
@@ -226,6 +238,25 @@ fn main() -> Result<(), String> {
                 query_batch_ranked_results(&dataset, &query_set, parse_vector_mode(&vector_mode)?)?;
             let rendered =
                 serde_json::to_string_pretty(&results).map_err(|error| error.to_string())?;
+            if let Some(output) = output {
+                std::fs::write(output, &rendered).map_err(|error| error.to_string())?;
+            }
+            println!("{rendered}");
+            Ok(())
+        }
+        Some(Command::ProfileVectorQuery {
+            dataset,
+            vector_mode,
+            sample_count,
+            output,
+        }) => {
+            let vector_mode = parse_vector_mode(&vector_mode)?;
+            let mut profiles = Vec::with_capacity(sample_count as usize);
+            for _ in 0..sample_count {
+                profiles.push(profile_first_vector_query(&dataset, vector_mode)?);
+            }
+            let rendered =
+                serde_json::to_string_pretty(&profiles).map_err(|error| error.to_string())?;
             if let Some(output) = output {
                 std::fs::write(output, &rendered).map_err(|error| error.to_string())?;
             }

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use bytemuck::try_cast_slice;
 use hnsw_rs::prelude::{DistCosine, Hnsw, HnswIo};
@@ -56,6 +57,7 @@ pub struct PackedTextEngine {
     vector_lane: Option<VectorLane>,
     preview_store: Option<HashMap<String, Value>>,
     vector_mode: VectorQueryMode,
+    auto_vector_query_pending: bool,
 }
 
 impl PackedTextEngine {
@@ -68,6 +70,7 @@ impl PackedTextEngine {
             vector_lane: None,
             preview_store: None,
             vector_mode,
+            auto_vector_query_pending: true,
         }
     }
 
@@ -77,6 +80,12 @@ impl PackedTextEngine {
 
     pub fn is_vector_lane_materialized(&self) -> bool {
         self.vector_lane.is_some()
+    }
+
+    pub fn is_vector_hnsw_sidecar_materialized(&self) -> bool {
+        self.vector_lane
+            .as_ref()
+            .is_some_and(VectorLane::is_hnsw_sidecar_materialized)
     }
 
     fn manifest(&self) -> Result<&DatasetPackManifest, String> {
@@ -102,15 +111,25 @@ impl PackedTextEngine {
             .ok_or_else(|| "text lane not materialized".to_owned())
     }
 
-    fn ensure_vector_lane(&mut self) -> Result<&VectorLane, String> {
+    fn ensure_vector_lane(&mut self) -> Result<&mut VectorLane, String> {
         if self.vector_lane.is_none() {
             let mount_root = self.mount_root()?.to_path_buf();
             let manifest = self.manifest()?.clone();
-            self.vector_lane = Some(VectorLane::load(&mount_root, &manifest)?);
+            self.vector_lane = Some(VectorLane::load(&mount_root, &manifest, self.vector_mode)?);
         }
         self.vector_lane
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| "vector lane not materialized".to_owned())
+    }
+
+    fn should_force_exact_on_auto_vector_query(&self) -> bool {
+        matches!(self.vector_mode, VectorQueryMode::Auto) && self.auto_vector_query_pending
+    }
+
+    fn note_vector_query_executed(&mut self) {
+        if matches!(self.vector_mode, VectorQueryMode::Auto) {
+            self.auto_vector_query_pending = false;
+        }
     }
 
     fn ensure_preview_store(&mut self) -> Result<&mut HashMap<String, Value>, String> {
@@ -135,6 +154,32 @@ pub struct TextQueryHit {
     pub doc_id: String,
     pub text: String,
     pub document: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FirstVectorQueryProfile {
+    pub selected_mode: VectorQueryMode,
+    pub doc_count: usize,
+    pub top_k: usize,
+    pub vector_lane_load_ms: f64,
+    pub hnsw_sidecar_load_ms: Option<f64>,
+    pub total_search_ms: f64,
+    pub exact_scan_ms: Option<f64>,
+    pub approximate_search_ms: Option<f64>,
+    pub rerank_ms: Option<f64>,
+    pub candidate_count: usize,
+    pub hits: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SearchPhaseProfile {
+    selected_mode: VectorQueryMode,
+    total_search_ms: f64,
+    exact_scan_ms: Option<f64>,
+    approximate_search_ms: Option<f64>,
+    rerank_ms: Option<f64>,
+    candidate_count: usize,
+    hits: Vec<String>,
 }
 
 pub fn query_text_preview(
@@ -182,7 +227,7 @@ pub fn query_batch_ranked_results(
     let manifest: DatasetPackManifest =
         serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
     let text_lane = TextLane::load(dataset_path, &manifest)?;
-    let vector_lane = VectorLane::load(dataset_path, &manifest)?;
+    let mut vector_lane = VectorLane::load(dataset_path, &manifest, vector_mode)?;
     let query_vectors = load_query_vector_records(query_set_path, vector_lane.dimensions)?;
     let queries = load_query_records(query_set_path)?;
 
@@ -190,25 +235,38 @@ pub fn query_batch_ranked_results(
         return Err("query_set and query vector records must align".to_owned());
     }
 
+    let mut auto_vector_query_pending = matches!(vector_mode, VectorQueryMode::Auto);
     queries
         .into_iter()
         .zip(query_vectors)
         .map(|(query, vector_record)| {
             let limit = query.top_k as usize;
+            let uses_vector_lane = query.lane_eligibility.hybrid
+                || (query.lane_eligibility.vector && !query.lane_eligibility.text);
+            let force_exact = auto_vector_query_pending && uses_vector_lane;
             let hits = if query.lane_eligibility.hybrid {
                 search_query_hybrid(
                     &text_lane,
-                    &vector_lane,
+                    &mut vector_lane,
                     &query.query_text,
                     &vector_record.vector,
                     limit,
                     vector_mode,
-                )
+                    force_exact,
+                )?
             } else if query.lane_eligibility.vector && !query.lane_eligibility.text {
-                vector_lane.search_with_query(&vector_record.vector, limit, vector_mode)
+                vector_lane.search_with_query(
+                    &vector_record.vector,
+                    limit,
+                    vector_mode,
+                    force_exact,
+                )?
             } else {
                 text_lane.search_with_limit(&query.query_text, limit)
             };
+            if uses_vector_lane {
+                auto_vector_query_pending = false;
+            }
 
             Ok(RankedQueryResult {
                 query_id: vector_record.query_id,
@@ -221,6 +279,35 @@ pub fn query_batch_ranked_results(
         .collect()
 }
 
+pub fn profile_first_vector_query(
+    dataset_path: &Path,
+    vector_mode: VectorQueryMode,
+) -> Result<FirstVectorQueryProfile, String> {
+    let manifest_text = fs::read_to_string(dataset_path.join("manifest.json"))
+        .map_err(|error| error.to_string())?;
+    let manifest: DatasetPackManifest =
+        serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
+    let load_start = Instant::now();
+    let (vector_lane, hnsw_sidecar_load_ms) =
+        VectorLane::load_with_report(dataset_path, &manifest, vector_mode)?;
+    let vector_lane_load_ms = elapsed_ms(load_start.elapsed());
+    let search_profile = vector_lane.profile_first_vector_query(vector_mode);
+
+    Ok(FirstVectorQueryProfile {
+        selected_mode: search_profile.selected_mode,
+        doc_count: vector_lane.skeleton_header.doc_count as usize,
+        top_k: vector_lane.first_vector_top_k,
+        vector_lane_load_ms,
+        hnsw_sidecar_load_ms,
+        total_search_ms: search_profile.total_search_ms,
+        exact_scan_ms: search_profile.exact_scan_ms,
+        approximate_search_ms: search_profile.approximate_search_ms,
+        rerank_ms: search_profile.rerank_ms,
+        candidate_count: search_profile.candidate_count,
+        hits: search_profile.hits,
+    })
+}
+
 impl WaxEngine for PackedTextEngine {
     type Error = String;
 
@@ -231,6 +318,7 @@ impl WaxEngine for PackedTextEngine {
         self.text_lane = None;
         self.vector_lane = None;
         self.preview_store = None;
+        self.auto_vector_query_pending = true;
         Ok(())
     }
 
@@ -246,6 +334,7 @@ impl WaxEngine for PackedTextEngine {
 
         self.manifest = Some(manifest);
         self.phase = EnginePhase::Open;
+        self.auto_vector_query_pending = true;
         Ok(OpenResult)
     }
 
@@ -264,61 +353,42 @@ impl WaxEngine for PackedTextEngine {
         }
         if request.query_text == "__ttfq_vector__" {
             let vector_mode = self.vector_mode;
-            let lane = self.ensure_vector_lane()?;
-            return Ok(SearchResult {
-                hits: lane.search_first_vector_query(vector_mode),
-            });
+            let force_exact = self.should_force_exact_on_auto_vector_query();
+            let hits = {
+                let lane = self.ensure_vector_lane()?;
+                lane.search_first_vector_query(vector_mode, force_exact)?
+            };
+            self.note_vector_query_executed();
+            return Ok(SearchResult { hits });
         }
-        if matches!(
-            request.query_text.as_str(),
-            "__warmup_vector__" | "__warm_vector__"
-        ) {
+        if request.query_text == "__warmup_vector__" {
             let vector_mode = self.vector_mode;
-            let lane = self.ensure_vector_lane()?;
-            return Ok(SearchResult {
-                hits: lane.search_first_vector_query(vector_mode),
-            });
+            let force_exact = self.should_force_exact_on_auto_vector_query();
+            let hits = {
+                let lane = self.ensure_vector_lane()?;
+                lane.search_first_vector_query(vector_mode, force_exact)?
+            };
+            {
+                let lane = self.ensure_vector_lane()?;
+                lane.prime_followup_mode_for_first_vector_query(vector_mode)?;
+            }
+            self.note_vector_query_executed();
+            return Ok(SearchResult { hits });
+        }
+        if request.query_text == "__warm_vector__" {
+            let vector_mode = self.vector_mode;
+            let force_exact = self.should_force_exact_on_auto_vector_query();
+            let hits = {
+                let lane = self.ensure_vector_lane()?;
+                lane.search_first_vector_query(vector_mode, force_exact)?
+            };
+            self.note_vector_query_executed();
+            return Ok(SearchResult { hits });
         }
         if request.query_text == "__ttfq_hybrid__" {
             self.ensure_text_lane()?;
             self.ensure_vector_lane()?;
-            let text_lane = self
-                .text_lane
-                .as_ref()
-                .ok_or_else(|| "text lane not materialized".to_owned())?;
-            let vector_lane = self
-                .vector_lane
-                .as_ref()
-                .ok_or_else(|| "vector lane not materialized".to_owned())?;
-            return Ok(SearchResult {
-                hits: search_first_hybrid_query(text_lane, vector_lane, self.vector_mode),
-            });
-        }
-        if matches!(
-            request.query_text.as_str(),
-            "__warmup_hybrid__" | "__warm_hybrid__"
-        ) {
-            self.ensure_text_lane()?;
-            self.ensure_vector_lane()?;
-            let text_lane = self
-                .text_lane
-                .as_ref()
-                .ok_or_else(|| "text lane not materialized".to_owned())?;
-            let vector_lane = self
-                .vector_lane
-                .as_ref()
-                .ok_or_else(|| "vector lane not materialized".to_owned())?;
-            return Ok(SearchResult {
-                hits: search_first_hybrid_query(text_lane, vector_lane, self.vector_mode),
-            });
-        }
-        if matches!(
-            request.query_text.as_str(),
-            "__warmup_hybrid_with_previews__" | "__warm_hybrid_with_previews__"
-        ) {
-            self.ensure_text_lane()?;
-            self.ensure_vector_lane()?;
-            let docs_path = self.mount_root()?.join("docs.ndjson");
+            let force_exact = self.should_force_exact_on_auto_vector_query();
             let hits = {
                 let text_lane = self
                     .text_lane
@@ -326,10 +396,105 @@ impl WaxEngine for PackedTextEngine {
                     .ok_or_else(|| "text lane not materialized".to_owned())?;
                 let vector_lane = self
                     .vector_lane
-                    .as_ref()
+                    .as_mut()
                     .ok_or_else(|| "vector lane not materialized".to_owned())?;
-                search_first_hybrid_query(text_lane, vector_lane, self.vector_mode)
+                search_first_hybrid_query(text_lane, vector_lane, self.vector_mode, force_exact)?
             };
+            self.note_vector_query_executed();
+            return Ok(SearchResult { hits });
+        }
+        if request.query_text == "__warmup_hybrid__" {
+            self.ensure_text_lane()?;
+            self.ensure_vector_lane()?;
+            let force_exact = self.should_force_exact_on_auto_vector_query();
+            let hits = {
+                let text_lane = self
+                    .text_lane
+                    .as_ref()
+                    .ok_or_else(|| "text lane not materialized".to_owned())?;
+                let vector_lane = self
+                    .vector_lane
+                    .as_mut()
+                    .ok_or_else(|| "vector lane not materialized".to_owned())?;
+                search_first_hybrid_query(text_lane, vector_lane, self.vector_mode, force_exact)?
+            };
+            {
+                let vector_lane = self
+                    .vector_lane
+                    .as_mut()
+                    .ok_or_else(|| "vector lane not materialized".to_owned())?;
+                vector_lane.prime_followup_mode_for_first_hybrid_query(self.vector_mode)?;
+            }
+            self.note_vector_query_executed();
+            return Ok(SearchResult { hits });
+        }
+        if request.query_text == "__warm_hybrid__" {
+            self.ensure_text_lane()?;
+            self.ensure_vector_lane()?;
+            let force_exact = self.should_force_exact_on_auto_vector_query();
+            let hits = {
+                let text_lane = self
+                    .text_lane
+                    .as_ref()
+                    .ok_or_else(|| "text lane not materialized".to_owned())?;
+                let vector_lane = self
+                    .vector_lane
+                    .as_mut()
+                    .ok_or_else(|| "vector lane not materialized".to_owned())?;
+                search_first_hybrid_query(text_lane, vector_lane, self.vector_mode, force_exact)?
+            };
+            self.note_vector_query_executed();
+            return Ok(SearchResult { hits });
+        }
+        if request.query_text == "__warmup_hybrid_with_previews__" {
+            self.ensure_text_lane()?;
+            self.ensure_vector_lane()?;
+            let docs_path = self.mount_root()?.join("docs.ndjson");
+            let force_exact = self.should_force_exact_on_auto_vector_query();
+            let hits = {
+                let text_lane = self
+                    .text_lane
+                    .as_ref()
+                    .ok_or_else(|| "text lane not materialized".to_owned())?;
+                let vector_lane = self
+                    .vector_lane
+                    .as_mut()
+                    .ok_or_else(|| "vector lane not materialized".to_owned())?;
+                search_first_hybrid_query(
+                    text_lane,
+                    vector_lane,
+                    self.vector_mode,
+                    force_exact,
+                )?
+            };
+            {
+                let vector_lane = self
+                    .vector_lane
+                    .as_mut()
+                    .ok_or_else(|| "vector lane not materialized".to_owned())?;
+                vector_lane.prime_followup_mode_for_first_hybrid_query(self.vector_mode)?;
+            }
+            self.note_vector_query_executed();
+            materialize_document_previews(self.ensure_preview_store()?, &docs_path, &hits)?;
+            return Ok(SearchResult { hits });
+        }
+        if request.query_text == "__warm_hybrid_with_previews__" {
+            self.ensure_text_lane()?;
+            self.ensure_vector_lane()?;
+            let docs_path = self.mount_root()?.join("docs.ndjson");
+            let force_exact = self.should_force_exact_on_auto_vector_query();
+            let hits = {
+                let text_lane = self
+                    .text_lane
+                    .as_ref()
+                    .ok_or_else(|| "text lane not materialized".to_owned())?;
+                let vector_lane = self
+                    .vector_lane
+                    .as_mut()
+                    .ok_or_else(|| "vector lane not materialized".to_owned())?;
+                search_first_hybrid_query(text_lane, vector_lane, self.vector_mode, force_exact)?
+            };
+            self.note_vector_query_executed();
             materialize_document_previews(self.ensure_preview_store()?, &docs_path, &hits)?;
             return Ok(SearchResult { hits });
         }
@@ -364,6 +529,8 @@ struct TextLane {
 }
 
 struct VectorLane {
+    mount_root: PathBuf,
+    hnsw_graph_basename: Option<String>,
     first_vector_query: Vec<f32>,
     first_vector_top_k: usize,
     first_hybrid_query: Option<Vec<f32>>,
@@ -372,6 +539,7 @@ struct VectorLane {
     skeleton_header: VectorLaneSkeletonHeader,
     doc_id_offsets: Vec<u64>,
     doc_vectors: Mmap,
+    hnsw_available: bool,
     hnsw_index: Option<HnswIndexCell>,
     preview_vectors: Option<Mmap>,
     dimensions: usize,
@@ -453,7 +621,19 @@ impl TextLane {
 }
 
 impl VectorLane {
-    fn load(mount_root: &Path, manifest: &DatasetPackManifest) -> Result<Self, String> {
+    fn load(
+        mount_root: &Path,
+        manifest: &DatasetPackManifest,
+        vector_mode: VectorQueryMode,
+    ) -> Result<Self, String> {
+        Self::load_with_report(mount_root, manifest, vector_mode).map(|(lane, _)| lane)
+    }
+
+    fn load_with_report(
+        mount_root: &Path,
+        manifest: &DatasetPackManifest,
+        vector_mode: VectorQueryMode,
+    ) -> Result<(Self, Option<f64>), String> {
         let document_ids_path = manifest
             .files
             .iter()
@@ -502,10 +682,6 @@ impl VectorLane {
 
         let doc_vectors = map_read_only(&document_vectors_path)?;
         validate_document_vectors(doc_vectors.as_ref(), dimensions, doc_count)?;
-        let hnsw_index = hnsw_graph_basename
-            .as_deref()
-            .map(|basename| load_hnsw_index(mount_root, basename))
-            .transpose()?;
         let preview_vectors = preview_vectors_path
             .map(|path| -> Result<Mmap, String> {
                 let mapped = map_read_only(&path)?;
@@ -515,54 +691,265 @@ impl VectorLane {
             .transpose()?;
         let first_vector_query = load_first_vector_query(&query_vectors_path)?;
         let first_hybrid_query = load_first_hybrid_vector_query(&query_vectors_path)?;
+        let hnsw_available = hnsw_graph_basename.is_some();
+        let should_load_hnsw = match vector_mode {
+            VectorQueryMode::Auto => false,
+            VectorQueryMode::Hnsw => true,
+            VectorQueryMode::ExactFlat | VectorQueryMode::PreviewQ8 => false,
+        };
+        let (hnsw_index, hnsw_sidecar_load_ms) = if should_load_hnsw {
+            let load_start = Instant::now();
+            let index = hnsw_graph_basename
+                .as_deref()
+                .map(|basename| load_hnsw_index(mount_root, basename))
+                .transpose()?;
+            (index, Some(elapsed_ms(load_start.elapsed())))
+        } else {
+            (None, None)
+        };
 
-        Ok(Self {
-            first_vector_query: first_vector_query.vector,
-            first_vector_top_k: first_vector_query.top_k,
-            first_hybrid_query: first_hybrid_query
-                .as_ref()
-                .map(|query| query.vector.clone()),
-            first_hybrid_top_k: first_hybrid_query.map(|query| query.top_k).unwrap_or(0),
-            doc_ids,
-            skeleton_header,
-            doc_id_offsets,
-            doc_vectors,
-            hnsw_index,
-            preview_vectors,
-            dimensions,
-        })
+        Ok((
+            Self {
+                mount_root: mount_root.to_path_buf(),
+                hnsw_graph_basename,
+                first_vector_query: first_vector_query.vector,
+                first_vector_top_k: first_vector_query.top_k,
+                first_hybrid_query: first_hybrid_query
+                    .as_ref()
+                    .map(|query| query.vector.clone()),
+                first_hybrid_top_k: first_hybrid_query.map(|query| query.top_k).unwrap_or(0),
+                doc_ids,
+                skeleton_header,
+                doc_id_offsets,
+                doc_vectors,
+                hnsw_available,
+                hnsw_index,
+                preview_vectors,
+                dimensions,
+            },
+            hnsw_sidecar_load_ms,
+        ))
     }
 
-    fn search_first_vector_query(&self, mode: VectorQueryMode) -> Vec<String> {
+    fn is_hnsw_sidecar_materialized(&self) -> bool {
+        self.hnsw_index.is_some()
+    }
+
+    fn search_first_vector_query(
+        &mut self,
+        mode: VectorQueryMode,
+        auto_force_exact: bool,
+    ) -> Result<Vec<String>, String> {
         if self.first_vector_top_k == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
-        self.search_with_query(&self.first_vector_query, self.first_vector_top_k, mode)
+        let query = self.first_vector_query.clone();
+        self.search_with_query(&query, self.first_vector_top_k, mode, auto_force_exact)
     }
 
-    fn search_with_query(&self, query: &[f32], limit: usize, mode: VectorQueryMode) -> Vec<String> {
+    fn profile_first_vector_query(&self, mode: VectorQueryMode) -> SearchPhaseProfile {
+        if self.first_vector_top_k == 0 {
+            return SearchPhaseProfile {
+                selected_mode: self.resolve_runtime_query_mode(
+                    1,
+                    mode,
+                    matches!(mode, VectorQueryMode::Auto),
+                ),
+                total_search_ms: 0.0,
+                exact_scan_ms: None,
+                approximate_search_ms: None,
+                rerank_ms: None,
+                candidate_count: 0,
+                hits: Vec::new(),
+            };
+        }
+
+        self.profile_search_with_query(
+            &self.first_vector_query,
+            self.first_vector_top_k,
+            mode,
+            matches!(mode, VectorQueryMode::Auto),
+        )
+    }
+
+    fn search_with_query(
+        &mut self,
+        query: &[f32],
+        limit: usize,
+        mode: VectorQueryMode,
+        auto_force_exact: bool,
+    ) -> Result<Vec<String>, String> {
         if limit == 0 || self.dimensions == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
-        match mode {
-            VectorQueryMode::ExactFlat => self.search_exact(query, limit),
+        match self.resolve_runtime_query_mode(limit, mode, auto_force_exact) {
+            VectorQueryMode::ExactFlat => Ok(self.search_exact(query, limit)),
             VectorQueryMode::Hnsw => self.search_with_hnsw_or_exact(query, limit),
-            VectorQueryMode::PreviewQ8 => self.search_with_preview_or_exact(query, limit),
-            VectorQueryMode::Auto => self.search_with_auto_mode(query, limit),
+            VectorQueryMode::PreviewQ8 => Ok(self.search_with_preview_or_exact(query, limit)),
+            VectorQueryMode::Auto => Ok(self.search_exact(query, limit)),
         }
     }
 
-    fn search_with_auto_mode(&self, query: &[f32], limit: usize) -> Vec<String> {
-        if self.hnsw_index.is_some() {
-            return self.search_with_hnsw(query, limit);
-        }
-        if self.preview_vectors.is_some() {
-            return self.search_with_quantized_preview(query, limit);
+    fn profile_search_with_query(
+        &self,
+        query: &[f32],
+        limit: usize,
+        mode: VectorQueryMode,
+        auto_force_exact: bool,
+    ) -> SearchPhaseProfile {
+        if limit == 0 || self.dimensions == 0 {
+            return SearchPhaseProfile {
+                selected_mode: self.resolve_runtime_query_mode(
+                    limit.max(1),
+                    mode,
+                    auto_force_exact,
+                ),
+                total_search_ms: 0.0,
+                exact_scan_ms: None,
+                approximate_search_ms: None,
+                rerank_ms: None,
+                candidate_count: 0,
+                hits: Vec::new(),
+            };
         }
 
-        self.search_exact(query, limit)
+        let selected_mode = self.resolve_runtime_query_mode(limit, mode, auto_force_exact);
+        match selected_mode {
+            VectorQueryMode::ExactFlat => self.profile_exact_search(query, limit),
+            VectorQueryMode::Hnsw => self.profile_hnsw_search(query, limit),
+            VectorQueryMode::PreviewQ8 => self.profile_preview_search(query, limit),
+            VectorQueryMode::Auto => self.profile_exact_search(query, limit),
+        }
+    }
+
+    fn resolve_query_mode(&self, limit: usize, mode: VectorQueryMode) -> VectorQueryMode {
+        match mode {
+            VectorQueryMode::Auto => resolve_auto_vector_mode(
+                self.skeleton_header.doc_count as usize,
+                limit,
+                self.hnsw_available,
+                self.preview_vectors.is_some(),
+            ),
+            other => other,
+        }
+    }
+
+    fn resolve_runtime_query_mode(
+        &self,
+        limit: usize,
+        mode: VectorQueryMode,
+        auto_force_exact: bool,
+    ) -> VectorQueryMode {
+        if auto_force_exact && matches!(mode, VectorQueryMode::Auto) {
+            return VectorQueryMode::ExactFlat;
+        }
+
+        self.resolve_query_mode(limit, mode)
+    }
+
+    fn profile_exact_search(&self, query: &[f32], limit: usize) -> SearchPhaseProfile {
+        let exact_start = Instant::now();
+        let hits = self.search_exact(query, limit);
+        let exact_scan_ms = elapsed_ms(exact_start.elapsed());
+        SearchPhaseProfile {
+            selected_mode: VectorQueryMode::ExactFlat,
+            total_search_ms: exact_scan_ms,
+            exact_scan_ms: Some(exact_scan_ms),
+            approximate_search_ms: None,
+            rerank_ms: None,
+            candidate_count: self.skeleton_header.doc_count as usize,
+            hits,
+        }
+    }
+
+    fn profile_preview_search(&self, query: &[f32], limit: usize) -> SearchPhaseProfile {
+        let total_start = Instant::now();
+        let preview_vectors = self
+            .preview_vectors
+            .as_ref()
+            .expect("preview path checked by caller");
+        let preview_limit = self.preview_limit(limit);
+        let approximate_start = Instant::now();
+        let mut candidates = Vec::with_capacity(preview_limit);
+        for (index, vector) in preview_vectors
+            .as_ref()
+            .chunks_exact(self.dimensions)
+            .enumerate()
+        {
+            let score = dot_product_i8_preview(query, vector);
+            self.collect_top_hit(&mut candidates, preview_limit, index, score);
+        }
+        let approximate_search_ms = elapsed_ms(approximate_start.elapsed());
+
+        let rerank_start = Instant::now();
+        let mut reranked = Vec::with_capacity(candidates.len());
+        for (index, _) in &candidates {
+            let start = index * self.dimensions;
+            let end = start + self.dimensions;
+            let exact_score = dot_product(query, &self.vector_values()[start..end]);
+            reranked.push((*index, exact_score));
+        }
+
+        reranked.sort_by(|left, right| self.compare_hits(*left, *right));
+        let hits = reranked
+            .into_iter()
+            .take(limit)
+            .map(|(index, _)| self.doc_id(index).to_owned())
+            .collect::<Vec<_>>();
+        let rerank_ms = elapsed_ms(rerank_start.elapsed());
+
+        SearchPhaseProfile {
+            selected_mode: VectorQueryMode::PreviewQ8,
+            total_search_ms: elapsed_ms(total_start.elapsed()),
+            exact_scan_ms: None,
+            approximate_search_ms: Some(approximate_search_ms),
+            rerank_ms: Some(rerank_ms),
+            candidate_count: candidates.len(),
+            hits,
+        }
+    }
+
+    fn profile_hnsw_search(&self, query: &[f32], limit: usize) -> SearchPhaseProfile {
+        let total_start = Instant::now();
+        let candidate_limit = self.hnsw_candidate_limit(limit);
+        let ef_search = candidate_limit.max(limit).max(32);
+        let approximate_start = Instant::now();
+        let neighbours = self
+            .hnsw_index
+            .as_ref()
+            .expect("checked by caller")
+            .with_dependent(|_, hnsw_index| hnsw_index.search(query, candidate_limit, ef_search));
+        let approximate_search_ms = elapsed_ms(approximate_start.elapsed());
+
+        let rerank_start = Instant::now();
+        let mut reranked = Vec::with_capacity(neighbours.len());
+        for neighbour in &neighbours {
+            let index = neighbour.d_id;
+            let start = index * self.dimensions;
+            let end = start + self.dimensions;
+            let exact_score = dot_product(query, &self.vector_values()[start..end]);
+            reranked.push((index, exact_score));
+        }
+
+        reranked.sort_by(|left, right| self.compare_hits(*left, *right));
+        let hits = reranked
+            .into_iter()
+            .take(limit)
+            .map(|(index, _)| self.doc_id(index).to_owned())
+            .collect::<Vec<_>>();
+        let rerank_ms = elapsed_ms(rerank_start.elapsed());
+
+        SearchPhaseProfile {
+            selected_mode: VectorQueryMode::Hnsw,
+            total_search_ms: elapsed_ms(total_start.elapsed()),
+            exact_scan_ms: None,
+            approximate_search_ms: Some(approximate_search_ms),
+            rerank_ms: Some(rerank_ms),
+            candidate_count: neighbours.len(),
+            hits,
+        }
     }
 
     fn search_with_preview_or_exact(&self, query: &[f32], limit: usize) -> Vec<String> {
@@ -573,12 +960,44 @@ impl VectorLane {
         self.search_exact(query, limit)
     }
 
-    fn search_with_hnsw_or_exact(&self, query: &[f32], limit: usize) -> Vec<String> {
-        if self.hnsw_index.is_some() {
-            return self.search_with_hnsw(query, limit);
+    fn ensure_hnsw_sidecar(&mut self) -> Result<bool, String> {
+        if self.hnsw_index.is_none() {
+            if let Some(basename) = self.hnsw_graph_basename.as_deref() {
+                self.hnsw_index = Some(load_hnsw_index(&self.mount_root, basename)?);
+            }
         }
 
-        self.search_exact(query, limit)
+        Ok(self.hnsw_index.is_some())
+    }
+
+    fn prime_followup_mode_for_first_vector_query(
+        &mut self,
+        mode: VectorQueryMode,
+    ) -> Result<(), String> {
+        self.prime_followup_mode(self.first_vector_top_k.max(1), mode)
+    }
+
+    fn prime_followup_mode_for_first_hybrid_query(
+        &mut self,
+        mode: VectorQueryMode,
+    ) -> Result<(), String> {
+        self.prime_followup_mode(self.first_hybrid_top_k.max(1), mode)
+    }
+
+    fn prime_followup_mode(&mut self, limit: usize, mode: VectorQueryMode) -> Result<(), String> {
+        if matches!(self.resolve_query_mode(limit, mode), VectorQueryMode::Hnsw) {
+            self.ensure_hnsw_sidecar()?;
+        }
+
+        Ok(())
+    }
+
+    fn search_with_hnsw_or_exact(&mut self, query: &[f32], limit: usize) -> Result<Vec<String>, String> {
+        if self.ensure_hnsw_sidecar()? {
+            return Ok(self.search_with_hnsw(query, limit));
+        }
+
+        Ok(self.search_exact(query, limit))
     }
 
     fn search_exact(&self, query: &[f32], limit: usize) -> Vec<String> {
@@ -715,6 +1134,29 @@ impl VectorLane {
         let doc_count = self.skeleton_header.doc_count as usize;
         limit.saturating_mul(8).max(64).min(doc_count)
     }
+}
+
+fn resolve_auto_vector_mode(
+    doc_count: usize,
+    limit: usize,
+    has_hnsw: bool,
+    has_preview: bool,
+) -> VectorQueryMode {
+    if doc_count <= auto_exact_fallback_doc_count(limit) {
+        return VectorQueryMode::ExactFlat;
+    }
+    if has_hnsw {
+        return VectorQueryMode::Hnsw;
+    }
+    if has_preview {
+        return VectorQueryMode::PreviewQ8;
+    }
+
+    VectorQueryMode::ExactFlat
+}
+
+fn auto_exact_fallback_doc_count(_limit: usize) -> usize {
+    64
 }
 
 fn load_first_text_query(paths: &[PathBuf]) -> Result<(String, usize), String> {
@@ -925,35 +1367,40 @@ fn load_first_hybrid_vector_query(paths: &[PathBuf]) -> Result<Option<FirstVecto
 
 fn search_first_hybrid_query(
     text_lane: &TextLane,
-    vector_lane: &VectorLane,
+    vector_lane: &mut VectorLane,
     vector_mode: VectorQueryMode,
-) -> Vec<String> {
+    auto_force_exact: bool,
+) -> Result<Vec<String>, String> {
     let Some(hybrid_text_query) = text_lane.first_hybrid_query.as_ref() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(hybrid_vector_query) = vector_lane.first_hybrid_query.as_ref() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let limit = text_lane
         .first_hybrid_top_k
         .max(vector_lane.first_hybrid_top_k)
         .max(1);
     let text_hits = text_lane.search_with_limit(hybrid_text_query, limit);
-    let vector_hits = vector_lane.search_with_query(hybrid_vector_query, limit, vector_mode);
-    fuse_ranked_hits(&text_hits, &vector_hits, limit)
+    let vector_query = hybrid_vector_query.clone();
+    let vector_hits =
+        vector_lane.search_with_query(&vector_query, limit, vector_mode, auto_force_exact)?;
+    Ok(fuse_ranked_hits(&text_hits, &vector_hits, limit))
 }
 
 fn search_query_hybrid(
     text_lane: &TextLane,
-    vector_lane: &VectorLane,
+    vector_lane: &mut VectorLane,
     query_text: &str,
     query_vector: &[f32],
     limit: usize,
     vector_mode: VectorQueryMode,
-) -> Vec<String> {
+    auto_force_exact: bool,
+) -> Result<Vec<String>, String> {
     let text_hits = text_lane.search_with_limit(query_text, limit);
-    let vector_hits = vector_lane.search_with_query(query_vector, limit, vector_mode);
-    fuse_ranked_hits(&text_hits, &vector_hits, limit)
+    let vector_hits =
+        vector_lane.search_with_query(query_vector, limit, vector_mode, auto_force_exact)?;
+    Ok(fuse_ranked_hits(&text_hits, &vector_hits, limit))
 }
 
 fn fuse_ranked_hits(text_hits: &[String], vector_hits: &[String], limit: usize) -> Vec<String> {
@@ -1025,6 +1472,10 @@ fn map_read_only(path: &Path) -> Result<Mmap, String> {
     let file = File::open(path).map_err(|error| error.to_string())?;
     // Read-only mappings let the first query use persisted lane state without heap rebuild.
     unsafe { MmapOptions::new().map(&file) }.map_err(|error| error.to_string())
+}
+
+fn elapsed_ms(duration: std::time::Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
 }
 
 fn load_document_ids_from_documents(path: &Path) -> Result<Vec<String>, String> {
@@ -1132,4 +1583,47 @@ fn embed_text(text: &str, dimensions: u32) -> Vec<f32> {
 #[derive(Debug, Deserialize)]
 struct DocumentRecord {
     doc_id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use wax_bench_model::VectorQueryMode;
+
+    use super::resolve_auto_vector_mode;
+
+    #[test]
+    fn auto_mode_prefers_exact_flat_for_small_corpora() {
+        assert_eq!(
+            resolve_auto_vector_mode(31, 10, true, true),
+            VectorQueryMode::ExactFlat
+        );
+        assert_eq!(
+            resolve_auto_vector_mode(64, 1, true, false),
+            VectorQueryMode::ExactFlat
+        );
+    }
+
+    #[test]
+    fn auto_mode_switches_to_hnsw_once_doc_count_exceeds_cutoff() {
+        assert_eq!(
+            resolve_auto_vector_mode(65, 1, true, true),
+            VectorQueryMode::Hnsw
+        );
+        assert_eq!(
+            resolve_auto_vector_mode(81, 10, true, false),
+            VectorQueryMode::Hnsw
+        );
+        assert_eq!(
+            resolve_auto_vector_mode(200, 100, true, false),
+            VectorQueryMode::Hnsw
+        );
+    }
+
+    #[test]
+    fn auto_mode_uses_preview_when_hnsw_is_missing_on_large_corpus() {
+        assert_eq!(
+            resolve_auto_vector_mode(65, 1, false, true),
+            VectorQueryMode::PreviewQ8
+        );
+    }
 }
