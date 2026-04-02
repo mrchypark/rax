@@ -1655,7 +1655,7 @@ struct TextPostingRecord {
 fn non_empty_line_count(bytes: &[u8]) -> u64 {
     std::str::from_utf8(bytes)
         .ok()
-        .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count() as u64)
+        .map(|text| text.lines().filter(|line| !line.is_empty()).count() as u64)
         .unwrap_or(0)
 }
 
@@ -1733,9 +1733,7 @@ fn embed_text(text: &str, dimensions: u32) -> Vec<f32> {
         .filter(|token| !token.is_empty())
     {
         let token = token.to_ascii_lowercase();
-        let bytes = Sha256::digest(token.as_bytes());
-        let bucket =
-            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize % dimensions;
+        let bucket = feature_hash_bucket(token.as_bytes(), dimensions);
         vector[bucket] += 1.0;
     }
 
@@ -1747,6 +1745,19 @@ fn embed_text(text: &str, dimensions: u32) -> Vec<f32> {
     }
 
     vector
+}
+
+fn feature_hash_bucket(bytes: &[u8], dimensions: usize) -> usize {
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+
+    let mut hash = OFFSET_BASIS;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+
+    (hash as usize) % dimensions
 }
 
 fn tokenize(text: &str) -> Vec<String> {

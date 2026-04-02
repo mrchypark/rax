@@ -13,7 +13,6 @@ use self_cell::self_cell;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use wax_bench_model::{
     build_vector_lane_skeleton, parse_vector_lane_skeleton_header, vector_lane_doc_id_offsets,
     DatasetPackManifest, EnginePhase, EngineStats, MountRequest, OpenRequest, OpenResult,
@@ -1669,11 +1668,7 @@ fn embed_text(text: &str, dimensions: u32) -> Vec<f32> {
 
     let mut vector = vec![0.0f32; dimensions];
     for token in tokenize(text) {
-        let mut digest = Sha256::new();
-        digest.update(token.as_bytes());
-        let bytes = digest.finalize();
-        let bucket =
-            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize % dimensions;
+        let bucket = feature_hash_bucket(token.as_bytes(), dimensions);
         vector[bucket] += 1.0;
     }
 
@@ -1685,6 +1680,19 @@ fn embed_text(text: &str, dimensions: u32) -> Vec<f32> {
     }
 
     vector
+}
+
+fn feature_hash_bucket(bytes: &[u8], dimensions: usize) -> usize {
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+
+    let mut hash = OFFSET_BASIS;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+
+    (hash as usize) % dimensions
 }
 
 #[derive(Debug, Deserialize)]
