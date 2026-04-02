@@ -1818,4 +1818,16 @@ mod tests {
             VectorQueryMode::PreviewQ8
         );
     }
+
+    #[test]
+    fn auto_mode_uses_exact_flat_at_inclusive_cutoff_boundary() {
+        assert_eq!(
+            resolve_auto_vector_mode(64, 1, true, true),
+            VectorQueryMode::ExactFlat
+        );
+        assert_eq!(
+            resolve_auto_vector_mode(64, 1, false, true),
+            VectorQueryMode::ExactFlat
+        );
+    }
 }

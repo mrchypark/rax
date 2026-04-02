@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 use wax_bench_model::DatasetPackManifest;
 use wax_bench_packer::{pack_adhoc_dataset, pack_dataset, AdhocPackRequest, PackRequest};
@@ -146,6 +147,19 @@ fn dataset_packer_marks_synthetic_embedding_provenance_in_manifest_identity() {
     assert_eq!(manifest.vector_profile.embedding_dimensions, 384,);
     assert_eq!(manifest.vector_profile.embedding_dtype, "f32");
     assert_eq!(manifest.vector_profile.distance_metric, "cosine");
+}
+
+#[test]
+fn dataset_packer_records_logical_query_checksum_in_manifest_identity() {
+    let source = Path::new("fixtures/bench/source/minimal");
+    let out_dir = tempdir().unwrap();
+
+    let manifest =
+        pack_dataset(&PackRequest::new(source, out_dir.path(), "small", "clean")).unwrap();
+    let query_bytes = fs::read(source.join("queries/core.jsonl")).unwrap();
+    let expected = format!("sha256:{:x}", Sha256::digest(&query_bytes));
+
+    assert_eq!(manifest.identity.query_checksum, expected);
 }
 
 #[test]
