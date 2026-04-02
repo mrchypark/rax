@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 
+use bytemuck::try_cast_slice;
 use hnsw_rs::api::AnnT;
 use hnsw_rs::prelude::{DistCosine, Hnsw};
 use serde::Deserialize;
@@ -1008,11 +1009,9 @@ fn build_hnsw_vector_sidecar(
     );
 
     for (index, row) in vector_bytes.chunks_exact(dimensions * 4).enumerate() {
-        let mut vector = Vec::with_capacity(dimensions);
-        for chunk in row.chunks_exact(4) {
-            vector.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-        }
-        hnsw.insert((&vector, index));
+        let vector = try_cast_slice::<u8, f32>(row)
+            .map_err(|_| PackError::new("document vector payload alignment is invalid"))?;
+        hnsw.insert((vector, index));
     }
 
     let dump_basename = hnsw

@@ -21,6 +21,7 @@ use wax_bench_model::{
 };
 
 type BorrowedHnsw<'a> = Hnsw<'a, f32, DistCosine>;
+const RRF_K: f64 = 60.0;
 
 struct HnswIoOwner(UnsafeCell<HnswIo>);
 
@@ -1235,24 +1236,35 @@ fn load_first_hybrid_text_query(paths: &[PathBuf]) -> Result<Option<FirstTextQue
 }
 
 fn load_text_postings(path: &Path) -> Result<HashMap<String, Vec<String>>, String> {
-    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let reader = BufReader::new(file);
     let mut postings = HashMap::new();
-    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+    for line in reader.lines() {
+        let line = line.map_err(|error| error.to_string())?;
+        if line.trim().is_empty() {
+            continue;
+        }
         let posting: TextPostingRecord =
-            serde_json::from_str(line).map_err(|error| error.to_string())?;
+            serde_json::from_str(&line).map_err(|error| error.to_string())?;
         postings.insert(posting.token, posting.doc_ids);
     }
     Ok(postings)
 }
 
 fn load_document_ids(path: &Path) -> Result<Vec<String>, String> {
-    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    text.lines()
-        .filter(|line| !line.trim().is_empty())
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let reader = BufReader::new(file);
+    reader
+        .lines()
+        .filter_map(|line| match line {
+            Ok(line) if line.trim().is_empty() => None,
+            other => Some(other),
+        })
         .map(|line| {
-            serde_json::from_str::<DocumentIdRecord>(line)
-                .map(|record| record.doc_id)
-                .map_err(|error| error.to_string())
+            let line = line.map_err(|error| error.to_string())?;
+            extract_json_string_field(&line, "doc_id")
+                .map(str::to_owned)
+                .ok_or_else(|| "document id line missing doc_id".to_owned())
         })
         .collect()
 }
@@ -1285,11 +1297,6 @@ struct QueryVectorRecord {
     top_k: u32,
     vector: Vec<f32>,
     lane_eligibility: LaneEligibility,
-}
-
-#[derive(Debug, Deserialize)]
-struct DocumentIdRecord {
-    doc_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1440,10 +1447,10 @@ fn search_query_hybrid(
 fn fuse_ranked_hits(text_hits: &[String], vector_hits: &[String], limit: usize) -> Vec<String> {
     let mut scores = HashMap::<String, f64>::new();
     for (rank, doc_id) in text_hits.iter().enumerate() {
-        *scores.entry(doc_id.clone()).or_insert(0.0) += 1.0 / (rank as f64 + 1.0);
+        *scores.entry(doc_id.clone()).or_insert(0.0) += 1.0 / (RRF_K + rank as f64 + 1.0);
     }
     for (rank, doc_id) in vector_hits.iter().enumerate() {
-        *scores.entry(doc_id.clone()).or_insert(0.0) += 1.0 / (rank as f64 + 1.0);
+        *scores.entry(doc_id.clone()).or_insert(0.0) += 1.0 / (RRF_K + rank as f64 + 1.0);
     }
 
     let mut fused = scores.into_iter().collect::<Vec<_>>();
@@ -1552,13 +1559,19 @@ fn elapsed_ms(duration: std::time::Duration) -> f64 {
 }
 
 fn load_document_ids_from_documents(path: &Path) -> Result<Vec<String>, String> {
-    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    text.lines()
-        .filter(|line| !line.trim().is_empty())
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let reader = BufReader::new(file);
+    reader
+        .lines()
+        .filter_map(|line| match line {
+            Ok(line) if line.trim().is_empty() => None,
+            other => Some(other),
+        })
         .map(|line| {
-            serde_json::from_str::<DocumentRecord>(line)
-                .map(|record| record.doc_id)
-                .map_err(|error| error.to_string())
+            let line = line.map_err(|error| error.to_string())?;
+            extract_json_string_field(&line, "doc_id")
+                .map(str::to_owned)
+                .ok_or_else(|| "document line missing doc_id".to_owned())
         })
         .collect()
 }
@@ -1613,15 +1626,13 @@ fn load_documents_by_id(
         if line.trim().is_empty() {
             continue;
         }
-        let value: Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
-        let object = value
-            .as_object()
-            .ok_or_else(|| "document line must be a json object".to_owned())?;
-        let doc_id = object
-            .get("doc_id")
-            .and_then(Value::as_str)
+        let doc_id = extract_json_string_field(&line, "doc_id")
             .ok_or_else(|| "document line missing doc_id".to_owned())?;
         if remaining.remove(doc_id) {
+            let value: Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
+            let object = value
+                .as_object()
+                .ok_or_else(|| "document line must be a json object".to_owned())?;
             documents.insert(doc_id.to_owned(), Value::Object(object.clone()));
             if remaining.is_empty() {
                 break;
@@ -1695,11 +1706,6 @@ fn feature_hash_bucket(bytes: &[u8], dimensions: usize) -> usize {
     (hash as usize) % dimensions
 }
 
-#[derive(Debug, Deserialize)]
-struct DocumentRecord {
-    doc_id: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DocumentOffsetEntry {
     offset: u64,
@@ -1743,6 +1749,32 @@ fn load_document_offset_index(path: &Path) -> Result<HashMap<String, DocumentOff
     }
 
     Ok(index)
+}
+
+fn extract_json_string_field<'a>(line: &'a str, field: &str) -> Option<&'a str> {
+    let key = format!("\"{field}\"");
+    let key_start = line.find(&key)?;
+    let after_key = &line[key_start + key.len()..];
+    let colon = after_key.find(':')?;
+    let mut rest = after_key[colon + 1..].trim_start();
+    if !rest.starts_with('"') {
+        return None;
+    }
+    rest = &rest[1..];
+
+    let mut escaped = false;
+    for (index, character) in rest.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' => escaped = true,
+            '"' => return Some(&rest[..index]),
+            _ => {}
+        }
+    }
+    None
 }
 
 #[cfg(test)]
