@@ -2,6 +2,7 @@ use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -11,7 +12,7 @@ use memmap2::{Mmap, MmapOptions};
 use self_cell::self_cell;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use wax_bench_model::{
     build_vector_lane_skeleton, parse_vector_lane_skeleton_header, vector_lane_doc_id_offsets,
@@ -1522,14 +1523,19 @@ fn load_documents_by_id(
     path: &Path,
     target_doc_ids: &[String],
 ) -> Result<HashMap<String, Value>, String> {
-    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
     let mut remaining = target_doc_ids
         .iter()
         .map(String::as_str)
         .collect::<std::collections::HashSet<_>>();
     let mut documents = HashMap::new();
-    for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        let value: Value = serde_json::from_str(line).map_err(|error| error.to_string())?;
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = line.map_err(|error| error.to_string())?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
         let object = value
             .as_object()
             .ok_or_else(|| "document line must be a json object".to_owned())?;
@@ -1538,20 +1544,13 @@ fn load_documents_by_id(
             .and_then(Value::as_str)
             .ok_or_else(|| "document line missing doc_id".to_owned())?;
         if remaining.remove(doc_id) {
-            documents.insert(doc_id.to_owned(), Value::Object(clone_object(object)));
+            documents.insert(doc_id.to_owned(), Value::Object(object.clone()));
             if remaining.is_empty() {
                 break;
             }
         }
     }
     Ok(documents)
-}
-
-fn clone_object(object: &Map<String, Value>) -> Map<String, Value> {
-    object
-        .iter()
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect()
 }
 
 fn embed_text(text: &str, dimensions: u32) -> Vec<f32> {

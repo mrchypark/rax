@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
+use std::fs::File;
+use std::io::{BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 
 use hnsw_rs::api::AnnT;
@@ -1320,9 +1322,8 @@ fn validate_file_payloads(
 ) -> Result<(), ValidationError> {
     for file in &manifest.files {
         let path = pack_root.join(&file.path);
-        let bytes = fs::read(&path)
+        let checksum = checksum_file(&path)
             .map_err(|_| ValidationError::new("file path must exist in the dataset pack"))?;
-        let checksum = format!("sha256:{:x}", Sha256::digest(&bytes));
 
         if file.checksum != checksum {
             return Err(ValidationError::new(
@@ -1602,9 +1603,7 @@ fn embed_text(text: &str, dimensions: u32) -> Vec<f32> {
         .filter(|token| !token.is_empty())
     {
         let token = token.to_ascii_lowercase();
-        let mut digest = Sha256::new();
-        digest.update(token.as_bytes());
-        let bytes = digest.finalize();
+        let bytes = Sha256::digest(token.as_bytes());
         let bucket =
             u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize % dimensions;
         vector[bucket] += 1.0;
@@ -1625,4 +1624,21 @@ fn tokenize(text: &str) -> Vec<String> {
         .filter(|token| !token.is_empty())
         .map(|token| token.to_ascii_lowercase())
         .collect()
+}
+
+fn checksum_file(path: &Path) -> Result<String, std::io::Error> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
