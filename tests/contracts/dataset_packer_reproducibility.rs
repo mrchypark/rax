@@ -3,7 +3,7 @@ use std::path::Path;
 
 use tempfile::tempdir;
 use wax_bench_model::DatasetPackManifest;
-use wax_bench_packer::{pack_dataset, PackRequest};
+use wax_bench_packer::{pack_adhoc_dataset, pack_dataset, AdhocPackRequest, PackRequest};
 
 #[test]
 fn dataset_packer_produces_stable_logical_manifest_for_same_source_and_config() {
@@ -118,8 +118,62 @@ fn dataset_packer_emits_sidecar_artifacts_for_text_and_vector_lanes() {
         .files
         .iter()
         .any(|file| file.kind == "document_ids"));
+    assert!(manifest
+        .files
+        .iter()
+        .any(|file| file.kind == "document_offsets"));
     assert!(out_dir.path().join("text_postings.jsonl").exists());
     assert!(out_dir.path().join("document_ids.jsonl").exists());
+    assert!(out_dir.path().join("document_offsets.jsonl").exists());
+}
+
+#[test]
+fn dataset_packer_marks_synthetic_embedding_provenance_in_manifest_identity() {
+    let source = Path::new("fixtures/bench/source/minimal");
+    let out_dir = tempdir().unwrap();
+
+    let manifest =
+        pack_dataset(&PackRequest::new(source, out_dir.path(), "small", "clean")).unwrap();
+
+    assert_eq!(
+        manifest.identity.embedding_spec_id,
+        "feature-hash-stub-384-f32-cosine"
+    );
+    assert_eq!(
+        manifest.identity.embedding_model_version,
+        "feature-hash-stub-v1"
+    );
+    assert_eq!(manifest.vector_profile.embedding_dimensions, 384,);
+    assert_eq!(manifest.vector_profile.embedding_dtype, "f32");
+    assert_eq!(manifest.vector_profile.distance_metric, "cosine");
+}
+
+#[test]
+fn adhoc_packer_marks_synthetic_embedding_provenance_in_manifest_identity() {
+    let docs_dir = tempdir().unwrap();
+    let out_dir = tempdir().unwrap();
+    fs::write(
+        docs_dir.path().join("docs.ndjson"),
+        "{\"doc_id\":\"doc-001\",\"text\":\"rust benchmark\"}\n",
+    )
+    .unwrap();
+
+    let manifest = pack_adhoc_dataset(&AdhocPackRequest::new(
+        docs_dir.path().join("docs.ndjson"),
+        out_dir.path(),
+        "small",
+    ))
+    .unwrap();
+
+    assert_eq!(
+        manifest.identity.embedding_spec_id,
+        "feature-hash-stub-384-f32-cosine"
+    );
+    assert_eq!(
+        manifest.identity.embedding_model_version,
+        "feature-hash-stub-v1"
+    );
+    assert!(out_dir.path().join("document_offsets.jsonl").exists());
 }
 
 #[test]

@@ -431,8 +431,19 @@ fn digest_entry(root: &Path, relative_path: &str) -> Result<ArtifactFileDigest, 
 }
 
 fn checksum_file(path: &Path) -> Result<String, String> {
-    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    let file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut reader = std::io::BufReader::new(file);
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        use std::io::Read;
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }

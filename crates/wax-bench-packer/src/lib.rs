@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 
 use hnsw_rs::api::AnnT;
@@ -73,6 +73,13 @@ pub struct PackError {
     pub message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SyntheticEmbeddingIdentity {
+    spec_id: String,
+    model_version: String,
+    model_hash: String,
+}
+
 impl PackError {
     fn new(message: impl Into<String>) -> Self {
         Self {
@@ -86,25 +93,26 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
     fs::create_dir_all(&request.out_dir)
         .map_err(|_| PackError::new("failed to create output directory"))?;
     let dimensions = require_embedding_dimensions(&source.embedding_spec_id)?;
+    let manifest_embedding = synthetic_embedding_identity(&source.embedding_spec_id);
 
     let mut source_query_sets = source.query_sets.clone();
     source_query_sets.sort_by(|left, right| left.name.cmp(&right.name));
     ensure_vector_query_exists(&request.source_dir, &source_query_sets)?;
 
-    let document_bytes = copy_file(
-        &request.source_dir.join("docs.ndjson"),
-        &request.out_dir.join("docs.ndjson"),
-    )?;
-    let document_stats = analyze_documents(&document_bytes)?;
-    let document_records = load_document_records(&document_bytes)?;
+    let documents_path = request.out_dir.join("docs.ndjson");
+    copy_file(&request.source_dir.join("docs.ndjson"), &documents_path)?;
+    let (document_records, document_offsets) = load_document_records_with_offsets(&documents_path)?;
+    let document_stats = analyze_documents(&document_records);
+    let documents_checksum = checksum_file(&documents_path)
+        .map_err(|_| PackError::new("failed to checksum documents file"))?;
 
-    let mut files = vec![build_manifest_file(
+    let mut files = vec![build_manifest_file_from_path(
         "docs.ndjson",
         "documents",
         "ndjson",
         document_stats.doc_count,
-        &document_bytes,
-    )];
+        &documents_path,
+    )?];
     let document_id_bytes = build_document_id_payload(&document_records)
         .map_err(|_| PackError::new("failed to serialize document id payload"))?;
     fs::write(
@@ -132,6 +140,20 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
         "jsonl",
         non_empty_line_count(&text_posting_bytes),
         &text_posting_bytes,
+    ));
+    let document_offset_bytes = build_document_offset_payload(&document_offsets)
+        .map_err(|_| PackError::new("failed to serialize document offset payload"))?;
+    fs::write(
+        request.out_dir.join("document_offsets.jsonl"),
+        &document_offset_bytes,
+    )
+    .map_err(|_| PackError::new("failed to write document offset payload"))?;
+    files.push(build_manifest_file(
+        "document_offsets.jsonl",
+        "document_offsets",
+        "jsonl",
+        document_offsets.len() as u64,
+        &document_offset_bytes,
     ));
     let mut query_sets = Vec::new();
     let mut logical_query_hasher = Sha256::new();
@@ -210,16 +232,16 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
     ));
 
     for source_query_set in source_query_sets {
-        let query_bytes = copy_file(
+        let query_bytes = copy_file_bytes(
             &request.source_dir.join(&source_query_set.path),
             &request.out_dir.join(&source_query_set.path),
         )?;
-        let ground_truth_bytes = copy_file(
+        let ground_truth_bytes = copy_file_bytes(
             &request.source_dir.join(&source_query_set.ground_truth_path),
             &request.out_dir.join(&source_query_set.ground_truth_path),
         )?;
         let qrels_bytes = if let Some(qrels_path) = &source_query_set.qrels_path {
-            Some(copy_file(
+            Some(copy_file_bytes(
                 &request.source_dir.join(qrels_path),
                 &request.out_dir.join(qrels_path),
             )?)
@@ -320,10 +342,10 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
             dataset_family: source.dataset_family,
             dataset_tier: request.tier.clone(),
             variant_id: request.variant.clone(),
-            embedding_spec_id: source.embedding_spec_id.clone(),
-            embedding_model_version: source.embedding_model_version,
-            embedding_model_hash: source.embedding_model_hash,
-            corpus_checksum: checksum_label(&document_bytes),
+            embedding_spec_id: manifest_embedding.spec_id,
+            embedding_model_version: manifest_embedding.model_version,
+            embedding_model_hash: manifest_embedding.model_hash,
+            corpus_checksum: documents_checksum.clone(),
             query_checksum: format!("sha256:{:x}", logical_query_hasher.finalize()),
         },
         environment_constraints: source.environment_constraints,
@@ -352,7 +374,7 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
         query_sets,
         checksums: ManifestChecksums {
             manifest_payload_checksum: "sha256:pending".to_owned(),
-            logical_documents_checksum: checksum_label(&document_bytes),
+            logical_documents_checksum: documents_checksum,
             logical_metadata_checksum,
             logical_query_definitions_checksum: checksum_label(&logical_query_fingerprint),
             logical_vector_payload_checksum: Some(format!(
@@ -383,18 +405,21 @@ pub fn pack_adhoc_dataset(request: &AdhocPackRequest) -> Result<DatasetPackManif
     fs::create_dir_all(&request.out_dir)
         .map_err(|_| PackError::new("failed to create output directory"))?;
     let dimensions = require_embedding_dimensions(&request.embedding_spec_id)?;
+    let manifest_embedding = synthetic_embedding_identity(&request.embedding_spec_id);
+    let documents_path = request.out_dir.join("docs.ndjson");
+    copy_file(&request.docs_path, &documents_path)?;
+    let (document_records, document_offsets) = load_document_records_with_offsets(&documents_path)?;
+    let document_stats = analyze_documents(&document_records);
+    let documents_checksum = checksum_file(&documents_path)
+        .map_err(|_| PackError::new("failed to checksum documents file"))?;
 
-    let document_bytes = copy_file(&request.docs_path, &request.out_dir.join("docs.ndjson"))?;
-    let document_stats = analyze_documents(&document_bytes)?;
-    let document_records = load_document_records(&document_bytes)?;
-
-    let mut files = vec![build_manifest_file(
+    let mut files = vec![build_manifest_file_from_path(
         "docs.ndjson",
         "documents",
         "ndjson",
         document_stats.doc_count,
-        &document_bytes,
-    )];
+        &documents_path,
+    )?];
     let document_id_bytes = build_document_id_payload(&document_records)
         .map_err(|_| PackError::new("failed to serialize document id payload"))?;
     fs::write(
@@ -422,6 +447,20 @@ pub fn pack_adhoc_dataset(request: &AdhocPackRequest) -> Result<DatasetPackManif
         "jsonl",
         non_empty_line_count(&text_posting_bytes),
         &text_posting_bytes,
+    ));
+    let document_offset_bytes = build_document_offset_payload(&document_offsets)
+        .map_err(|_| PackError::new("failed to serialize document offset payload"))?;
+    fs::write(
+        request.out_dir.join("document_offsets.jsonl"),
+        &document_offset_bytes,
+    )
+    .map_err(|_| PackError::new("failed to write document offset payload"))?;
+    files.push(build_manifest_file(
+        "document_offsets.jsonl",
+        "document_offsets",
+        "jsonl",
+        document_offsets.len() as u64,
+        &document_offset_bytes,
     ));
     let (query_bytes, ground_truth_bytes) = build_adhoc_query_files(&document_records)?;
     let query_path = "queries/adhoc.jsonl";
@@ -569,10 +608,10 @@ pub fn pack_adhoc_dataset(request: &AdhocPackRequest) -> Result<DatasetPackManif
             dataset_family: request.dataset_family.clone(),
             dataset_tier: request.tier.clone(),
             variant_id: request.variant.clone(),
-            embedding_spec_id: request.embedding_spec_id.clone(),
-            embedding_model_version: "adhoc".to_owned(),
-            embedding_model_hash: "sha256:adhoc".to_owned(),
-            corpus_checksum: checksum_label(&document_bytes),
+            embedding_spec_id: manifest_embedding.spec_id,
+            embedding_model_version: manifest_embedding.model_version,
+            embedding_model_hash: manifest_embedding.model_hash,
+            corpus_checksum: documents_checksum.clone(),
             query_checksum: checksum_label(&query_bytes),
         },
         environment_constraints: EnvironmentConstraints {
@@ -619,7 +658,7 @@ pub fn pack_adhoc_dataset(request: &AdhocPackRequest) -> Result<DatasetPackManif
         }],
         checksums: ManifestChecksums {
             manifest_payload_checksum: "sha256:pending".to_owned(),
-            logical_documents_checksum: checksum_label(&document_bytes),
+            logical_documents_checksum: documents_checksum,
             logical_metadata_checksum,
             logical_query_definitions_checksum: checksum_label(&logical_query_fingerprint),
             logical_vector_payload_checksum: Some(checksum_label(&document_vector_bytes)),
@@ -758,14 +797,18 @@ fn load_source_config(path: &Path) -> Result<SourceConfig, PackError> {
     serde_json::from_str(&text).map_err(|_| PackError::new("failed to parse source config"))
 }
 
-fn copy_file(source: &Path, destination: &Path) -> Result<Vec<u8>, PackError> {
-    let bytes = fs::read(source).map_err(|_| PackError::new("failed to read source file"))?;
+fn copy_file(source: &Path, destination: &Path) -> Result<(), PackError> {
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)
             .map_err(|_| PackError::new("failed to create destination directory"))?;
     }
-    fs::write(destination, &bytes).map_err(|_| PackError::new("failed to write output file"))?;
-    Ok(bytes)
+    fs::copy(source, destination).map_err(|_| PackError::new("failed to copy source file"))?;
+    Ok(())
+}
+
+fn copy_file_bytes(source: &Path, destination: &Path) -> Result<Vec<u8>, PackError> {
+    copy_file(source, destination)?;
+    fs::read(destination).map_err(|_| PackError::new("failed to read copied file"))
 }
 
 fn build_manifest_file(
@@ -784,8 +827,25 @@ fn build_manifest_file(
     }
 }
 
-fn analyze_documents(bytes: &[u8]) -> Result<DocumentStats, PackError> {
-    let records = load_document_records(bytes)?;
+fn build_manifest_file_from_path(
+    path: &str,
+    kind: &str,
+    format: &str,
+    record_count: u64,
+    full_path: &Path,
+) -> Result<ManifestFile, PackError> {
+    let checksum =
+        checksum_file(full_path).map_err(|_| PackError::new("failed to checksum manifest file"))?;
+    Ok(ManifestFile {
+        path: path.to_owned(),
+        kind: kind.to_owned(),
+        format: format.to_owned(),
+        record_count,
+        checksum,
+    })
+}
+
+fn analyze_documents(records: &[DocumentStub]) -> DocumentStats {
     let mut lengths = Vec::new();
     for record in records {
         lengths.push(record.text.len() as u64);
@@ -810,7 +870,7 @@ fn analyze_documents(bytes: &[u8]) -> Result<DocumentStats, PackError> {
     let long_count = lengths.iter().filter(|length| **length > 256).count() as f64;
     let total_docs = doc_count.max(1) as f64;
 
-    Ok(DocumentStats {
+    DocumentStats {
         doc_count,
         total_text_bytes,
         avg_doc_length,
@@ -822,7 +882,7 @@ fn analyze_documents(bytes: &[u8]) -> Result<DocumentStats, PackError> {
             medium_ratio: medium_count / total_docs,
             long_ratio: long_count / total_docs,
         },
-    })
+    }
 }
 
 fn analyze_query_set(bytes: &[u8]) -> Result<QuerySetSummary, PackError> {
@@ -853,15 +913,42 @@ fn analyze_query_set(bytes: &[u8]) -> Result<QuerySetSummary, PackError> {
     })
 }
 
-fn load_document_records(bytes: &[u8]) -> Result<Vec<DocumentStub>, PackError> {
-    let text = std::str::from_utf8(bytes).map_err(|_| PackError::new("documents must be utf-8"))?;
-    text.lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            serde_json::from_str(line)
-                .map_err(|_| PackError::new("documents file contains invalid json"))
-        })
-        .collect()
+fn load_document_records_with_offsets(
+    path: &Path,
+) -> Result<(Vec<DocumentStub>, Vec<DocumentOffsetRecordOwned>), PackError> {
+    let file = File::open(path).map_err(|_| PackError::new("failed to read source file"))?;
+    let mut reader = BufReader::new(file);
+    let mut records = Vec::new();
+    let mut offsets = Vec::new();
+    let mut line = String::new();
+    let mut offset = 0u64;
+
+    loop {
+        line.clear();
+        let read = reader
+            .read_line(&mut line)
+            .map_err(|_| PackError::new("failed to read source file"))?;
+        if read == 0 {
+            break;
+        }
+
+        let line_offset = offset;
+        offset += read as u64;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let record: DocumentStub = serde_json::from_str(&line)
+            .map_err(|_| PackError::new("documents file contains invalid json"))?;
+        offsets.push(DocumentOffsetRecordOwned {
+            doc_id: record.doc_id.clone(),
+            offset: line_offset,
+            length: read as u64,
+        });
+        records.push(record);
+    }
+
+    Ok((records, offsets))
 }
 
 fn build_document_vector_payload(records: &[DocumentStub], dimensions: u32) -> Vec<u8> {
@@ -1014,6 +1101,18 @@ fn build_vector_profile(embedding_spec_id: &str) -> VectorProfile {
             precomputed_available: false,
             runtime_embedding_supported: true,
         },
+    }
+}
+
+fn synthetic_embedding_identity(embedding_spec_id: &str) -> SyntheticEmbeddingIdentity {
+    let dimensions = embedding_dimensions_from_spec_id(embedding_spec_id).unwrap_or(0);
+    let dtype = embedding_dtype_from_spec_id(embedding_spec_id);
+    let metric = distance_metric_from_spec_id(embedding_spec_id);
+    let generator_tag = "feature-hash-stub-v1";
+    SyntheticEmbeddingIdentity {
+        spec_id: format!("feature-hash-stub-{dimensions}-{dtype}-{metric}"),
+        model_version: generator_tag.to_owned(),
+        model_hash: checksum_label(generator_tag.as_bytes()),
     }
 }
 
@@ -1246,6 +1345,7 @@ fn validate_file_references(manifest: &DatasetPackManifest) -> Result<(), Valida
                 | "qrels"
                 | "text_postings"
                 | "document_ids"
+                | "document_offsets"
                 | "document_vectors"
                 | "vector_hnsw_graph"
                 | "vector_hnsw_data"
@@ -1533,6 +1633,20 @@ struct DocumentIdRecord<'a> {
 }
 
 #[derive(serde::Serialize)]
+struct DocumentOffsetRecord<'a> {
+    doc_id: &'a str,
+    offset: u64,
+    length: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DocumentOffsetRecordOwned {
+    doc_id: String,
+    offset: u64,
+    length: u64,
+}
+
+#[derive(serde::Serialize)]
 struct TextPostingRecord {
     token: String,
     doc_ids: Vec<String>,
@@ -1561,6 +1675,22 @@ fn build_document_id_payload(records: &[DocumentStub]) -> Result<Vec<u8>, serde_
     for record in records {
         let line = serde_json::to_string(&DocumentIdRecord {
             doc_id: &record.doc_id,
+        })?;
+        out.extend_from_slice(line.as_bytes());
+        out.push(b'\n');
+    }
+    Ok(out)
+}
+
+fn build_document_offset_payload(
+    records: &[DocumentOffsetRecordOwned],
+) -> Result<Vec<u8>, serde_json::Error> {
+    let mut out = Vec::new();
+    for record in records {
+        let line = serde_json::to_string(&DocumentOffsetRecord {
+            doc_id: &record.doc_id,
+            offset: record.offset,
+            length: record.length,
         })?;
         out.extend_from_slice(line.as_bytes());
         out.push(b'\n');

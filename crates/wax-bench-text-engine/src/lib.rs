@@ -2,7 +2,7 @@ use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -57,6 +57,8 @@ pub struct PackedTextEngine {
     text_lane: Option<TextLane>,
     vector_lane: Option<VectorLane>,
     preview_store: Option<HashMap<String, Value>>,
+    document_offset_path: Option<PathBuf>,
+    document_offset_index: Option<HashMap<String, DocumentOffsetEntry>>,
     vector_mode: VectorQueryMode,
     auto_vector_query_pending: bool,
 }
@@ -70,6 +72,8 @@ impl PackedTextEngine {
             text_lane: None,
             vector_lane: None,
             preview_store: None,
+            document_offset_path: None,
+            document_offset_index: None,
             vector_mode,
             auto_vector_query_pending: true,
         }
@@ -141,6 +145,28 @@ impl PackedTextEngine {
             .as_mut()
             .ok_or_else(|| "preview store not materialized".to_owned())
     }
+
+    fn ensure_previews_for_hits(&mut self, doc_ids: &[String]) -> Result<(), String> {
+        let docs_path = self.mount_root()?.join("docs.ndjson");
+        if self.document_offset_index.is_none() {
+            if let Some(path) = self.document_offset_path.clone() {
+                self.document_offset_index = Some(load_document_offset_index(&path)?);
+            }
+        }
+        let offset_index = self.document_offset_index.as_ref().map(|index| {
+            doc_ids
+                .iter()
+                .filter_map(|doc_id| {
+                    index
+                        .get(doc_id.as_str())
+                        .cloned()
+                        .map(|entry| (doc_id.clone(), entry))
+                })
+                .collect::<HashMap<_, _>>()
+        });
+        let preview_store = self.ensure_preview_store()?;
+        materialize_document_previews(preview_store, &docs_path, offset_index.as_ref(), doc_ids)
+    }
 }
 
 impl Default for PackedTextEngine {
@@ -194,7 +220,14 @@ pub fn query_text_preview(
         serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
     let text_lane = TextLane::load(dataset_path, &manifest)?;
     let doc_ids = text_lane.search_with_limit(query_text, top_k);
-    let documents = load_documents_by_id(&dataset_path.join("docs.ndjson"), &doc_ids)?;
+    let offset_index = document_offsets_path(dataset_path, &manifest)
+        .map(|path| load_document_offset_index(&path))
+        .transpose()?;
+    let documents = load_documents_by_id(
+        &dataset_path.join("docs.ndjson"),
+        offset_index.as_ref(),
+        &doc_ids,
+    )?;
     doc_ids
         .into_iter()
         .enumerate()
@@ -319,6 +352,8 @@ impl WaxEngine for PackedTextEngine {
         self.text_lane = None;
         self.vector_lane = None;
         self.preview_store = None;
+        self.document_offset_path = None;
+        self.document_offset_index = None;
         self.auto_vector_query_pending = true;
         Ok(())
     }
@@ -333,6 +368,8 @@ impl WaxEngine for PackedTextEngine {
         let manifest: DatasetPackManifest =
             serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
 
+        self.document_offset_path = document_offsets_path(self.mount_root()?, &manifest);
+        self.document_offset_index = None;
         self.manifest = Some(manifest);
         self.phase = EnginePhase::Open;
         self.auto_vector_query_pending = true;
@@ -450,7 +487,6 @@ impl WaxEngine for PackedTextEngine {
         if request.query_text == "__warmup_hybrid_with_previews__" {
             self.ensure_text_lane()?;
             self.ensure_vector_lane()?;
-            let docs_path = self.mount_root()?.join("docs.ndjson");
             let force_exact = self.should_force_exact_on_auto_vector_query();
             let hits = {
                 let text_lane = self
@@ -461,12 +497,7 @@ impl WaxEngine for PackedTextEngine {
                     .vector_lane
                     .as_mut()
                     .ok_or_else(|| "vector lane not materialized".to_owned())?;
-                search_first_hybrid_query(
-                    text_lane,
-                    vector_lane,
-                    self.vector_mode,
-                    force_exact,
-                )?
+                search_first_hybrid_query(text_lane, vector_lane, self.vector_mode, force_exact)?
             };
             {
                 let vector_lane = self
@@ -476,13 +507,12 @@ impl WaxEngine for PackedTextEngine {
                 vector_lane.prime_followup_mode_for_first_hybrid_query(self.vector_mode)?;
             }
             self.note_vector_query_executed();
-            materialize_document_previews(self.ensure_preview_store()?, &docs_path, &hits)?;
+            self.ensure_previews_for_hits(&hits)?;
             return Ok(SearchResult { hits });
         }
         if request.query_text == "__warm_hybrid_with_previews__" {
             self.ensure_text_lane()?;
             self.ensure_vector_lane()?;
-            let docs_path = self.mount_root()?.join("docs.ndjson");
             let force_exact = self.should_force_exact_on_auto_vector_query();
             let hits = {
                 let text_lane = self
@@ -496,7 +526,7 @@ impl WaxEngine for PackedTextEngine {
                 search_first_hybrid_query(text_lane, vector_lane, self.vector_mode, force_exact)?
             };
             self.note_vector_query_executed();
-            materialize_document_previews(self.ensure_preview_store()?, &docs_path, &hits)?;
+            self.ensure_previews_for_hits(&hits)?;
             return Ok(SearchResult { hits });
         }
 
@@ -993,7 +1023,11 @@ impl VectorLane {
         Ok(())
     }
 
-    fn search_with_hnsw_or_exact(&mut self, query: &[f32], limit: usize) -> Result<Vec<String>, String> {
+    fn search_with_hnsw_or_exact(
+        &mut self,
+        query: &[f32],
+        limit: usize,
+    ) -> Result<Vec<String>, String> {
         if self.ensure_hnsw_sidecar()? {
             return Ok(self.search_with_hnsw(query, limit));
         }
@@ -1429,14 +1463,53 @@ fn fuse_ranked_hits(text_hits: &[String], vector_hits: &[String], limit: usize) 
 }
 
 fn dot_product(left: &[f32], right: &[f32]) -> f32 {
-    left.iter().zip(right).map(|(l, r)| l * r).sum()
+    let len = left.len().min(right.len());
+    let mut sum0 = 0.0f32;
+    let mut sum1 = 0.0f32;
+    let mut sum2 = 0.0f32;
+    let mut sum3 = 0.0f32;
+    let mut index = 0usize;
+
+    while index + 4 <= len {
+        sum0 += left[index] * right[index];
+        sum1 += left[index + 1] * right[index + 1];
+        sum2 += left[index + 2] * right[index + 2];
+        sum3 += left[index + 3] * right[index + 3];
+        index += 4;
+    }
+
+    let mut tail = 0.0f32;
+    while index < len {
+        tail += left[index] * right[index];
+        index += 1;
+    }
+
+    sum0 + sum1 + sum2 + sum3 + tail
 }
 
 fn dot_product_i8_preview(left: &[f32], right: &[u8]) -> f32 {
-    left.iter()
-        .zip(right)
-        .map(|(l, r)| l * (*r as i8 as f32))
-        .sum()
+    let len = left.len().min(right.len());
+    let mut sum0 = 0.0f32;
+    let mut sum1 = 0.0f32;
+    let mut sum2 = 0.0f32;
+    let mut sum3 = 0.0f32;
+    let mut index = 0usize;
+
+    while index + 4 <= len {
+        sum0 += left[index] * (right[index] as i8 as f32);
+        sum1 += left[index + 1] * (right[index + 1] as i8 as f32);
+        sum2 += left[index + 2] * (right[index + 2] as i8 as f32);
+        sum3 += left[index + 3] * (right[index + 3] as i8 as f32);
+        index += 4;
+    }
+
+    let mut tail = 0.0f32;
+    while index < len {
+        tail += left[index] * (right[index] as i8 as f32);
+        index += 1;
+    }
+
+    sum0 + sum1 + sum2 + sum3 + tail
 }
 
 fn load_vector_lane_skeleton(
@@ -1494,6 +1567,7 @@ fn load_document_ids_from_documents(path: &Path) -> Result<Vec<String>, String> 
 fn materialize_document_previews(
     documents: &mut HashMap<String, Value>,
     path: &Path,
+    offset_index: Option<&HashMap<String, DocumentOffsetEntry>>,
     doc_ids: &[String],
 ) -> Result<(), String> {
     let missing = doc_ids
@@ -1502,7 +1576,7 @@ fn materialize_document_previews(
         .cloned()
         .collect::<Vec<_>>();
     if !missing.is_empty() {
-        let loaded = load_documents_by_id(path, &missing)?;
+        let loaded = load_documents_by_id(path, offset_index, &missing)?;
         for (doc_id, document) in loaded {
             documents.insert(doc_id, document);
         }
@@ -1521,8 +1595,13 @@ fn materialize_document_previews(
 
 fn load_documents_by_id(
     path: &Path,
+    offset_index: Option<&HashMap<String, DocumentOffsetEntry>>,
     target_doc_ids: &[String],
 ) -> Result<HashMap<String, Value>, String> {
+    if let Some(index) = offset_index {
+        return load_documents_by_id_from_offsets(path, index, target_doc_ids);
+    }
+
     let mut remaining = target_doc_ids
         .iter()
         .map(String::as_str)
@@ -1550,6 +1629,35 @@ fn load_documents_by_id(
             }
         }
     }
+    Ok(documents)
+}
+
+fn load_documents_by_id_from_offsets(
+    path: &Path,
+    offset_index: &HashMap<String, DocumentOffsetEntry>,
+    target_doc_ids: &[String],
+) -> Result<HashMap<String, Value>, String> {
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    let mut documents = HashMap::new();
+
+    for doc_id in target_doc_ids {
+        let Some(entry) = offset_index.get(doc_id.as_str()) else {
+            continue;
+        };
+        file.seek(SeekFrom::Start(entry.offset))
+            .map_err(|error| error.to_string())?;
+        let mut buffer = vec![0u8; entry.length as usize];
+        file.read_exact(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        let line = std::str::from_utf8(&buffer).map_err(|error| error.to_string())?;
+        let value: Value =
+            serde_json::from_str(line.trim_end()).map_err(|error| error.to_string())?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| "document line must be a json object".to_owned())?;
+        documents.insert(doc_id.clone(), Value::Object(object.clone()));
+    }
+
     Ok(documents)
 }
 
@@ -1582,6 +1690,51 @@ fn embed_text(text: &str, dimensions: u32) -> Vec<f32> {
 #[derive(Debug, Deserialize)]
 struct DocumentRecord {
     doc_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DocumentOffsetEntry {
+    offset: u64,
+    length: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct DocumentOffsetRecord {
+    doc_id: String,
+    offset: u64,
+    length: u64,
+}
+
+fn document_offsets_path(mount_root: &Path, manifest: &DatasetPackManifest) -> Option<PathBuf> {
+    manifest
+        .files
+        .iter()
+        .find(|file| file.kind == "document_offsets")
+        .map(|file| mount_root.join(&file.path))
+}
+
+fn load_document_offset_index(path: &Path) -> Result<HashMap<String, DocumentOffsetEntry>, String> {
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let reader = BufReader::new(file);
+    let mut index = HashMap::new();
+
+    for line in reader.lines() {
+        let line = line.map_err(|error| error.to_string())?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: DocumentOffsetRecord =
+            serde_json::from_str(&line).map_err(|error| error.to_string())?;
+        index.insert(
+            record.doc_id,
+            DocumentOffsetEntry {
+                offset: record.offset,
+                length: record.length,
+            },
+        );
+    }
+
+    Ok(index)
 }
 
 #[cfg(test)]
