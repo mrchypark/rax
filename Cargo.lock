@@ -1136,6 +1136,7 @@ dependencies = [
 name = "wax-bench-packer"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "hnsw_rs",
  "serde",
  "serde_json",
