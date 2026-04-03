@@ -25,9 +25,9 @@ The runner must be able to load one manifest and know:
 
 This schema is the concrete companion to:
 
-- [2026-03-29-wax-v2-dataset-spec.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-dataset-spec.md)
-- [2026-03-29-wax-v2-benchmark-harness-spec.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-benchmark-harness-spec.md)
-- [2026-03-30-wax-v2-benchmark-harness-implementation-plan.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-30-wax-v2-benchmark-harness-implementation-plan.md)
+- [2026-03-29-wax-v2-dataset-spec.md](./2026-03-29-wax-v2-dataset-spec.md)
+- [2026-03-29-wax-v2-benchmark-harness-spec.md](./2026-03-29-wax-v2-benchmark-harness-spec.md)
+- [2026-03-30-wax-v2-benchmark-harness-implementation-plan.md](./2026-03-30-wax-v2-benchmark-harness-implementation-plan.md)
 
 ## 2. Format Overview
 

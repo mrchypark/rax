@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::fs;
@@ -1262,9 +1263,7 @@ fn load_document_ids(path: &Path) -> Result<Vec<String>, String> {
         })
         .map(|line| {
             let line = line.map_err(|error| error.to_string())?;
-            extract_json_string_field(&line, "doc_id")
-                .map(str::to_owned)
-                .ok_or_else(|| "document id line missing doc_id".to_owned())
+            parse_document_id(&line, "document id line").map(Cow::into_owned)
         })
         .collect()
 }
@@ -1303,6 +1302,12 @@ struct QueryVectorRecord {
 struct TextPostingRecord {
     token: String,
     doc_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DocumentIdOnlyRecord<'a> {
+    #[serde(borrow)]
+    doc_id: Option<Cow<'a, str>>,
 }
 
 #[derive(Debug)]
@@ -1569,9 +1574,7 @@ fn load_document_ids_from_documents(path: &Path) -> Result<Vec<String>, String> 
         })
         .map(|line| {
             let line = line.map_err(|error| error.to_string())?;
-            extract_json_string_field(&line, "doc_id")
-                .map(str::to_owned)
-                .ok_or_else(|| "document line missing doc_id".to_owned())
+            parse_document_id(&line, "document line").map(Cow::into_owned)
         })
         .collect()
 }
@@ -1626,14 +1629,13 @@ fn load_documents_by_id(
         if line.trim().is_empty() {
             continue;
         }
-        let doc_id = extract_json_string_field(&line, "doc_id")
-            .ok_or_else(|| "document line missing doc_id".to_owned())?;
-        if remaining.remove(doc_id) {
+        let doc_id = parse_document_id(&line, "document line")?;
+        if remaining.remove(doc_id.as_ref()) {
             let value: Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
             let object = value
                 .as_object()
                 .ok_or_else(|| "document line must be a json object".to_owned())?;
-            documents.insert(doc_id.to_owned(), Value::Object(object.clone()));
+            documents.insert(doc_id.into_owned(), Value::Object(object.clone()));
             if remaining.is_empty() {
                 break;
             }
@@ -1751,37 +1753,23 @@ fn load_document_offset_index(path: &Path) -> Result<HashMap<String, DocumentOff
     Ok(index)
 }
 
-fn extract_json_string_field<'a>(line: &'a str, field: &str) -> Option<&'a str> {
-    let key = format!("\"{field}\"");
-    let key_start = line.find(&key)?;
-    let after_key = &line[key_start + key.len()..];
-    let colon = after_key.find(':')?;
-    let mut rest = after_key[colon + 1..].trim_start();
-    if !rest.starts_with('"') {
-        return None;
+fn parse_document_id<'a>(line: &'a str, context: &str) -> Result<Cow<'a, str>, String> {
+    let record: DocumentIdOnlyRecord<'a> =
+        serde_json::from_str(line).map_err(|error| error.to_string())?;
+    let Some(doc_id) = record.doc_id else {
+        return Err(format!("{context} missing doc_id"));
+    };
+    if doc_id.is_empty() {
+        return Err(format!("{context} missing doc_id"));
     }
-    rest = &rest[1..];
-
-    let mut escaped = false;
-    for (index, character) in rest.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match character {
-            '\\' => escaped = true,
-            '"' => return Some(&rest[..index]),
-            _ => {}
-        }
-    }
-    None
+    Ok(doc_id)
 }
 
 #[cfg(test)]
 mod tests {
     use wax_bench_model::VectorQueryMode;
 
-    use super::resolve_auto_vector_mode;
+    use super::{parse_document_id, resolve_auto_vector_mode};
 
     #[test]
     fn auto_mode_prefers_exact_flat_for_small_corpora() {
@@ -1829,5 +1817,33 @@ mod tests {
             resolve_auto_vector_mode(64, 1, false, true),
             VectorQueryMode::ExactFlat
         );
+    }
+
+    #[test]
+    fn parse_document_id_handles_whitespace_and_escaped_quotes() {
+        let line = "  {\"text\":\"escaped\",\"doc_id\":\"doc-\\\"001\"}  ";
+        let doc_id = parse_document_id(line, "document line").unwrap();
+
+        assert_eq!(doc_id.as_ref(), "doc-\"001");
+    }
+
+    #[test]
+    fn parse_document_id_ignores_doc_id_looking_text_inside_other_fields() {
+        let line = "{\"doc_id\":\"doc-001\",\"text\":\"fake key: \\\"doc_id\\\":\\\"wrong\\\"\"}";
+        let doc_id = parse_document_id(line, "document line").unwrap();
+
+        assert_eq!(doc_id.as_ref(), "doc-001");
+    }
+
+    #[test]
+    fn parse_document_id_rejects_missing_doc_id() {
+        let error = parse_document_id("{\"text\":\"missing\"}", "document line").unwrap_err();
+
+        assert_eq!(error, "document line missing doc_id");
+    }
+
+    #[test]
+    fn parse_document_id_rejects_non_string_doc_id() {
+        assert!(parse_document_id("{\"doc_id\":1}", "document line").is_err());
     }
 }

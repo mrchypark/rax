@@ -21,7 +21,7 @@ This is the first byte-level draft for v2. It fixes the invariants that should n
 
 This format is derived from the approved v2 architecture document:
 
-- [2026-03-29-wax-v2-architecture.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-architecture.md)
+- [2026-03-29-wax-v2-architecture.md](./2026-03-29-wax-v2-architecture.md)
 
 The key architectural constraints carried into this spec are:
 

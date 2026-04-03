@@ -18,9 +18,9 @@ Its job is to turn the benchmark specs into a repeatable system:
 
 This is the implementation-facing companion to:
 
-- [2026-03-29-wax-v2-benchmark-plan.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-benchmark-plan.md)
-- [2026-03-29-wax-v2-ttfq-benchmark-plan.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-ttfq-benchmark-plan.md)
-- [2026-03-29-wax-upstream-benchmark-analysis.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-upstream-benchmark-analysis.md)
+- [2026-03-29-wax-v2-benchmark-plan.md](./2026-03-29-wax-v2-benchmark-plan.md)
+- [2026-03-29-wax-v2-ttfq-benchmark-plan.md](./2026-03-29-wax-v2-ttfq-benchmark-plan.md)
+- [2026-03-29-wax-upstream-benchmark-analysis.md](./2026-03-29-wax-upstream-benchmark-analysis.md)
 
 The first implementation should bias toward a simpler deliverable:
 

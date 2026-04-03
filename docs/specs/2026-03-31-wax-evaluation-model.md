@@ -20,7 +20,7 @@ This is an evaluation-model document, not an engine-design document.
 ### 2.1 Upstream Wax Performance Sources
 
 - [Wax benchmark report, 2026-03-06](https://github.com/christopherkarani/Wax/blob/main/Resources/docs/benchmarks/2026-03-06-performance-results.md)
-- [Wax upstream benchmark analysis](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-upstream-benchmark-analysis.md)
+- [Wax upstream benchmark analysis](./2026-03-29-wax-upstream-benchmark-analysis.md)
 - [RuleBasedQueryClassifier.swift](https://github.com/christopherkarani/Wax/blob/main/Sources/Wax/UnifiedSearch/RuleBasedQueryClassifier.swift)
 
 ### 2.2 Search Evaluation Sources

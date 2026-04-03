@@ -20,8 +20,8 @@ The main goal is to prevent benchmark confusion between:
 
 This document is a companion to:
 
-- [2026-03-29-wax-v2-benchmark-plan.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-benchmark-plan.md)
-- [2026-03-29-wax-upstream-benchmark-analysis.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-upstream-benchmark-analysis.md)
+- [2026-03-29-wax-v2-benchmark-plan.md](./2026-03-29-wax-v2-benchmark-plan.md)
+- [2026-03-29-wax-upstream-benchmark-analysis.md](./2026-03-29-wax-upstream-benchmark-analysis.md)
 
 ## 2. Why This Needs Its Own Plan
 

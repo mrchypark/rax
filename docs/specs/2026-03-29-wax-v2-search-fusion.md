@@ -22,10 +22,10 @@ This document does not lock Wax v2 into one ranking formula forever. It defines 
 
 This search-fusion design derives from:
 
-- [2026-03-29-wax-v2-architecture.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-architecture.md)
-- [2026-03-29-wax-v2-benchmark-plan.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-benchmark-plan.md)
-- [2026-03-29-wax-v2-text-lane.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-text-lane.md)
-- [2026-03-29-wax-v2-vector-lane.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-vector-lane.md)
+- [2026-03-29-wax-v2-architecture.md](./2026-03-29-wax-v2-architecture.md)
+- [2026-03-29-wax-v2-benchmark-plan.md](./2026-03-29-wax-v2-benchmark-plan.md)
+- [2026-03-29-wax-v2-text-lane.md](./2026-03-29-wax-v2-text-lane.md)
+- [2026-03-29-wax-v2-vector-lane.md](./2026-03-29-wax-v2-vector-lane.md)
 - upstream Wax unified-search references:
   - `SearchMode`
   - `HybridSearch`

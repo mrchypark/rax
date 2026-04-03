@@ -21,9 +21,9 @@ This document does not choose the final library yet. It defines the contract the
 
 This text-lane design derives from:
 
-- [2026-03-29-wax-v2-architecture.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-architecture.md)
-- [2026-03-29-wax-v2-binary-format.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-binary-format.md)
-- [2026-03-29-wax-v2-benchmark-plan.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-benchmark-plan.md)
+- [2026-03-29-wax-v2-architecture.md](./2026-03-29-wax-v2-architecture.md)
+- [2026-03-29-wax-v2-binary-format.md](./2026-03-29-wax-v2-binary-format.md)
+- [2026-03-29-wax-v2-benchmark-plan.md](./2026-03-29-wax-v2-benchmark-plan.md)
 
 Current design assumptions:
 

@@ -21,9 +21,9 @@ This document does not choose the final Rust crate yet. It defines the contract 
 
 This vector-lane design derives from:
 
-- [2026-03-29-wax-v2-architecture.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-architecture.md)
-- [2026-03-29-wax-v2-binary-format.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-binary-format.md)
-- [2026-03-29-wax-v2-benchmark-plan.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-benchmark-plan.md)
+- [2026-03-29-wax-v2-architecture.md](./2026-03-29-wax-v2-architecture.md)
+- [2026-03-29-wax-v2-binary-format.md](./2026-03-29-wax-v2-binary-format.md)
+- [2026-03-29-wax-v2-benchmark-plan.md](./2026-03-29-wax-v2-benchmark-plan.md)
 - upstream Wax vector modules:
   - `WaxVectorSearch`
   - `WaxVectorSearchMiniLM`

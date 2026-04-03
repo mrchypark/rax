@@ -19,10 +19,10 @@ Without a strict dataset contract, the team cannot tell whether a result changed
 
 This document is the dataset-facing companion to:
 
-- [2026-03-29-wax-v2-benchmark-plan.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-benchmark-plan.md)
-- [2026-03-29-wax-v2-ttfq-benchmark-plan.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-ttfq-benchmark-plan.md)
-- [2026-03-29-wax-v2-benchmark-harness-spec.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-benchmark-harness-spec.md)
-- [2026-03-29-wax-upstream-benchmark-analysis.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-upstream-benchmark-analysis.md)
+- [2026-03-29-wax-v2-benchmark-plan.md](./2026-03-29-wax-v2-benchmark-plan.md)
+- [2026-03-29-wax-v2-ttfq-benchmark-plan.md](./2026-03-29-wax-v2-ttfq-benchmark-plan.md)
+- [2026-03-29-wax-v2-benchmark-harness-spec.md](./2026-03-29-wax-v2-benchmark-harness-spec.md)
+- [2026-03-29-wax-upstream-benchmark-analysis.md](./2026-03-29-wax-upstream-benchmark-analysis.md)
 
 ## 2. Design Goals
 

@@ -20,11 +20,11 @@ This plan therefore starts with workspace scaffolding and contract tests before 
 
 Related specs:
 
-- [2026-03-29-wax-v2-benchmark-harness-spec.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-benchmark-harness-spec.md)
-- [2026-03-29-wax-v2-benchmark-harness-plan.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-benchmark-harness-plan.md)
-- [2026-03-29-wax-v2-dataset-spec.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-dataset-spec.md)
-- [2026-03-29-wax-v2-ttfq-benchmark-plan.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-ttfq-benchmark-plan.md)
-- [2026-03-30-wax-v2-dataset-pack-manifest-schema.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-30-wax-v2-dataset-pack-manifest-schema.md)
+- [2026-03-29-wax-v2-benchmark-harness-spec.md](./2026-03-29-wax-v2-benchmark-harness-spec.md)
+- [2026-03-29-wax-v2-benchmark-harness-plan.md](./2026-03-29-wax-v2-benchmark-harness-plan.md)
+- [2026-03-29-wax-v2-dataset-spec.md](./2026-03-29-wax-v2-dataset-spec.md)
+- [2026-03-29-wax-v2-ttfq-benchmark-plan.md](./2026-03-29-wax-v2-ttfq-benchmark-plan.md)
+- [2026-03-30-wax-v2-dataset-pack-manifest-schema.md](./2026-03-30-wax-v2-dataset-pack-manifest-schema.md)
 
 ## 2. Proposed File Structure
 

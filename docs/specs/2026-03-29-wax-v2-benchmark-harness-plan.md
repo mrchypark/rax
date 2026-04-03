@@ -16,9 +16,9 @@ It answers:
 
 This is the implementation-order companion to:
 
-- [2026-03-29-wax-v2-benchmark-harness-spec.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-benchmark-harness-spec.md)
-- [2026-03-29-wax-v2-benchmark-plan.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-benchmark-plan.md)
-- [2026-03-29-wax-v2-ttfq-benchmark-plan.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-ttfq-benchmark-plan.md)
+- [2026-03-29-wax-v2-benchmark-harness-spec.md](./2026-03-29-wax-v2-benchmark-harness-spec.md)
+- [2026-03-29-wax-v2-benchmark-plan.md](./2026-03-29-wax-v2-benchmark-plan.md)
+- [2026-03-29-wax-v2-ttfq-benchmark-plan.md](./2026-03-29-wax-v2-ttfq-benchmark-plan.md)
 
 ## 2. Planning Assumptions
 
@@ -384,6 +384,6 @@ The following are intentionally deferred until the harness is already useful:
 
 After this plan, the next concrete design dependency is:
 
-- [2026-03-29-wax-v2-dataset-spec.md](/Users/cypark/Documents/project/rax/docs/specs/2026-03-29-wax-v2-dataset-spec.md)
+- [2026-03-29-wax-v2-dataset-spec.md](./2026-03-29-wax-v2-dataset-spec.md)
 
 The dataset spec should be written before implementation begins, because the runner contract depends on stable dataset identity and workload packaging rules.
