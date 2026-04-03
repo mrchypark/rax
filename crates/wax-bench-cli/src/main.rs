@@ -156,7 +156,7 @@ fn main() -> Result<(), String> {
                 "warm_vector" => Workload::WarmVector,
                 "warm_hybrid" => Workload::WarmHybrid,
                 "warm_hybrid_with_previews" => Workload::WarmHybridWithPreviews,
-                _ => return Err("unsupported workload".to_owned()),
+                _ => return Err(format!("unsupported workload: {workload}")),
             };
             let vector_mode = parse_vector_mode(&vector_mode)?;
             let manifest_text = std::fs::read_to_string(dataset.join("manifest.json"))

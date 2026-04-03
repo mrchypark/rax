@@ -16,6 +16,8 @@ use wax_bench_model::{
     QueryVectorProfile, SegmentTopologyEntry, TextProfile, VectorProfile,
 };
 
+const CHECKSUM_BUFFER_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackRequest {
     pub source_dir: PathBuf,
@@ -1770,7 +1772,7 @@ fn checksum_file(path: &Path) -> Result<String, std::io::Error> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
+    let mut buffer = [0u8; CHECKSUM_BUFFER_BYTES];
 
     loop {
         let read = reader.read(&mut buffer)?;
