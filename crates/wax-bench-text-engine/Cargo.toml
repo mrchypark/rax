@@ -1,0 +1,15 @@
+[package]
+name = "wax-bench-text-engine"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+bytemuck = "1.24.0"
+hnsw_rs = "0.3.4"
+memmap2 = "0.9.9"
+self_cell = "1.2.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+sha2 = "0.10.9"
+wax-bench-model = { path = "../wax-bench-model" }

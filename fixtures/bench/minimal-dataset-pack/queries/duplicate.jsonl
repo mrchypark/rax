@@ -1,0 +1,3 @@
+{"query_id":"q-dup","query_class":"keyword","difficulty":"easy","query_text":"dup 1","top_k":10,"filter_spec":{},"preview_expected":true,"embedding_available":false,"lane_eligibility":{"text":true,"vector":false,"hybrid":false}}
+{"query_id":"q-dup","query_class":"keyword","difficulty":"easy","query_text":"dup 2","top_k":10,"filter_spec":{},"preview_expected":true,"embedding_available":false,"lane_eligibility":{"text":true,"vector":false,"hybrid":false}}
+{"query_id":"q-003","query_class":"hybrid","difficulty":"hard","query_text":"cold open p95","top_k":10,"filter_spec":{},"preview_expected":true,"embedding_available":true,"lane_eligibility":{"text":true,"vector":true,"hybrid":true}}

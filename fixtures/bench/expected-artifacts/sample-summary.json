@@ -1,0 +1,58 @@
+{
+  "run_id": "run-001",
+  "benchmark": {
+    "dataset_id": "knowledge-small-clean-v1",
+    "workload_id": "container_open",
+    "sample_index": 0
+  },
+  "fairness_fingerprint": "sha256:fairness-a",
+  "sample_count": 3,
+  "p50_container_open_ms": {
+    "status": "available",
+    "value": 0.2
+  },
+  "p95_container_open_ms": {
+    "status": "available",
+    "value": 0.4
+  },
+  "p99_container_open_ms": {
+    "status": "unavailable",
+    "reason": "insufficient_samples"
+  },
+  "p50_vector_materialization_ms": {
+    "status": "available",
+    "value": 0.0
+  },
+  "p95_vector_materialization_ms": {
+    "status": "available",
+    "value": 0.0
+  },
+  "p99_vector_materialization_ms": {
+    "status": "unavailable",
+    "reason": "insufficient_samples"
+  },
+  "p50_total_ttfq_ms": {
+    "status": "available",
+    "value": 6.1
+  },
+  "p95_total_ttfq_ms": {
+    "status": "available",
+    "value": 7.4
+  },
+  "p99_total_ttfq_ms": {
+    "status": "unavailable",
+    "reason": "insufficient_samples"
+  },
+  "p50_search_latency_ms": {
+    "status": "available",
+    "value": 1.1
+  },
+  "p95_search_latency_ms": {
+    "status": "available",
+    "value": 1.4
+  },
+  "p99_search_latency_ms": {
+    "status": "unavailable",
+    "reason": "insufficient_samples"
+  }
+}

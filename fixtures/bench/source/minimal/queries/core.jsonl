@@ -1,0 +1,3 @@
+{"query_id":"q-001","query_class":"keyword","difficulty":"easy","query_text":"rust benchmark","top_k":10,"filter_spec":{},"preview_expected":true,"embedding_available":true,"lane_eligibility":{"text":true,"vector":false,"hybrid":true}}
+{"query_id":"q-002","query_class":"vector","difficulty":"medium","query_text":"semantic latency","top_k":10,"filter_spec":{},"preview_expected":true,"embedding_available":true,"lane_eligibility":{"text":false,"vector":true,"hybrid":true}}
+{"query_id":"q-003","query_class":"hybrid","difficulty":"hard","query_text":"cold open p95","top_k":10,"filter_spec":{},"preview_expected":true,"embedding_available":true,"lane_eligibility":{"text":true,"vector":true,"hybrid":true}}

@@ -1,0 +1,9 @@
+[package]
+name = "wax-bench-runner"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+wax-bench-model = { path = "../wax-bench-model" }
+wax-bench-metrics = { path = "../wax-bench-metrics" }

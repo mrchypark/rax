@@ -1,0 +1,16 @@
+[package]
+name = "wax-bench-cli"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+clap = { version = "4.5.37", features = ["derive"] }
+serde_json = "1.0.145"
+wax-bench-artifacts = { path = "../wax-bench-artifacts" }
+wax-bench-metrics = { path = "../wax-bench-metrics" }
+wax-bench-packer = { path = "../wax-bench-packer" }
+wax-bench-reducer = { path = "../wax-bench-reducer" }
+wax-bench-model = { path = "../wax-bench-model" }
+wax-bench-runner = { path = "../wax-bench-runner" }
+wax-bench-text-engine = { path = "../wax-bench-text-engine" }
