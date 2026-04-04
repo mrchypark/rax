@@ -7,7 +7,7 @@ use wax_bench_artifacts::{
     list_sample_artifact_paths, read_run_summary, render_markdown_summary, MetricValue,
     RunSummaryArtifact, SampleArtifact,
 };
-use wax_bench_model::{QrelRecord, RankedQueryResult};
+use wax_bench_model::{QrelRecord, RankedQueryResult, Workload};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReducedSummary {
@@ -178,11 +178,11 @@ pub fn render_vector_lane_matrix_report(artifact_root: &Path) -> Result<String, 
 
 pub fn render_vector_mode_compare_report(artifact_root: &Path) -> Result<String, ReduceError> {
     let compare_workload_order = [
-        "materialize_vector",
-        "ttfq_vector",
-        "warm_vector",
-        "warm_hybrid",
-        "warm_hybrid_with_previews",
+        Workload::MaterializeVector.label(),
+        Workload::TtfqVector.label(),
+        Workload::WarmVector.label(),
+        Workload::WarmHybrid.label(),
+        Workload::WarmHybridWithPreviews.label(),
     ];
     let exact =
         build_named_workload_report(&artifact_root.join("exact_flat"), &compare_workload_order)?;
@@ -289,7 +289,11 @@ pub fn compute_search_quality_summary_from_paths(
 pub fn build_vector_lane_matrix_report(
     artifact_root: &Path,
 ) -> Result<VectorLaneMatrixReport, ReduceError> {
-    let workload_order = ["materialize_vector", "ttfq_vector", "warm_vector"];
+    let workload_order = [
+        Workload::MaterializeVector.label(),
+        Workload::TtfqVector.label(),
+        Workload::WarmVector.label(),
+    ];
     let (dataset_id, rows) = build_named_workload_rows(artifact_root, &workload_order)?;
     let markdown = render_vector_lane_matrix_markdown(&dataset_id, &rows);
     Ok(VectorLaneMatrixReport {

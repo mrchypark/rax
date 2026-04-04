@@ -8,13 +8,16 @@ use wax_bench_artifacts::{
     ReplayConfigArtifact,
 };
 use wax_bench_metrics::{MemoryReading, MemorySampler, MetricCollector, MonotonicClock};
-use wax_bench_model::{BenchmarkId, DatasetPackManifest, MaterializationMode, VectorQueryMode};
+use wax_bench_model::{
+    parse_workload, BenchmarkId, DatasetPackManifest, MaterializationMode, VectorQueryMode,
+};
 use wax_bench_packer::{AdhocPackRequest, PackRequest};
 use wax_bench_reducer::{
     build_vector_lane_matrix_report, compute_search_quality_summary_from_paths, reduce_run_dir,
     render_vector_mode_compare_report,
 };
-use wax_bench_runner::{BenchmarkRunner, RunRequest, Workload};
+use wax_bench_runner::BenchmarkRunner;
+use wax_bench_runner::RunRequest;
 use wax_bench_text_engine::{
     profile_first_vector_query, query_batch_ranked_results, query_text_preview, PackedTextEngine,
 };
@@ -147,17 +150,8 @@ fn main() -> Result<(), String> {
             vector_mode,
             artifact_dir,
         }) => {
-            let workload = match workload.as_str() {
-                "container_open" => Workload::ContainerOpen,
-                "materialize_vector" => Workload::MaterializeVector,
-                "ttfq_text" => Workload::TtfqText,
-                "ttfq_vector" => Workload::TtfqVector,
-                "warm_text" => Workload::WarmText,
-                "warm_vector" => Workload::WarmVector,
-                "warm_hybrid" => Workload::WarmHybrid,
-                "warm_hybrid_with_previews" => Workload::WarmHybridWithPreviews,
-                _ => return Err(format!("unsupported workload: {workload}")),
-            };
+            let workload = parse_workload(&workload)
+                .ok_or_else(|| format!("unsupported workload: {workload}"))?;
             let vector_mode = parse_vector_mode(&vector_mode)?;
             let manifest_text = std::fs::read_to_string(dataset.join("manifest.json"))
                 .map_err(|error| error.to_string())?;
@@ -165,7 +159,7 @@ fn main() -> Result<(), String> {
                 serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
             let benchmark_id = BenchmarkId {
                 dataset_id: manifest.identity.dataset_id,
-                workload_id: workload_label(&workload).to_owned(),
+                workload_id: workload.label().to_owned(),
                 sample_index: 0,
             };
             let use_test_mode = std::env::var("WAX_BENCH_TEST_MODE").ok().as_deref() == Some("1");
@@ -199,7 +193,7 @@ fn main() -> Result<(), String> {
                 .unwrap_or_else(|| PathBuf::from("artifacts/latest"));
             let replay = ReplayConfigArtifact {
                 dataset_path: Some(request.dataset_path.display().to_string()),
-                workload_id: workload_label(&request.workload).to_owned(),
+                workload_id: request.workload.label().to_owned(),
                 sample_count,
                 materialization_mode: request.materialization_mode,
                 vector_mode,
@@ -327,19 +321,6 @@ fn parse_vector_mode(value: &str) -> Result<VectorQueryMode, String> {
         "hnsw" => Ok(VectorQueryMode::Hnsw),
         "preview_q8" => Ok(VectorQueryMode::PreviewQ8),
         _ => Err("unsupported vector_mode".to_owned()),
-    }
-}
-
-fn workload_label(workload: &Workload) -> &'static str {
-    match workload {
-        Workload::ContainerOpen => "container_open",
-        Workload::MaterializeVector => "materialize_vector",
-        Workload::TtfqText => "ttfq_text",
-        Workload::TtfqVector => "ttfq_vector",
-        Workload::WarmText => "warm_text",
-        Workload::WarmVector => "warm_vector",
-        Workload::WarmHybrid => "warm_hybrid",
-        Workload::WarmHybridWithPreviews => "warm_hybrid_with_previews",
     }
 }
 
