@@ -1,4 +1,6 @@
+use std::cell::Cell;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use wax_bench_metrics::{MemoryReading, MemorySampler, MetricCollector, MonotonicClock};
 use wax_bench_model::{
@@ -125,6 +127,30 @@ fn forced_vector_lane_materialization_does_not_claim_materialize_vector_slice() 
         .unwrap();
 
     assert_eq!(measured.metrics.vector_materialization_ms, None);
+}
+
+#[test]
+fn forced_lane_materialization_does_not_inflate_container_open_metric() {
+    let now_us = Rc::new(Cell::new(0));
+    let engine = TimedEngine::new(now_us.clone(), 500, 500, 5_000);
+    let mut runner = BenchmarkRunner::new(engine);
+    let mut collector = MetricCollector::new(SharedClock::new(now_us), FixedMemorySampler);
+
+    let measured = runner
+        .run_with_metrics(
+            &RunRequest {
+                dataset_path: PathBuf::from("/tmp/wax-pack"),
+                workload: Workload::ContainerOpen,
+                materialization_mode: MaterializationMode::ForceVectorLane,
+            },
+            &mut collector,
+            None,
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(measured.metrics.container_open_ms, 1.0);
+    assert_eq!(measured.metrics.metadata_readiness_ms, 6.0);
 }
 
 #[test]
@@ -393,6 +419,79 @@ impl MemorySampler for FixedMemorySampler {
     fn sample_resident_bytes(&self) -> MemoryReading {
         MemoryReading::Unavailable {
             reason: "test".to_owned(),
+        }
+    }
+}
+
+struct SharedClock {
+    now_us: Rc<Cell<u64>>,
+}
+
+impl SharedClock {
+    fn new(now_us: Rc<Cell<u64>>) -> Self {
+        Self { now_us }
+    }
+}
+
+impl MonotonicClock for SharedClock {
+    fn now_us(&mut self) -> u64 {
+        self.now_us.get()
+    }
+}
+
+struct TimedEngine {
+    phase: EnginePhase,
+    now_us: Rc<Cell<u64>>,
+    mount_cost_us: u64,
+    open_cost_us: u64,
+    search_cost_us: u64,
+}
+
+impl TimedEngine {
+    fn new(
+        now_us: Rc<Cell<u64>>,
+        mount_cost_us: u64,
+        open_cost_us: u64,
+        search_cost_us: u64,
+    ) -> Self {
+        Self {
+            phase: EnginePhase::New,
+            now_us,
+            mount_cost_us,
+            open_cost_us,
+            search_cost_us,
+        }
+    }
+
+    fn advance(&self, delta_us: u64) {
+        self.now_us.set(self.now_us.get() + delta_us);
+    }
+}
+
+impl WaxEngine for TimedEngine {
+    type Error = &'static str;
+
+    fn mount(&mut self, _request: MountRequest) -> Result<(), Self::Error> {
+        self.phase = EnginePhase::Mounted;
+        self.advance(self.mount_cost_us);
+        Ok(())
+    }
+
+    fn open(&mut self, _request: OpenRequest) -> Result<OpenResult, Self::Error> {
+        self.phase = EnginePhase::Open;
+        self.advance(self.open_cost_us);
+        Ok(OpenResult)
+    }
+
+    fn search(&mut self, _request: SearchRequest) -> Result<SearchResult, Self::Error> {
+        self.advance(self.search_cost_us);
+        Ok(SearchResult { hits: Vec::new() })
+    }
+
+    fn get_stats(&self) -> EngineStats {
+        EngineStats {
+            phase: self.phase,
+            last_mounted_path: None,
         }
     }
 }

@@ -90,3 +90,7 @@ path = "tests/contracts/release_matrix_contract.rs"
 [[test]]
 name = "search_quality_contract"
 path = "tests/contracts/search_quality_contract.rs"
+
+[[test]]
+name = "benchmark_protocol_contract"
+path = "tests/contracts/benchmark_protocol_contract.rs"

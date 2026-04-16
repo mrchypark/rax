@@ -4,19 +4,11 @@ use wax_bench_metrics::{
     CompilerOptimization, MemorySampler, MetricCollector, MonotonicClock, SampleMetrics,
     ThermalState,
 };
-use wax_bench_model::{MaterializationMode, MountRequest, OpenRequest, SearchRequest, WaxEngine};
+use wax_bench_model::{
+    BenchmarkQuery, MaterializationMode, MountRequest, OpenRequest, SearchRequest, WaxEngine,
+};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Workload {
-    ContainerOpen,
-    MaterializeVector,
-    TtfqText,
-    TtfqVector,
-    WarmText,
-    WarmVector,
-    WarmHybrid,
-    WarmHybridWithPreviews,
-}
+pub use wax_bench_model::Workload;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunRequest {
@@ -98,57 +90,15 @@ where
     E: WaxEngine,
 {
     pub fn run(&mut self, request: &RunRequest) -> Result<RunTrace, E::Error> {
-        let mut trace = RunTrace {
-            events: Vec::new(),
-            search_queries: Vec::new(),
-        };
+        let mut trace = self.mount_and_open(request)?;
+        self.materialize_forced_lanes(request, &mut trace)?;
 
-        self.engine.mount(MountRequest {
-            store_path: request.dataset_path.clone(),
-        })?;
-        trace.events.push(LifecycleEvent::Mounted);
-
-        self.engine.open(OpenRequest)?;
-        trace.events.push(LifecycleEvent::Opened);
-
-        if matches!(
-            request.materialization_mode,
-            MaterializationMode::ForceTextLane | MaterializationMode::ForceAllLanes
-        ) {
-            materialize_lane(
-                &mut self.engine,
-                "__materialize_text_lane__",
-                LifecycleEvent::TextLaneMaterialized,
-                &mut trace,
-            )?;
+        if let Some(query) = request.workload.first_query() {
+            execute_query(&mut self.engine, query.as_str(), &mut trace)?;
         }
 
-        if matches!(
-            request.materialization_mode,
-            MaterializationMode::ForceVectorLane | MaterializationMode::ForceAllLanes
-        ) {
-            materialize_lane(
-                &mut self.engine,
-                "__materialize_vector_lane__",
-                LifecycleEvent::VectorLaneMaterialized,
-                &mut trace,
-            )?;
-        }
-
-        if let Some(query_text) = first_query_for_workload(&request.workload) {
-            self.engine.search(SearchRequest {
-                query_text: query_text.clone(),
-            })?;
-            trace.events.push(LifecycleEvent::SearchExecuted);
-            trace.search_queries.push(query_text);
-        }
-
-        if let Some(query_text) = measured_query_for_workload(&request.workload) {
-            self.engine.search(SearchRequest {
-                query_text: query_text.clone(),
-            })?;
-            trace.events.push(LifecycleEvent::SearchExecuted);
-            trace.search_queries.push(query_text);
+        if let Some(query) = request.workload.measured_query() {
+            execute_query(&mut self.engine, query.as_str(), &mut trace)?;
         }
 
         Ok(trace)
@@ -166,6 +116,41 @@ where
         M: MemorySampler,
     {
         collector.start_run();
+        let mut trace = self.mount_and_open(request)?;
+        collector.mark_container_open_done();
+        self.materialize_forced_lanes(request, &mut trace)?;
+
+        collector.mark_metadata_ready();
+
+        if let Some(query) = request.workload.first_query() {
+            let query_text = query.as_str();
+            if matches!(request.workload, Workload::MaterializeVector) {
+                collector.start_vector_materialization_measurement();
+            }
+            execute_query(&mut self.engine, query_text, &mut trace)?;
+            if matches!(request.workload, Workload::MaterializeVector) {
+                collector.mark_vector_materialization_done();
+            }
+            if request.workload.measured_query().is_none() {
+                collector.mark_query_done();
+            }
+        }
+
+        if let Some(query) = request.workload.measured_query() {
+            collector.start_search_measurement();
+            execute_query(&mut self.engine, query.as_str(), &mut trace)?;
+            collector.mark_search_done();
+        }
+
+        collector.snapshot_memory();
+
+        Ok(MeasuredRun {
+            trace,
+            metrics: collector.finish(compiler_optimization, thermal_state),
+        })
+    }
+
+    fn mount_and_open(&mut self, request: &RunRequest) -> Result<RunTrace, E::Error> {
         let mut trace = RunTrace {
             events: Vec::new(),
             search_queries: Vec::new(),
@@ -178,17 +163,24 @@ where
 
         self.engine.open(OpenRequest)?;
         trace.events.push(LifecycleEvent::Opened);
-        collector.mark_container_open_done();
 
+        Ok(trace)
+    }
+
+    fn materialize_forced_lanes(
+        &mut self,
+        request: &RunRequest,
+        trace: &mut RunTrace,
+    ) -> Result<(), E::Error> {
         if matches!(
             request.materialization_mode,
             MaterializationMode::ForceTextLane | MaterializationMode::ForceAllLanes
         ) {
             materialize_lane(
                 &mut self.engine,
-                "__materialize_text_lane__",
+                BenchmarkQuery::MaterializeTextLane.as_str(),
                 LifecycleEvent::TextLaneMaterialized,
-                &mut trace,
+                trace,
             )?;
         }
 
@@ -198,47 +190,13 @@ where
         ) {
             materialize_lane(
                 &mut self.engine,
-                "__materialize_vector_lane__",
+                BenchmarkQuery::MaterializeVectorLane.as_str(),
                 LifecycleEvent::VectorLaneMaterialized,
-                &mut trace,
+                trace,
             )?;
         }
 
-        collector.mark_metadata_ready();
-
-        if let Some(query_text) = first_query_for_workload(&request.workload) {
-            if matches!(request.workload, Workload::MaterializeVector) {
-                collector.start_vector_materialization_measurement();
-            }
-            self.engine.search(SearchRequest {
-                query_text: query_text.clone(),
-            })?;
-            if matches!(request.workload, Workload::MaterializeVector) {
-                collector.mark_vector_materialization_done();
-            }
-            trace.events.push(LifecycleEvent::SearchExecuted);
-            trace.search_queries.push(query_text);
-            if measured_query_for_workload(&request.workload).is_none() {
-                collector.mark_query_done();
-            }
-        }
-
-        if let Some(query_text) = measured_query_for_workload(&request.workload) {
-            collector.start_search_measurement();
-            self.engine.search(SearchRequest {
-                query_text: query_text.clone(),
-            })?;
-            trace.events.push(LifecycleEvent::SearchExecuted);
-            trace.search_queries.push(query_text);
-            collector.mark_search_done();
-        }
-
-        collector.snapshot_memory();
-
-        Ok(MeasuredRun {
-            trace,
-            metrics: collector.finish(compiler_optimization, thermal_state),
-        })
+        Ok(())
     }
 }
 
@@ -251,10 +209,20 @@ fn materialize_lane<E>(
 where
     E: WaxEngine,
 {
+    execute_query(engine, query_text, trace)?;
+    trace.events.pop();
+    trace.events.push(event);
+    Ok(())
+}
+
+fn execute_query<E>(engine: &mut E, query_text: &str, trace: &mut RunTrace) -> Result<(), E::Error>
+where
+    E: WaxEngine,
+{
     engine.search(SearchRequest {
         query_text: query_text.to_owned(),
     })?;
-    trace.events.push(event);
+    trace.events.push(LifecycleEvent::SearchExecuted);
     trace.search_queries.push(query_text.to_owned());
     Ok(())
 }
@@ -285,28 +253,5 @@ impl WaxEngine for NoopWaxEngine {
             phase: wax_bench_model::EnginePhase::Open,
             last_mounted_path: None,
         }
-    }
-}
-
-fn first_query_for_workload(workload: &Workload) -> Option<String> {
-    match workload {
-        Workload::ContainerOpen => None,
-        Workload::MaterializeVector => Some("__materialize_vector_lane__".to_owned()),
-        Workload::TtfqText => Some("__ttfq_text__".to_owned()),
-        Workload::TtfqVector => Some("__ttfq_vector__".to_owned()),
-        Workload::WarmText => Some("__ttfq_text__".to_owned()),
-        Workload::WarmVector => Some("__warmup_vector__".to_owned()),
-        Workload::WarmHybrid => Some("__warmup_hybrid__".to_owned()),
-        Workload::WarmHybridWithPreviews => Some("__warmup_hybrid_with_previews__".to_owned()),
-    }
-}
-
-fn measured_query_for_workload(workload: &Workload) -> Option<String> {
-    match workload {
-        Workload::WarmText => Some("__warm_text__".to_owned()),
-        Workload::WarmVector => Some("__warm_vector__".to_owned()),
-        Workload::WarmHybrid => Some("__warm_hybrid__".to_owned()),
-        Workload::WarmHybridWithPreviews => Some("__warm_hybrid_with_previews__".to_owned()),
-        _ => None,
     }
 }

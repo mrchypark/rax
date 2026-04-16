@@ -91,6 +91,131 @@ pub enum QueryEmbeddingMode {
     RuntimeAneWarm,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumIter)]
+pub enum Workload {
+    #[serde(rename = "container_open")]
+    ContainerOpen,
+    #[serde(rename = "materialize_vector")]
+    MaterializeVector,
+    #[serde(rename = "ttfq_text")]
+    TtfqText,
+    #[serde(rename = "ttfq_vector")]
+    TtfqVector,
+    #[serde(rename = "warm_text")]
+    WarmText,
+    #[serde(rename = "warm_vector")]
+    WarmVector,
+    #[serde(rename = "warm_hybrid")]
+    WarmHybrid,
+    #[serde(rename = "warm_hybrid_with_previews")]
+    WarmHybridWithPreviews,
+}
+
+impl Workload {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ContainerOpen => "container_open",
+            Self::MaterializeVector => "materialize_vector",
+            Self::TtfqText => "ttfq_text",
+            Self::TtfqVector => "ttfq_vector",
+            Self::WarmText => "warm_text",
+            Self::WarmVector => "warm_vector",
+            Self::WarmHybrid => "warm_hybrid",
+            Self::WarmHybridWithPreviews => "warm_hybrid_with_previews",
+        }
+    }
+
+    pub fn first_query(self) -> Option<BenchmarkQuery> {
+        match self {
+            Self::ContainerOpen => None,
+            Self::MaterializeVector => Some(BenchmarkQuery::MaterializeVectorLane),
+            Self::TtfqText => Some(BenchmarkQuery::TtfqText),
+            Self::TtfqVector => Some(BenchmarkQuery::TtfqVector),
+            Self::WarmText => Some(BenchmarkQuery::TtfqText),
+            Self::WarmVector => Some(BenchmarkQuery::WarmupVector),
+            Self::WarmHybrid => Some(BenchmarkQuery::WarmupHybrid),
+            Self::WarmHybridWithPreviews => Some(BenchmarkQuery::WarmupHybridWithPreviews),
+        }
+    }
+
+    pub fn measured_query(self) -> Option<BenchmarkQuery> {
+        match self {
+            Self::WarmText => Some(BenchmarkQuery::WarmText),
+            Self::WarmVector => Some(BenchmarkQuery::WarmVector),
+            Self::WarmHybrid => Some(BenchmarkQuery::WarmHybrid),
+            Self::WarmHybridWithPreviews => Some(BenchmarkQuery::WarmHybridWithPreviews),
+            _ => None,
+        }
+    }
+}
+
+pub fn parse_workload(value: &str) -> Option<Workload> {
+    match value {
+        "container_open" => Some(Workload::ContainerOpen),
+        "materialize_vector" => Some(Workload::MaterializeVector),
+        "ttfq_text" => Some(Workload::TtfqText),
+        "ttfq_vector" => Some(Workload::TtfqVector),
+        "warm_text" => Some(Workload::WarmText),
+        "warm_vector" => Some(Workload::WarmVector),
+        "warm_hybrid" => Some(Workload::WarmHybrid),
+        "warm_hybrid_with_previews" => Some(Workload::WarmHybridWithPreviews),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BenchmarkQuery {
+    MaterializeTextLane,
+    MaterializeVectorLane,
+    TtfqText,
+    TtfqVector,
+    WarmText,
+    WarmupVector,
+    WarmVector,
+    TtfqHybrid,
+    WarmupHybrid,
+    WarmHybrid,
+    WarmupHybridWithPreviews,
+    WarmHybridWithPreviews,
+}
+
+impl BenchmarkQuery {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MaterializeTextLane => "__materialize_text_lane__",
+            Self::MaterializeVectorLane => "__materialize_vector_lane__",
+            Self::TtfqText => "__ttfq_text__",
+            Self::TtfqVector => "__ttfq_vector__",
+            Self::WarmText => "__warm_text__",
+            Self::WarmupVector => "__warmup_vector__",
+            Self::WarmVector => "__warm_vector__",
+            Self::TtfqHybrid => "__ttfq_hybrid__",
+            Self::WarmupHybrid => "__warmup_hybrid__",
+            Self::WarmHybrid => "__warm_hybrid__",
+            Self::WarmupHybridWithPreviews => "__warmup_hybrid_with_previews__",
+            Self::WarmHybridWithPreviews => "__warm_hybrid_with_previews__",
+        }
+    }
+}
+
+pub fn parse_benchmark_query(value: &str) -> Option<BenchmarkQuery> {
+    match value {
+        "__materialize_text_lane__" => Some(BenchmarkQuery::MaterializeTextLane),
+        "__materialize_vector_lane__" => Some(BenchmarkQuery::MaterializeVectorLane),
+        "__ttfq_text__" => Some(BenchmarkQuery::TtfqText),
+        "__ttfq_vector__" => Some(BenchmarkQuery::TtfqVector),
+        "__warm_text__" => Some(BenchmarkQuery::WarmText),
+        "__warmup_vector__" => Some(BenchmarkQuery::WarmupVector),
+        "__warm_vector__" => Some(BenchmarkQuery::WarmVector),
+        "__ttfq_hybrid__" => Some(BenchmarkQuery::TtfqHybrid),
+        "__warmup_hybrid__" => Some(BenchmarkQuery::WarmupHybrid),
+        "__warm_hybrid__" => Some(BenchmarkQuery::WarmHybrid),
+        "__warmup_hybrid_with_previews__" => Some(BenchmarkQuery::WarmupHybridWithPreviews),
+        "__warm_hybrid_with_previews__" => Some(BenchmarkQuery::WarmHybridWithPreviews),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MountRequest {
     pub store_path: PathBuf,
@@ -138,6 +263,48 @@ pub trait WaxEngine {
     fn search(&mut self, request: SearchRequest) -> Result<SearchResult, Self::Error>;
 
     fn get_stats(&self) -> EngineStats;
+}
+
+pub fn tokenize(text: &str) -> Vec<String> {
+    text.split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_lowercase())
+        .collect()
+}
+
+pub fn embed_text(text: &str, dimensions: u32) -> Vec<f32> {
+    let dimensions = dimensions as usize;
+    if dimensions == 0 {
+        return Vec::new();
+    }
+
+    let mut vector = vec![0.0f32; dimensions];
+    for token in tokenize(text) {
+        let bucket = feature_hash_bucket(token.as_bytes(), dimensions);
+        vector[bucket] += 1.0;
+    }
+
+    let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for value in &mut vector {
+            *value /= norm;
+        }
+    }
+
+    vector
+}
+
+pub fn feature_hash_bucket(bytes: &[u8], dimensions: usize) -> usize {
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+
+    let mut hash = OFFSET_BASIS;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+
+    (hash as usize) % dimensions
 }
 
 pub fn build_vector_lane_skeleton(doc_ids: &[String], dimensions: u32) -> Vec<u8> {
