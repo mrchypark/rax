@@ -45,20 +45,30 @@ pub(crate) fn emit_document_sidecars(
     document_records: &[DocumentStub],
     document_offsets: &[DocumentOffsetRecordOwned],
 ) -> Result<Vec<ManifestFile>, PackError> {
-    let document_id_bytes = build_document_id_payload(document_records)
-        .map_err(|_| PackError::new("failed to serialize document id payload"))?;
+    let document_id_bytes = build_document_id_payload(document_records).map_err(|error| {
+        PackError::new(format!("failed to serialize document id payload: {error}"))
+    })?;
     write_payload(out_dir, "document_ids.jsonl", &document_id_bytes)
-        .map_err(|_| PackError::new("failed to write document id payload"))?;
+        .map_err(|error| PackError::new(format!("failed to write document id payload: {error}")))?;
 
-    let text_posting_bytes = build_text_postings_payload(document_records)
-        .map_err(|_| PackError::new("failed to serialize text postings payload"))?;
-    write_payload(out_dir, "text_postings.jsonl", &text_posting_bytes)
-        .map_err(|_| PackError::new("failed to write text postings payload"))?;
+    let text_posting_bytes = build_text_postings_payload(document_records).map_err(|error| {
+        PackError::new(format!(
+            "failed to serialize text postings payload: {error}"
+        ))
+    })?;
+    write_payload(out_dir, "text_postings.jsonl", &text_posting_bytes).map_err(|error| {
+        PackError::new(format!("failed to write text postings payload: {error}"))
+    })?;
 
-    let document_offset_bytes = build_document_offset_payload(document_offsets)
-        .map_err(|_| PackError::new("failed to serialize document offset payload"))?;
-    write_payload(out_dir, "document_offsets.jsonl", &document_offset_bytes)
-        .map_err(|_| PackError::new("failed to write document offset payload"))?;
+    let document_offset_bytes =
+        build_document_offset_payload(document_offsets).map_err(|error| {
+            PackError::new(format!(
+                "failed to serialize document offset payload: {error}"
+            ))
+        })?;
+    write_payload(out_dir, "document_offsets.jsonl", &document_offset_bytes).map_err(|error| {
+        PackError::new(format!("failed to write document offset payload: {error}"))
+    })?;
 
     Ok(vec![
         build_manifest_file(
@@ -91,8 +101,9 @@ pub(crate) fn emit_vector_artifacts(
     dimensions: u32,
 ) -> Result<EmittedVectorArtifacts, PackError> {
     let document_vector_bytes = build_document_vector_payload(document_records, dimensions);
-    write_payload(out_dir, "document_vectors.f32", &document_vector_bytes)
-        .map_err(|_| PackError::new("failed to write document vector payload"))?;
+    write_payload(out_dir, "document_vectors.f32", &document_vector_bytes).map_err(|error| {
+        PackError::new(format!("failed to write document vector payload: {error}"))
+    })?;
 
     let (hnsw_graph_path, hnsw_graph_bytes, hnsw_data_path, hnsw_data_bytes) =
         build_hnsw_vector_sidecar(
@@ -103,14 +114,22 @@ pub(crate) fn emit_vector_artifacts(
         )?;
 
     let document_vector_preview_bytes =
-        build_quantized_vector_preview_payload(&document_vector_bytes)
-            .map_err(|_| PackError::new("failed to build quantized vector preview payload"))?;
+        build_quantized_vector_preview_payload(&document_vector_bytes).map_err(|error| {
+            PackError::new(format!(
+                "failed to build quantized vector preview payload: {}",
+                error.message
+            ))
+        })?;
     write_payload(
         out_dir,
         "document_vectors.q8",
         &document_vector_preview_bytes,
     )
-    .map_err(|_| PackError::new("failed to write quantized vector preview payload"))?;
+    .map_err(|error| {
+        PackError::new(format!(
+            "failed to write quantized vector preview payload: {error}"
+        ))
+    })?;
 
     let vector_lane_skeleton_bytes = build_vector_lane_skeleton(
         &document_records
@@ -119,8 +138,9 @@ pub(crate) fn emit_vector_artifacts(
             .collect::<Vec<_>>(),
         dimensions,
     );
-    write_payload(out_dir, "vector_lane.skel", &vector_lane_skeleton_bytes)
-        .map_err(|_| PackError::new("failed to write vector lane skeleton"))?;
+    write_payload(out_dir, "vector_lane.skel", &vector_lane_skeleton_bytes).map_err(|error| {
+        PackError::new(format!("failed to write vector lane skeleton: {error}"))
+    })?;
 
     let manifest_files = vec![
         build_manifest_file(
@@ -174,17 +194,18 @@ pub(crate) fn emit_query_artifacts(
     let summary = analyze_query_set(spec.query_bytes)?;
 
     write_payload(out_dir, spec.query_path, spec.query_bytes)
-        .map_err(|_| PackError::new("failed to write query set"))?;
+        .map_err(|error| PackError::new(format!("failed to write query set: {error}")))?;
     write_payload(out_dir, spec.ground_truth_path, spec.ground_truth_bytes)
-        .map_err(|_| PackError::new("failed to write ground truth"))?;
+        .map_err(|error| PackError::new(format!("failed to write ground truth: {error}")))?;
     if let (Some(qrels_path), Some(qrels_bytes)) = (spec.qrels_path, spec.qrels_bytes) {
         write_payload(out_dir, qrels_path, qrels_bytes)
-            .map_err(|_| PackError::new("failed to write qrels"))?;
+            .map_err(|error| PackError::new(format!("failed to write qrels: {error}")))?;
     }
 
     let query_vector_bytes = build_query_vector_payload(spec.query_bytes, dimensions)?;
-    write_payload(out_dir, spec.query_vector_path, &query_vector_bytes)
-        .map_err(|_| PackError::new("failed to write query vector payload"))?;
+    write_payload(out_dir, spec.query_vector_path, &query_vector_bytes).map_err(|error| {
+        PackError::new(format!("failed to write query vector payload: {error}"))
+    })?;
 
     let mut manifest_files = vec![
         build_manifest_file(
@@ -243,7 +264,11 @@ fn analyze_query_set(bytes: &[u8]) -> Result<QuerySetSummary, PackError> {
             "easy" => easy += 1,
             "medium" => medium += 1,
             "hard" => hard += 1,
-            _ => {}
+            other => {
+                return Err(PackError::new(format!(
+                    "unsupported query difficulty: {other}"
+                )))
+            }
         }
     }
 

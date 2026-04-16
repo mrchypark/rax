@@ -90,7 +90,8 @@ where
     E: WaxEngine,
 {
     pub fn run(&mut self, request: &RunRequest) -> Result<RunTrace, E::Error> {
-        let mut trace = self.mount_open_and_materialize(request)?;
+        let mut trace = self.mount_and_open(request)?;
+        self.materialize_forced_lanes(request, &mut trace)?;
 
         if let Some(query) = request.workload.first_query() {
             execute_query(&mut self.engine, query.as_str(), &mut trace)?;
@@ -115,8 +116,9 @@ where
         M: MemorySampler,
     {
         collector.start_run();
-        let mut trace = self.mount_open_and_materialize(request)?;
+        let mut trace = self.mount_and_open(request)?;
         collector.mark_container_open_done();
+        self.materialize_forced_lanes(request, &mut trace)?;
 
         collector.mark_metadata_ready();
 
@@ -148,7 +150,7 @@ where
         })
     }
 
-    fn mount_open_and_materialize(&mut self, request: &RunRequest) -> Result<RunTrace, E::Error> {
+    fn mount_and_open(&mut self, request: &RunRequest) -> Result<RunTrace, E::Error> {
         let mut trace = RunTrace {
             events: Vec::new(),
             search_queries: Vec::new(),
@@ -162,6 +164,14 @@ where
         self.engine.open(OpenRequest)?;
         trace.events.push(LifecycleEvent::Opened);
 
+        Ok(trace)
+    }
+
+    fn materialize_forced_lanes(
+        &mut self,
+        request: &RunRequest,
+        trace: &mut RunTrace,
+    ) -> Result<(), E::Error> {
         if matches!(
             request.materialization_mode,
             MaterializationMode::ForceTextLane | MaterializationMode::ForceAllLanes
@@ -170,7 +180,7 @@ where
                 &mut self.engine,
                 BenchmarkQuery::MaterializeTextLane.as_str(),
                 LifecycleEvent::TextLaneMaterialized,
-                &mut trace,
+                trace,
             )?;
         }
 
@@ -182,11 +192,11 @@ where
                 &mut self.engine,
                 BenchmarkQuery::MaterializeVectorLane.as_str(),
                 LifecycleEvent::VectorLaneMaterialized,
-                &mut trace,
+                trace,
             )?;
         }
 
-        Ok(trace)
+        Ok(())
     }
 }
 
