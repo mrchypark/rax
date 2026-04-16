@@ -121,22 +121,20 @@ pub(crate) fn validate_preview_vectors(
     Ok(())
 }
 
-pub(crate) fn load_first_vector_query(paths: &[PathBuf]) -> Result<FirstVectorQuery, String> {
+pub(crate) fn load_query_vector_records_from_paths(
+    paths: &[PathBuf],
+) -> Result<Vec<QueryVectorRecord>, String> {
+    let mut records = Vec::new();
     for path in paths {
         let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
         for line in text.lines().filter(|line| !line.trim().is_empty()) {
             let query: QueryVectorRecord =
                 serde_json::from_str(line).map_err(|error| error.to_string())?;
-            if query.lane_eligibility.vector {
-                return Ok(FirstVectorQuery {
-                    vector: query.vector,
-                    top_k: query.top_k as usize,
-                });
-            }
+            records.push(query);
         }
     }
 
-    Err("no vector-eligible query found".to_owned())
+    Ok(records)
 }
 
 pub(crate) fn load_query_vector_records(
@@ -159,24 +157,29 @@ pub(crate) fn load_query_vector_records(
         .collect()
 }
 
-pub(crate) fn load_first_hybrid_vector_query(
-    paths: &[PathBuf],
-) -> Result<Option<FirstVectorQuery>, String> {
-    for path in paths {
-        let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
-        for line in text.lines().filter(|line| !line.trim().is_empty()) {
-            let query: QueryVectorRecord =
-                serde_json::from_str(line).map_err(|error| error.to_string())?;
-            if query.lane_eligibility.hybrid {
-                return Ok(Some(FirstVectorQuery {
-                    vector: query.vector,
-                    top_k: query.top_k as usize,
-                }));
-            }
-        }
-    }
+pub(crate) fn first_vector_query_from_records(
+    records: &[QueryVectorRecord],
+) -> Result<FirstVectorQuery, String> {
+    records
+        .iter()
+        .find(|query| query.lane_eligibility.vector)
+        .map(|query| FirstVectorQuery {
+            vector: query.vector.clone(),
+            top_k: query.top_k as usize,
+        })
+        .ok_or_else(|| "no vector-eligible query found".to_owned())
+}
 
-    Ok(None)
+pub(crate) fn first_hybrid_vector_query_from_records(
+    records: &[QueryVectorRecord],
+) -> Option<FirstVectorQuery> {
+    records
+        .iter()
+        .find(|query| query.lane_eligibility.hybrid)
+        .map(|query| FirstVectorQuery {
+            vector: query.vector.clone(),
+            top_k: query.top_k as usize,
+        })
 }
 
 pub(crate) fn search_first_hybrid_query(

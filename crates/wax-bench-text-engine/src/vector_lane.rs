@@ -14,8 +14,9 @@ use wax_bench_model::{
 
 use crate::documents::load_document_ids_from_documents;
 use crate::query_support::{
-    dot_product, dot_product_i8_preview, load_document_ids, load_first_hybrid_vector_query,
-    load_first_vector_query, validate_document_vectors, validate_preview_vectors,
+    dot_product, dot_product_i8_preview, first_hybrid_vector_query_from_records,
+    first_vector_query_from_records, load_document_ids, load_query_vector_records_from_paths,
+    validate_document_vectors, validate_preview_vectors,
 };
 
 type BorrowedHnsw<'a> = Hnsw<'a, f32, DistCosine>;
@@ -159,8 +160,9 @@ impl VectorLane {
                 Ok(mapped)
             })
             .transpose()?;
-        let first_vector_query = load_first_vector_query(&query_vectors_path)?;
-        let first_hybrid_query = load_first_hybrid_vector_query(&query_vectors_path)?;
+        let query_vector_records = load_query_vector_records_from_paths(&query_vectors_path)?;
+        let first_vector_query = first_vector_query_from_records(&query_vector_records)?;
+        let first_hybrid_query = first_hybrid_vector_query_from_records(&query_vector_records);
         let hnsw_available = hnsw_graph_basename.is_some();
         let should_load_hnsw = match vector_mode {
             VectorQueryMode::Auto => false,

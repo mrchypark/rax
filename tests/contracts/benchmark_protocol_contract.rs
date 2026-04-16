@@ -95,3 +95,8 @@ fn embedding_helpers_are_stable_for_ascii_text() {
     assert!((norm - 1.0).abs() < 1e-6);
     assert_eq!(embed_text("", 8), vec![0.0; 8]);
 }
+
+#[test]
+fn tokenize_normalizes_non_ascii_alphanumeric_text() {
+    assert_eq!(tokenize("CAFÉ Straße"), vec!["café", "straße"]);
+}

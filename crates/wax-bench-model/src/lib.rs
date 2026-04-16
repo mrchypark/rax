@@ -268,7 +268,7 @@ pub trait WaxEngine {
 pub fn tokenize(text: &str) -> Vec<String> {
     text.split(|character: char| !character.is_alphanumeric())
         .filter(|token| !token.is_empty())
-        .map(|token| token.to_ascii_lowercase())
+        .map(|token| token.to_lowercase())
         .collect()
 }
 
