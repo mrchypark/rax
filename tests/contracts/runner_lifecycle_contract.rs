@@ -1,13 +1,17 @@
 use std::cell::Cell;
+use std::fs;
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use tempfile::tempdir;
 use wax_bench_metrics::{MemoryReading, MemorySampler, MetricCollector, MonotonicClock};
 use wax_bench_model::{
     EnginePhase, EngineStats, MaterializationMode, MountRequest, OpenRequest, OpenResult,
     SearchRequest, SearchResult, WaxEngine,
 };
+use wax_bench_packer::PackRequest;
 use wax_bench_runner::{BenchmarkRunner, LifecycleEvent, RunRequest, Workload};
+use wax_bench_text_engine::PackedTextEngine;
 
 #[test]
 fn runner_lifecycle_emits_phases_in_order() {
@@ -337,6 +341,34 @@ fn warm_hybrid_with_previews_workload_warms_then_measures_previewed_hybrid_searc
             "__warm_hybrid_with_previews__".to_owned()
         ]
     );
+}
+
+#[test]
+fn runner_fails_open_when_real_core_store_is_present_but_invalid() {
+    let dataset_dir = tempdir().unwrap();
+    wax_bench_packer::pack_dataset(&PackRequest::new(
+        "fixtures/bench/source/minimal",
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+    fs::write(
+        dataset_dir.path().join("store.wax"),
+        b"not-a-real-wax-store",
+    )
+    .unwrap();
+
+    let mut runner = BenchmarkRunner::new(PackedTextEngine::default());
+    let error = runner
+        .run(&RunRequest {
+            dataset_path: dataset_dir.path().to_path_buf(),
+            workload: Workload::ContainerOpen,
+            materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
+        })
+        .unwrap_err();
+
+    assert!(error.contains("core store open failed"));
 }
 
 #[derive(Default)]

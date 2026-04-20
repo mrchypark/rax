@@ -7,6 +7,8 @@ use wax_bench_model::{
 };
 use wax_bench_packer::{pack_dataset, PackRequest};
 use wax_bench_text_engine::{profile_first_vector_query, PackedTextEngine};
+use wax_v2_core::create_empty_store;
+use wax_v2_vector::publish_compatibility_vector_segment;
 
 fn write_large_auto_source(source_dir: &std::path::Path, doc_count: usize) {
     fs::write(
@@ -241,6 +243,121 @@ fn packed_engine_uses_persisted_vector_lane_without_document_id_sidecar() {
     .unwrap();
     fs::remove_file(dataset_dir.path().join("docs.ndjson")).unwrap();
     fs::remove_file(dataset_dir.path().join("document_ids.jsonl")).unwrap();
+
+    let mut engine = PackedTextEngine::default();
+    engine
+        .mount(MountRequest {
+            store_path: dataset_dir.path().to_path_buf(),
+        })
+        .unwrap();
+    engine.open(OpenRequest).unwrap();
+
+    let first = engine
+        .search(SearchRequest {
+            query_text: "__ttfq_vector__".to_owned(),
+        })
+        .unwrap();
+
+    assert_eq!(first.hits.first().map(String::as_str), Some("doc-002"));
+}
+
+#[test]
+fn packed_engine_open_rejects_store_vector_segment_that_does_not_match_mounted_pack() {
+    let dataset_dir = tempdir().unwrap();
+    let manifest = pack_dataset(&PackRequest::new(
+        "fixtures/bench/source/minimal",
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+
+    let store_path = dataset_dir.path().join("store.wax");
+    create_empty_store(&store_path).unwrap();
+    publish_compatibility_vector_segment(dataset_dir.path(), &manifest, &store_path).unwrap();
+    let document_vectors_path = manifest
+        .files
+        .iter()
+        .find(|file| file.kind == "document_vectors")
+        .map(|file| dataset_dir.path().join(&file.path))
+        .unwrap();
+    let mut mutated_vectors = fs::read(&document_vectors_path).unwrap();
+    mutated_vectors[0] ^= 0x01;
+    fs::write(&document_vectors_path, mutated_vectors).unwrap();
+
+    let mut engine = PackedTextEngine::default();
+    engine
+        .mount(MountRequest {
+            store_path: dataset_dir.path().to_path_buf(),
+        })
+        .unwrap();
+    let error = engine.open(OpenRequest).unwrap_err();
+
+    assert!(
+        error.contains("store vector segment does not match mounted dataset vectors"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn profile_first_vector_query_rejects_store_vector_segment_that_does_not_match_mounted_pack() {
+    let dataset_dir = tempdir().unwrap();
+    let manifest = pack_dataset(&PackRequest::new(
+        "fixtures/bench/source/minimal",
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+
+    let store_path = dataset_dir.path().join("store.wax");
+    create_empty_store(&store_path).unwrap();
+    publish_compatibility_vector_segment(dataset_dir.path(), &manifest, &store_path).unwrap();
+    let document_vectors_path = manifest
+        .files
+        .iter()
+        .find(|file| file.kind == "document_vectors")
+        .map(|file| dataset_dir.path().join(&file.path))
+        .unwrap();
+    let mut mutated_vectors = fs::read(&document_vectors_path).unwrap();
+    mutated_vectors[0] ^= 0x01;
+    fs::write(&document_vectors_path, mutated_vectors).unwrap();
+
+    let error = profile_first_vector_query(dataset_dir.path(), VectorQueryMode::Auto).unwrap_err();
+
+    assert!(
+        error.contains("store vector segment does not match mounted dataset vectors"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn packed_engine_prefers_manifest_visible_vector_segment_when_sidecars_are_missing() {
+    let dataset_dir = tempdir().unwrap();
+    let manifest = pack_dataset(&PackRequest::new(
+        "fixtures/bench/source/minimal",
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+    let store_path = dataset_dir.path().join("store.wax");
+    create_empty_store(&store_path).unwrap();
+    publish_compatibility_vector_segment(dataset_dir.path(), &manifest, &store_path).unwrap();
+
+    for kind in [
+        "document_ids",
+        "document_vectors",
+        "document_vectors_preview_q8",
+    ] {
+        let path = manifest
+            .files
+            .iter()
+            .find(|file| file.kind == kind)
+            .map(|file| dataset_dir.path().join(&file.path))
+            .unwrap();
+        fs::remove_file(path).unwrap();
+    }
 
     let mut engine = PackedTextEngine::default();
     engine

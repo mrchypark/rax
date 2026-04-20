@@ -1,6 +1,5 @@
 mod documents;
 mod query_support;
-mod vector_lane;
 
 use std::collections::HashMap;
 use std::fs;
@@ -10,21 +9,22 @@ use std::time::Instant;
 use serde::Serialize;
 use serde_json::Value;
 use wax_bench_model::{
-    parse_benchmark_query, tokenize, BenchmarkQuery, DatasetPackManifest, EnginePhase, EngineStats,
+    parse_benchmark_query, BenchmarkQuery, DatasetPackManifest, EnginePhase, EngineStats,
     MountRequest, OpenRequest, OpenResult, RankedDocumentHit, RankedQueryResult, SearchRequest,
     SearchResult, VectorQueryMode, WaxEngine,
 };
+use wax_v2_docstore::Docstore;
+use wax_v2_search::{
+    filter_hits_by_metadata, hybrid_search_with_diagnostics, search_first_hybrid_query,
+    MetadataFilter, MetadataSource,
+};
+use wax_v2_text::{TextBatchQuery, TextLane};
+use wax_v2_vector::{elapsed_ms, VectorLane};
 
 use crate::documents::{
-    document_offsets_path, load_document_offset_index, load_documents_by_id,
-    materialize_document_previews, DocumentOffsetEntry,
+    load_documents_by_id, open_docstore, validate_store_segments_against_dataset_pack,
 };
-use crate::query_support::{
-    load_first_hybrid_text_query, load_first_text_query, load_query_records,
-    load_query_vector_records, load_text_postings, search_first_hybrid_query, search_query_hybrid,
-};
-use crate::vector_lane::{elapsed_ms, VectorLane};
-const RRF_K: f64 = 60.0;
+use crate::query_support::load_query_vector_records;
 
 pub struct PackedTextEngine {
     mounted_path: Option<PathBuf>,
@@ -32,11 +32,20 @@ pub struct PackedTextEngine {
     manifest: Option<DatasetPackManifest>,
     text_lane: Option<TextLane>,
     vector_lane: Option<VectorLane>,
+    docstore: Option<Docstore>,
     preview_store: Option<HashMap<String, Value>>,
-    document_offset_path: Option<PathBuf>,
-    document_offset_index: Option<HashMap<String, DocumentOffsetEntry>>,
     vector_mode: VectorQueryMode,
     auto_vector_query_pending: bool,
+}
+
+struct JsonDocumentMetadata<'a> {
+    documents: &'a HashMap<String, Value>,
+}
+
+impl MetadataSource for JsonDocumentMetadata<'_> {
+    fn field_value(&self, doc_id: &str, field: &str) -> Option<&str> {
+        self.documents.get(doc_id)?.get(field)?.as_str()
+    }
 }
 
 impl PackedTextEngine {
@@ -47,9 +56,8 @@ impl PackedTextEngine {
             manifest: None,
             text_lane: None,
             vector_lane: None,
+            docstore: None,
             preview_store: None,
-            document_offset_path: None,
-            document_offset_index: None,
             vector_mode,
             auto_vector_query_pending: true,
         }
@@ -61,6 +69,10 @@ impl PackedTextEngine {
 
     pub fn is_vector_lane_materialized(&self) -> bool {
         self.vector_lane.is_some()
+    }
+
+    fn core_store_path(&self) -> Result<PathBuf, String> {
+        Ok(self.mount_root()?.join("store.wax"))
     }
 
     pub fn is_vector_hnsw_sidecar_materialized(&self) -> bool {
@@ -123,25 +135,40 @@ impl PackedTextEngine {
     }
 
     fn ensure_previews_for_hits(&mut self, doc_ids: &[String]) -> Result<(), String> {
-        let docs_path = self.mount_root()?.join("docs.ndjson");
-        if self.document_offset_index.is_none() {
-            if let Some(path) = self.document_offset_path.clone() {
-                self.document_offset_index = Some(load_document_offset_index(&path)?);
-            }
-        }
-        let offset_index = self.document_offset_index.as_ref().map(|index| {
-            doc_ids
-                .iter()
-                .filter_map(|doc_id| {
-                    index
-                        .get(doc_id.as_str())
-                        .cloned()
-                        .map(|entry| (doc_id.clone(), entry))
-                })
-                .collect::<HashMap<_, _>>()
-        });
+        let missing = self
+            .preview_store
+            .as_ref()
+            .map(|documents| {
+                doc_ids
+                    .iter()
+                    .filter(|doc_id| !documents.contains_key(doc_id.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| doc_ids.to_vec());
+        let loaded = if missing.is_empty() {
+            HashMap::new()
+        } else {
+            let docstore = self
+                .docstore
+                .as_ref()
+                .ok_or_else(|| "docstore not materialized".to_owned())?;
+            load_documents_by_id(docstore, &missing)?
+        };
         let preview_store = self.ensure_preview_store()?;
-        materialize_document_previews(preview_store, &docs_path, offset_index.as_ref(), doc_ids)
+        for (doc_id, document) in loaded {
+            preview_store.insert(doc_id, document);
+        }
+        for doc_id in doc_ids {
+            let document = preview_store
+                .get(doc_id)
+                .ok_or_else(|| format!("document missing for hit doc_id: {doc_id}"))?;
+            document
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("text missing for hit doc_id: {doc_id}"))?;
+        }
+        Ok(())
     }
 }
 
@@ -179,20 +206,15 @@ pub fn query_text_preview(
     query_text: &str,
     top_k: usize,
 ) -> Result<Vec<TextQueryHit>, String> {
-    let manifest_text = fs::read_to_string(dataset_path.join("manifest.json"))
-        .map_err(|error| error.to_string())?;
-    let manifest: DatasetPackManifest =
-        serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
-    let text_lane = TextLane::load(dataset_path, &manifest)?;
-    let doc_ids = text_lane.search_with_limit(query_text, top_k);
-    let offset_index = document_offsets_path(dataset_path, &manifest)
-        .map(|path| load_document_offset_index(&path))
-        .transpose()?;
-    let documents = load_documents_by_id(
-        &dataset_path.join("docs.ndjson"),
-        offset_index.as_ref(),
-        &doc_ids,
-    )?;
+        let manifest_text = fs::read_to_string(dataset_path.join("manifest.json"))
+            .map_err(|error| error.to_string())?;
+        let manifest: DatasetPackManifest =
+            serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
+        validate_store_segments_against_dataset_pack(dataset_path, &manifest)?;
+        let text_lane = TextLane::load(dataset_path, &manifest)?;
+        let doc_ids = text_lane.search_with_limit(query_text, top_k);
+        let docstore = open_docstore(dataset_path, &manifest)?;
+    let documents = load_documents_by_id(&docstore, &doc_ids)?;
     doc_ids
         .into_iter()
         .enumerate()
@@ -221,14 +243,38 @@ pub fn query_batch_ranked_results(
     query_set_path: &Path,
     vector_mode: VectorQueryMode,
 ) -> Result<Vec<RankedQueryResult>, String> {
-    let manifest_text = fs::read_to_string(dataset_path.join("manifest.json"))
-        .map_err(|error| error.to_string())?;
-    let manifest: DatasetPackManifest =
-        serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
-    let text_lane = TextLane::load(dataset_path, &manifest)?;
-    let mut vector_lane = VectorLane::load(dataset_path, &manifest, vector_mode)?;
-    let query_vectors = load_query_vector_records(query_set_path, vector_lane.dimensions)?;
-    let queries = load_query_records(query_set_path)?;
+        let manifest_text = fs::read_to_string(dataset_path.join("manifest.json"))
+            .map_err(|error| error.to_string())?;
+        let manifest: DatasetPackManifest =
+            serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
+        validate_store_segments_against_dataset_pack(dataset_path, &manifest)?;
+        let text_lane = TextLane::load(dataset_path, &manifest)?;
+        let mut vector_lane = VectorLane::load(dataset_path, &manifest, vector_mode)?;
+    let queries = TextBatchQuery::load_jsonl(query_set_path)?;
+    let filter_candidate_limit = manifest.corpus.doc_count as usize;
+    let query_vectors = load_query_vector_records(&queries, vector_lane.dimensions)?;
+    let docstore = if queries.iter().any(|query| !query.filter_spec.is_empty()) {
+        Some(open_docstore(dataset_path, &manifest)?)
+    } else {
+        None
+    };
+    let text_hits_by_query = text_lane
+        .search_batch(
+            &queries
+                .iter()
+                .filter(|query| query.uses_text_lane())
+                .cloned()
+                .map(|mut query| {
+                    if !query.filter_spec.is_empty() {
+                        query.top_k = filter_candidate_limit.max(query.top_k);
+                    }
+                    query
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_iter()
+        .map(|result| (result.query_id, result.hits))
+        .collect::<HashMap<_, _>>();
 
     if queries.len() != query_vectors.len() {
         return Err("query_set and query vector records must align".to_owned());
@@ -239,29 +285,61 @@ pub fn query_batch_ranked_results(
         .into_iter()
         .zip(query_vectors)
         .map(|(query, vector_record)| {
-            let limit = query.top_k as usize;
+            let limit = query.top_k;
+            let search_limit = if query.filter_spec.is_empty() {
+                limit
+            } else {
+                filter_candidate_limit.max(limit)
+            };
             let uses_vector_lane = query.lane_eligibility.hybrid
                 || (query.lane_eligibility.vector && !query.lane_eligibility.text);
             let force_exact = auto_vector_query_pending && uses_vector_lane;
             let hits = if query.lane_eligibility.hybrid {
-                search_query_hybrid(
-                    &text_lane,
+                let text_hits = text_hits_by_query
+                    .get(&query.query_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!("text hits missing for hybrid query_id: {}", query.query_id)
+                    })?;
+                let report = hybrid_search_with_diagnostics(
+                    &text_hits,
                     &mut vector_lane,
-                    &query.query_text,
                     &vector_record.vector,
-                    limit,
+                    search_limit,
                     vector_mode,
                     force_exact,
-                )?
+                )?;
+                report.fused_hits
             } else if query.lane_eligibility.vector && !query.lane_eligibility.text {
                 vector_lane.search_with_query(
                     &vector_record.vector,
-                    limit,
+                    search_limit,
                     vector_mode,
                     force_exact,
                 )?
             } else {
-                text_lane.search_with_limit(&query.query_text, limit)
+                text_hits_by_query
+                    .get(&query.query_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!("text hits missing for text query_id: {}", query.query_id)
+                    })?
+            };
+            let hits: Vec<String> = if query.filter_spec.is_empty() {
+                hits.into_iter().take(limit).collect()
+            } else {
+                let docstore = docstore
+                    .as_ref()
+                    .ok_or_else(|| "docstore not available for metadata filtering".to_owned())?;
+                let documents = load_documents_by_id(docstore, &hits)?;
+                let filter = MetadataFilter::from_pairs(query.filter_spec.equals.iter().cloned());
+                let metadata = JsonDocumentMetadata {
+                    documents: &documents,
+                };
+                filter_hits_by_metadata(&hits, &metadata, &filter)
+                    .into_iter()
+                    .take(limit)
+                    .collect()
             };
             if uses_vector_lane {
                 auto_vector_query_pending = false;
@@ -286,6 +364,7 @@ pub fn profile_first_vector_query(
         .map_err(|error| error.to_string())?;
     let manifest: DatasetPackManifest =
         serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
+    validate_store_segments_against_dataset_pack(dataset_path, &manifest)?;
     let load_start = Instant::now();
     let (vector_lane, hnsw_sidecar_load_ms) =
         VectorLane::load_with_report(dataset_path, &manifest, vector_mode)?;
@@ -316,9 +395,8 @@ impl WaxEngine for PackedTextEngine {
         self.manifest = None;
         self.text_lane = None;
         self.vector_lane = None;
+        self.docstore = None;
         self.preview_store = None;
-        self.document_offset_path = None;
-        self.document_offset_index = None;
         self.auto_vector_query_pending = true;
         Ok(())
     }
@@ -328,13 +406,19 @@ impl WaxEngine for PackedTextEngine {
             return Err("engine must be mounted before open".to_owned());
         }
 
+        let core_store_path = self.core_store_path()?;
+        if core_store_path.exists() {
+            wax_v2_core::open_store(&core_store_path)
+                .map_err(|error| format!("core store open failed: {error}"))?;
+        }
+
         let manifest_text = fs::read_to_string(self.mount_root()?.join("manifest.json"))
             .map_err(|error| error.to_string())?;
         let manifest: DatasetPackManifest =
             serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
+        validate_store_segments_against_dataset_pack(self.mount_root()?, &manifest)?;
 
-        self.document_offset_path = document_offsets_path(self.mount_root()?, &manifest);
-        self.document_offset_index = None;
+        self.docstore = Some(open_docstore(self.mount_root()?, &manifest)?);
         self.manifest = Some(manifest);
         self.phase = EnginePhase::Open;
         self.auto_vector_query_pending = true;
@@ -440,81 +524,11 @@ impl WaxEngine for PackedTextEngine {
     }
 }
 
-#[derive(Debug)]
-struct TextLane {
-    first_text_query: String,
-    first_text_top_k: usize,
-    first_hybrid_query: Option<String>,
-    first_hybrid_top_k: usize,
-    inverted: HashMap<String, Vec<String>>,
-}
-
-impl TextLane {
-    fn load(mount_root: &Path, manifest: &DatasetPackManifest) -> Result<Self, String> {
-        let postings_path = manifest
-            .files
-            .iter()
-            .find(|file| file.kind == "text_postings")
-            .map(|file| mount_root.join(&file.path))
-            .ok_or_else(|| "text_postings file missing from manifest".to_owned())?;
-        let query_paths = manifest
-            .query_sets
-            .iter()
-            .map(|query_set| mount_root.join(&query_set.path))
-            .collect::<Vec<_>>();
-        let (first_text_query, first_text_top_k, first_hybrid_query) = if query_paths.is_empty() {
-            (String::new(), 0, None)
-        } else {
-            let (first_text_query, first_text_top_k) = load_first_text_query(&query_paths)?;
-            let first_hybrid_query = load_first_hybrid_text_query(&query_paths)?;
-            (first_text_query, first_text_top_k, first_hybrid_query)
-        };
-        let inverted = load_text_postings(&postings_path)?;
-
-        Ok(Self {
-            first_text_query,
-            first_text_top_k,
-            first_hybrid_query: first_hybrid_query
-                .as_ref()
-                .map(|query| query.query_text.clone()),
-            first_hybrid_top_k: first_hybrid_query.map(|query| query.top_k).unwrap_or(0),
-            inverted,
-        })
-    }
-
-    fn search_first_text_query(&self) -> Vec<String> {
-        self.search_with_limit(&self.first_text_query, self.first_text_top_k)
-    }
-
-    fn search(&self, query: &str) -> Vec<String> {
-        self.search_with_limit(query, usize::MAX)
-    }
-
-    fn search_with_limit(&self, query: &str, limit: usize) -> Vec<String> {
-        let mut scores: HashMap<String, u32> = HashMap::new();
-        for token in tokenize(query) {
-            if let Some(doc_ids) = self.inverted.get(&token) {
-                for doc_id in doc_ids {
-                    *scores.entry(doc_id.clone()).or_insert(0) += 1;
-                }
-            }
-        }
-
-        let mut hits: Vec<(String, u32)> = scores.into_iter().collect();
-        hits.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-        hits.into_iter()
-            .take(limit)
-            .map(|(doc_id, _)| doc_id)
-            .collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use wax_bench_model::VectorQueryMode;
-
-    use crate::documents::parse_document_id;
-    use crate::vector_lane::resolve_auto_vector_mode;
+    use wax_v2_docstore::parse_document_id;
+    use wax_v2_vector::resolve_auto_vector_mode;
 
     #[test]
     fn auto_mode_prefers_exact_flat_for_small_corpora() {
