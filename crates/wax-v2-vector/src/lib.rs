@@ -483,6 +483,7 @@ impl VectorLane {
         if limit == 0 || self.dimensions == 0 {
             return Ok(Vec::new());
         }
+        validate_query_dimensions(query, self.dimensions)?;
 
         let selected_mode = self.resolve_runtime_query_mode(limit, mode, auto_force_exact);
         self.backend_for_mode(selected_mode)
@@ -1379,6 +1380,16 @@ fn load_query_vector_records_from_paths(
     Ok(records)
 }
 
+fn validate_query_dimensions(query: &[f32], expected_dimensions: usize) -> Result<(), String> {
+    if query.len() != expected_dimensions {
+        return Err(format!(
+            "query vector dimensions do not match lane dimensions: expected {expected_dimensions}, got {}",
+            query.len()
+        ));
+    }
+    Ok(())
+}
+
 fn decode_f32le_slice(bytes: &[u8]) -> Vec<f32> {
     bytes.chunks_exact(4)
         .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("4-byte f32 chunk")))
@@ -1749,6 +1760,36 @@ mod tests {
                 .unwrap(),
             vec!["doc-2", "doc-3"]
         );
+    }
+
+    #[test]
+    fn search_with_query_rejects_mismatched_query_dimensions() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("store.wax");
+        create_empty_store(&store_path).unwrap();
+
+        let pending = prepare_raw_vector_segment(
+            2,
+            &[
+                ("doc-1".to_owned(), vec![1.0f32, 0.0f32]),
+                ("doc-2".to_owned(), vec![0.0f32, 1.0f32]),
+            ],
+        )
+        .unwrap();
+        publish_segments(&store_path, vec![pending]).unwrap();
+
+        let mut lane = VectorLane::load_runtime(
+            temp_dir.path(),
+            &test_manifest(false, false),
+            VectorQueryMode::ExactFlat,
+        )
+        .unwrap();
+
+        let error = lane
+            .search_with_query(&[1.0, 0.0, 0.5], 2, VectorQueryMode::ExactFlat, false)
+            .expect_err("mismatched query dimensions should fail");
+
+        assert!(error.contains("dimensions"));
     }
 
     #[test]

@@ -95,6 +95,30 @@ fn structured_memory_session_upserts_entities_with_kind_and_aliases() {
 }
 
 #[test]
+fn structured_memory_entity_upsert_deduplicates_aliases_within_single_request() {
+    let dataset_dir = tempdir().unwrap();
+
+    let mut session = StructuredMemorySession::open(dataset_dir.path()).unwrap();
+    session
+        .upsert_entity(
+            NewStructuredEntity::new("person:alice", "person", "bootstrap-test", 1_717_171_719_000)
+                .with_alias("Alice")
+                .with_alias("Alice")
+                .with_alias("Alice Kim")
+                .with_alias("Alice"),
+        )
+        .unwrap();
+    session.close().unwrap();
+
+    let mut reopened = StructuredMemorySession::open(dataset_dir.path()).unwrap();
+    let entity = reopened
+        .entity(StructuredEntityQuery::entity_id("person:alice"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(entity.aliases, vec!["Alice", "Alice Kim"]);
+}
+
+#[test]
 fn structured_memory_session_asserts_and_reads_facts_via_fact_api() {
     let dataset_dir = tempdir().unwrap();
 

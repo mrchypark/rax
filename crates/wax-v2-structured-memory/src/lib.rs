@@ -290,10 +290,11 @@ impl StructuredMemorySession {
 
         let existing_aliases = current
             .as_ref()
-            .map(|entity| entity.aliases.as_slice())
-            .unwrap_or(&[]);
+            .map(|entity| entity.aliases.clone())
+            .unwrap_or_default();
+        let mut seen_aliases = existing_aliases;
         for alias in new_entity.aliases {
-            if !existing_aliases.iter().any(|existing| existing == &alias) {
+            if !seen_aliases.iter().any(|existing| existing == &alias) {
                 self.record(NewStructuredMemoryRecord::fact(
                     entity_id.clone(),
                     ENTITY_ALIAS_PREDICATE,
@@ -301,6 +302,7 @@ impl StructuredMemorySession {
                     new_entity.provenance.source.clone(),
                     new_entity.provenance.asserted_at_ms,
                 ))?;
+                seen_aliases.push(alias);
             }
         }
 
