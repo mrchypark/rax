@@ -539,9 +539,8 @@ impl RuntimeStoreWriter<'_> {
         let known_document_count = self
             .store
             .docstore
-            .build_doc_id_map()
+            .load_document_ids()
             .map_err(|error| RuntimeError::Storage(docstore_error(error)))?
-            .bindings()
             .len();
         if known_documents.len() != vectors.len() {
             let missing = doc_ids
@@ -946,6 +945,56 @@ mod tests {
         assert!(
             matches!(error, crate::RuntimeError::InvalidRequest(message) if message.contains("duplicate doc_ids"))
         );
+    }
+
+    #[test]
+    fn publish_raw_vectors_counts_only_active_documents() {
+        let dataset_dir = tempdir().unwrap();
+        let source_dir = tempdir().unwrap();
+        let docs_path = source_dir.path().join("docs.ndjson");
+        fs::write(
+            &docs_path,
+            concat!(
+                "{\"doc_id\":\"doc-001\",\"text\":\"alpha\"}\n",
+                "{\"doc_id\":\"doc-002\",\"text\":\"beta\"}\n",
+            ),
+        )
+        .unwrap();
+        pack_adhoc_dataset(&AdhocPackRequest::new(&docs_path, dataset_dir.path(), "small"))
+            .unwrap();
+
+        let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
+        runtime
+            .writer()
+            .unwrap()
+            .publish_raw_snapshot(
+                vec![
+                    NewDocument::new("doc-001", "alpha"),
+                    NewDocument::new("doc-002", "beta"),
+                ],
+                Some(vec![
+                    NewDocumentVector::new("doc-001", embed_text("alpha", 384)),
+                    NewDocumentVector::new("doc-002", embed_text("beta", 384)),
+                ]),
+            )
+            .unwrap();
+
+        runtime
+            .writer()
+            .unwrap()
+            .publish_raw_documents(vec![NewDocument::new("doc-001", "alpha only")])
+            .unwrap();
+
+        let report = runtime
+            .writer()
+            .unwrap()
+            .publish_raw_vectors(vec![NewDocumentVector::new(
+                "doc-001",
+                embed_text("alpha only", 384),
+            )])
+            .unwrap();
+
+        assert_eq!(report.published_families, vec![RuntimePublishFamily::Vector]);
     }
 
     #[test]

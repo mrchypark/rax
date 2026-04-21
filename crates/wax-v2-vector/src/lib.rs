@@ -188,6 +188,9 @@ impl VectorLaneMetadata {
     }
 
     fn has_hnsw_sidecar(&self, mount_root: &Path) -> bool {
+        if self.vector_segment.is_some() {
+            return false;
+        }
         let Some(basename) = self.hnsw_graph_basename.as_deref() else {
             return false;
         };
@@ -1701,6 +1704,45 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let store_path = temp_dir.path().join("store.wax");
         create_empty_store(&store_path).unwrap();
+
+        let raw_vectors = (0..65)
+            .map(|index| {
+                let doc_id = format!("doc-{index:03}");
+                let values = if index == 17 {
+                    vec![1.0f32, 0.0f32]
+                } else {
+                    vec![0.0f32, 1.0f32]
+                };
+                (doc_id, values)
+            })
+            .collect::<Vec<_>>();
+        let pending = prepare_raw_vector_segment(2, &raw_vectors).unwrap();
+        publish_segments(&store_path, vec![pending]).unwrap();
+
+        let mut lane = VectorLane::load_runtime(
+            temp_dir.path(),
+            &test_manifest_with_count(65, false, true),
+            VectorQueryMode::Auto,
+        )
+        .unwrap();
+
+        assert_eq!(
+            lane.search_with_query(&[1.0, 0.0], 3, VectorQueryMode::Auto, false)
+                .unwrap()
+                .first()
+                .map(String::as_str),
+            Some("doc-017")
+        );
+        assert!(!lane.is_hnsw_sidecar_materialized());
+    }
+
+    #[test]
+    fn vector_lane_runtime_ignores_compatibility_hnsw_sidecars_when_store_segment_is_active() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("store.wax");
+        create_empty_store(&store_path).unwrap();
+        fs::write(temp_dir.path().join("graph.hnsw.graph"), b"stale-graph").unwrap();
+        fs::write(temp_dir.path().join("graph.hnsw.data"), b"stale-data").unwrap();
 
         let raw_vectors = (0..65)
             .map(|index| {
