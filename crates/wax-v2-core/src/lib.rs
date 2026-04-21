@@ -291,6 +291,11 @@ impl ActiveManifest {
 
 fn validate_segments(segments: &[SegmentDescriptor]) -> Result<(), CoreError> {
     for segment in segments {
+        if segment.object_length == 0 {
+            return Err(CoreError::InvalidManifest(
+                "segment descriptor object length must be non-zero".to_owned(),
+            ));
+        }
         if segment.doc_id_start > segment.doc_id_end_exclusive {
             return Err(CoreError::InvalidManifest(
                 "segment descriptor doc_id range is invalid".to_owned(),
@@ -323,13 +328,20 @@ fn validate_segments(segments: &[SegmentDescriptor]) -> Result<(), CoreError> {
             ));
         }
 
+    }
+
+    let mut by_offset = segments.iter().collect::<Vec<_>>();
+    by_offset.sort_by_key(|segment| (segment.object_offset, segment.object_length));
+    for pair in by_offset.windows(2) {
+        let left = pair[0];
+        let right = pair[1];
         let left_end = left
             .object_offset
             .checked_add(left.object_length)
             .ok_or_else(|| {
                 CoreError::InvalidManifest("segment object range overflow".to_owned())
             })?;
-        if left.object_offset < right.object_offset && left_end > right.object_offset {
+        if left_end > right.object_offset {
             return Err(CoreError::InvalidManifest(
                 "segment object ranges must not overlap".to_owned(),
             ));
@@ -1194,5 +1206,45 @@ mod tests {
             read_segment_object(&path, &fallback.manifest.segments[0]).expect("fallback object"),
             b"segment-one"
         );
+    }
+
+    #[test]
+    fn manifest_rejects_segments_with_identical_object_offsets() {
+        let descriptor = SegmentDescriptor {
+            family: SegmentKind::Doc,
+            family_version: 1,
+            flags: 0,
+            object_offset: 4_096,
+            object_length: 128,
+            segment_generation: 1,
+            doc_id_start: 0,
+            doc_id_end_exclusive: 1,
+            min_timestamp_ms: 0,
+            max_timestamp_ms: 0,
+            live_items: 1,
+            tombstoned_items: 0,
+            backend_id: 0,
+            backend_aux: 0,
+            object_checksum: [1u8; 32],
+        };
+        let manifest = ActiveManifest {
+            generation: 1,
+            segments: vec![
+                descriptor.clone(),
+                SegmentDescriptor {
+                    family: SegmentKind::Txt,
+                    object_checksum: [2u8; 32],
+                    ..descriptor
+                },
+            ],
+        };
+
+        let error = ActiveManifest::decode(&manifest.encode()).expect_err("manifest should fail");
+
+        assert!(matches!(
+            error,
+            CoreError::InvalidManifest(message)
+                if message.contains("must not overlap")
+        ));
     }
 }

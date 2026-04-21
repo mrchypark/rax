@@ -1411,18 +1411,19 @@ fn first_hybrid_vector_query_from_records(
 }
 
 fn dot_product_f32le(left: &[f32], right: &[u8]) -> f32 {
+    let lane_count = left.len().min(right.len() / 4);
     let mut sum0 = 0.0f32;
     let mut sum1 = 0.0f32;
     let mut sum2 = 0.0f32;
     let mut sum3 = 0.0f32;
-    let mut right_chunks = right.chunks_exact(4);
     let mut index = 0usize;
 
-    while index + 4 <= left.len() {
-        let r0 = f32::from_le_bytes(right_chunks.next().expect("validated vector").try_into().unwrap());
-        let r1 = f32::from_le_bytes(right_chunks.next().expect("validated vector").try_into().unwrap());
-        let r2 = f32::from_le_bytes(right_chunks.next().expect("validated vector").try_into().unwrap());
-        let r3 = f32::from_le_bytes(right_chunks.next().expect("validated vector").try_into().unwrap());
+    while index + 4 <= lane_count {
+        let base = index * 4;
+        let r0 = decode_f32le_at(right, base);
+        let r1 = decode_f32le_at(right, base + 4);
+        let r2 = decode_f32le_at(right, base + 8);
+        let r3 = decode_f32le_at(right, base + 12);
         sum0 += left[index] * r0;
         sum1 += left[index + 1] * r1;
         sum2 += left[index + 2] * r2;
@@ -1431,12 +1432,21 @@ fn dot_product_f32le(left: &[f32], right: &[u8]) -> f32 {
     }
 
     let mut tail = 0.0f32;
-    for value in left[index..].iter().zip(right_chunks) {
-        let (left_value, right_chunk) = value;
-        tail += *left_value * f32::from_le_bytes(right_chunk.try_into().expect("validated vector"));
+    while index < lane_count {
+        tail += left[index] * decode_f32le_at(right, index * 4);
+        index += 1;
     }
 
     sum0 + sum1 + sum2 + sum3 + tail
+}
+
+#[inline]
+fn decode_f32le_at(bytes: &[u8], offset: usize) -> f32 {
+    f32::from_le_bytes(
+        bytes[offset..offset + 4]
+            .try_into()
+            .expect("validated vector length"),
+    )
 }
 
 fn dot_product_i8_preview(left: &[f32], right: &[u8]) -> f32 {

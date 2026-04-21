@@ -1311,31 +1311,42 @@ fn build_ref_section(
     entries: &[(SectionRef, Vec<u8>)],
     label: &str,
 ) -> Result<Vec<u8>, DocstoreError> {
-    let mut section_length = 0usize;
-    for (reference, bytes) in entries {
-        if reference.length() as usize != bytes.len() {
-            return Err(DocstoreError::InvalidDocument(format!(
-                "{label} ref length does not match encoded bytes"
-            )));
-        }
-        let end = (reference.offset() as usize)
-            .checked_add(reference.length() as usize)
-            .ok_or_else(|| DocstoreError::InvalidDocument(format!("{label} ref range overflow")))?;
-        section_length = section_length.max(end);
-    }
+    let mut sorted_ranges = entries
+        .iter()
+        .map(|(reference, bytes)| {
+            let start = reference.offset() as usize;
+            let end = start
+                .checked_add(reference.length() as usize)
+                .ok_or_else(|| {
+                    DocstoreError::InvalidDocument(format!("{label} ref range overflow"))
+                })?;
+            if reference.length() as usize != bytes.len() {
+                return Err(DocstoreError::InvalidDocument(format!(
+                    "{label} ref length does not match encoded bytes"
+                )));
+            }
+            Ok((start, end))
+        })
+        .collect::<Result<Vec<_>, DocstoreError>>()?;
+    sorted_ranges.sort_unstable_by_key(|(start, end)| (*start, *end));
 
-    let mut section = vec![0u8; section_length];
-    let mut occupied = vec![false; section_length];
-    for (reference, bytes) in entries {
-        let start = reference.offset() as usize;
-        let end = start + reference.length() as usize;
-        if occupied[start..end].iter().any(|occupied| *occupied) {
+    let mut section_length = 0usize;
+    let mut previous_end = 0usize;
+    for (index, (start, end)) in sorted_ranges.iter().copied().enumerate() {
+        if index > 0 && start < previous_end {
             return Err(DocstoreError::InvalidDocument(format!(
                 "{label} refs must not overlap"
             )));
         }
+        section_length = section_length.max(end);
+        previous_end = end;
+    }
+
+    let mut section = vec![0u8; section_length];
+    for (reference, bytes) in entries {
+        let start = reference.offset() as usize;
+        let end = start + reference.length() as usize;
         section[start..end].copy_from_slice(bytes);
-        occupied[start..end].fill(true);
     }
 
     Ok(section)
