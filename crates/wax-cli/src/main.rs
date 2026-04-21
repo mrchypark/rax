@@ -1,4 +1,5 @@
-use std::fs;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
@@ -174,10 +175,16 @@ fn default_metadata() -> serde_json::Value {
 }
 
 fn read_jsonl<T: for<'de> Deserialize<'de>>(path: &std::path::Path) -> Result<Vec<T>, String> {
-    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    text.lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).map_err(|error| error.to_string()))
+    BufReader::new(File::open(path).map_err(|error| error.to_string())?)
+        .lines()
+        .filter_map(|line| match line {
+            Ok(line) if line.trim().is_empty() => None,
+            other => Some(other),
+        })
+        .map(|line| {
+            let line = line.map_err(|error| error.to_string())?;
+            serde_json::from_str(&line).map_err(|error| error.to_string())
+        })
         .collect()
 }
 

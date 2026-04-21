@@ -3,10 +3,12 @@ use std::cell::UnsafeCell;
 use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
-use bytemuck::{cast_slice, try_cast_slice};
+use bytemuck::cast_slice;
 use hnsw_rs::prelude::{DistCosine, Hnsw, HnswIo};
 use memmap2::{Mmap, MmapOptions};
 use self_cell::self_cell;
@@ -82,6 +84,10 @@ pub struct VectorLane {
 enum ByteStorage {
     Mapped(Mmap),
     Owned(Vec<u8>),
+    Shared {
+        bytes: Arc<[u8]>,
+        range: Range<usize>,
+    },
 }
 
 impl ByteStorage {
@@ -89,6 +95,7 @@ impl ByteStorage {
         match self {
             Self::Mapped(bytes) => bytes.as_ref(),
             Self::Owned(bytes) => bytes.as_slice(),
+            Self::Shared { bytes, range } => &bytes[range.start..range.end],
         }
     }
 }
@@ -594,9 +601,7 @@ impl VectorLane {
         let rerank_start = Instant::now();
         let mut reranked = Vec::with_capacity(candidates.len());
         for (index, _) in &candidates {
-            let start = index * self.dimensions;
-            let end = start + self.dimensions;
-            let exact_score = dot_product(query, &self.vector_values()[start..end]);
+            let exact_score = dot_product_f32le(query, self.vector_bytes(*index));
             reranked.push((*index, exact_score));
         }
 
@@ -635,9 +640,7 @@ impl VectorLane {
         let mut reranked = Vec::with_capacity(neighbours.len());
         for neighbour in &neighbours {
             let index = neighbour.d_id;
-            let start = index * self.dimensions;
-            let end = start + self.dimensions;
-            let exact_score = dot_product(query, &self.vector_values()[start..end]);
+            let exact_score = dot_product_f32le(query, self.vector_bytes(index));
             reranked.push((index, exact_score));
         }
 
@@ -688,12 +691,8 @@ impl VectorLane {
 
     fn search_exact(&self, query: &[f32], limit: usize) -> Vec<String> {
         let mut hits = Vec::with_capacity(limit.min(self.skeleton_header.doc_count as usize));
-        for (index, vector) in self
-            .vector_values()
-            .chunks_exact(self.dimensions)
-            .enumerate()
-        {
-            let score = dot_product(query, vector);
+        for index in 0..self.skeleton_header.doc_count as usize {
+            let score = dot_product_f32le(query, self.vector_bytes(index));
             self.collect_top_hit(&mut hits, limit, index, score);
         }
 
@@ -721,9 +720,7 @@ impl VectorLane {
 
         let mut reranked = Vec::with_capacity(candidates.len());
         for (index, _) in candidates {
-            let start = index * self.dimensions;
-            let end = start + self.dimensions;
-            let exact_score = dot_product(query, &self.vector_values()[start..end]);
+            let exact_score = dot_product_f32le(query, self.vector_bytes(index));
             reranked.push((index, exact_score));
         }
 
@@ -746,9 +743,7 @@ impl VectorLane {
         let mut reranked = Vec::with_capacity(neighbours.len());
         for neighbour in neighbours {
             let index = neighbour.d_id;
-            let start = index * self.dimensions;
-            let end = start + self.dimensions;
-            let exact_score = dot_product(query, &self.vector_values()[start..end]);
+            let exact_score = dot_product_f32le(query, self.vector_bytes(index));
             reranked.push((index, exact_score));
         }
 
@@ -807,8 +802,11 @@ impl VectorLane {
         &blob[start..end]
     }
 
-    fn vector_values(&self) -> &[f32] {
-        try_cast_slice::<u8, f32>(self.doc_vectors.as_slice()).expect("validated vector payload")
+    fn vector_bytes(&self, index: usize) -> &[u8] {
+        let row_length = self.dimensions * 4;
+        let start = index * row_length;
+        let end = start + row_length;
+        &self.doc_vectors.as_slice()[start..end]
     }
 
     fn preview_limit(&self, limit: usize) -> usize {
@@ -872,6 +870,14 @@ struct LoadedVectorPayloads {
     preview_vectors: Option<ByteStorage>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BinaryVectorSegmentLayout {
+    dimensions: usize,
+    doc_ids: Vec<String>,
+    exact_vectors_range: Range<usize>,
+    preview_vectors_range: Option<Range<usize>>,
+}
+
 fn resolve_store_vector_segment(mount_root: &Path) -> Result<Option<StoreVectorSegment>, String> {
     let store_path = mount_root.join("store.wax");
     if !store_path.exists() {
@@ -902,31 +908,39 @@ fn load_vector_segment(
 ) -> Result<LoadedVectorPayloads, String> {
     let bytes = wax_v2_core::read_segment_object(&segment.store_path, &segment.descriptor)
         .map_err(|error| error.to_string())?;
-    let decoded = BinaryVectorSegment::decode(&bytes)?;
-    if decoded.dimensions != metadata.dimensions {
+    let shared_bytes: Arc<[u8]> = bytes.into_boxed_slice().into();
+    let layout = BinaryVectorSegmentLayout::decode(shared_bytes.as_ref())?;
+    if layout.dimensions != metadata.dimensions {
         return Err("vector segment dimensions do not match manifest".to_owned());
     }
-    if decoded.doc_ids.len() != metadata.doc_count {
+    if layout.doc_ids.len() != metadata.doc_count {
         return Err("vector segment doc_count does not match manifest".to_owned());
     }
 
     let doc_ids = ByteStorage::Owned(build_vector_lane_skeleton(
-        &decoded.doc_ids,
-        decoded.dimensions as u32,
+        &layout.doc_ids,
+        layout.dimensions as u32,
     ));
-    let doc_vectors = ByteStorage::Owned(decoded.exact_vectors);
+    let doc_vectors = ByteStorage::Shared {
+        bytes: shared_bytes.clone(),
+        range: layout.exact_vectors_range.clone(),
+    };
     validate_document_vectors(
         doc_vectors.as_slice(),
         metadata.dimensions,
         metadata.doc_count,
     )?;
-    let preview_vectors = match decoded.preview_vectors {
-        Some(preview_vectors) => {
-            validate_preview_vectors(&preview_vectors, metadata.dimensions, metadata.doc_count)?;
-            Some(ByteStorage::Owned(preview_vectors))
-        }
-        None => None,
-    };
+    let preview_vectors = layout
+        .preview_vectors_range
+        .map(|range| -> Result<ByteStorage, String> {
+            let storage = ByteStorage::Shared {
+                bytes: shared_bytes.clone(),
+                range,
+            };
+            validate_preview_vectors(storage.as_slice(), metadata.dimensions, metadata.doc_count)?;
+            Ok(storage)
+        })
+        .transpose()?;
 
     Ok(LoadedVectorPayloads {
         doc_ids,
@@ -1052,16 +1066,14 @@ pub fn load_compatibility_raw_vectors(
     let exact_vectors =
         fs::read(&metadata.document_vectors_path).map_err(|error| error.to_string())?;
     validate_document_vectors(&exact_vectors, metadata.dimensions, metadata.doc_count)?;
-    let values =
-        try_cast_slice::<u8, f32>(&exact_vectors).map_err(|_| "document vector payload alignment is invalid".to_owned())?;
 
     Ok(doc_ids
         .into_iter()
         .enumerate()
         .map(|(index, doc_id)| {
-            let start = index * metadata.dimensions;
-            let end = start + metadata.dimensions;
-            (doc_id, values[start..end].to_vec())
+            let start = index * metadata.dimensions * 4;
+            let end = start + metadata.dimensions * 4;
+            (doc_id, decode_f32le_slice(&exact_vectors[start..end]))
         })
         .collect())
 }
@@ -1193,6 +1205,24 @@ impl BinaryVectorSegment {
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let layout = BinaryVectorSegmentLayout::decode(bytes)?;
+        let exact_vectors = bytes[layout.exact_vectors_range.clone()].to_vec();
+        let preview_vectors = layout
+            .preview_vectors_range
+            .clone()
+            .map(|range| bytes[range].to_vec());
+
+        Ok(Self {
+            dimensions: layout.dimensions,
+            doc_ids: layout.doc_ids,
+            exact_vectors,
+            preview_vectors,
+        })
+    }
+}
+
+impl BinaryVectorSegmentLayout {
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() < VECTOR_SEGMENT_HEADER_LENGTH {
             return Err(format!(
                 "vector segment too short: expected at least {VECTOR_SEGMENT_HEADER_LENGTH} bytes"
@@ -1236,9 +1266,9 @@ impl BinaryVectorSegment {
         } else {
             bytes.len()
         };
-        let exact_vectors = bytes[exact_vectors_offset..exact_vectors_end].to_vec();
-        let preview_vectors = if flags & VECTOR_SEGMENT_FLAG_HAS_PREVIEW != 0 {
-            Some(bytes[preview_vectors_offset..].to_vec())
+        let exact_vectors_range = exact_vectors_offset..exact_vectors_end;
+        let preview_vectors_range = if flags & VECTOR_SEGMENT_FLAG_HAS_PREVIEW != 0 {
+            Some(preview_vectors_offset..bytes.len())
         } else {
             None
         };
@@ -1273,16 +1303,16 @@ impl BinaryVectorSegment {
         if cursor != doc_ids_section.len() {
             return Err("vector segment doc_id section length mismatch".to_owned());
         }
-        validate_document_vectors(&exact_vectors, dimensions, doc_count)?;
-        if let Some(preview_vectors) = preview_vectors.as_ref() {
-            validate_preview_vectors(preview_vectors, dimensions, doc_count)?;
+        validate_document_vectors(&bytes[exact_vectors_range.clone()], dimensions, doc_count)?;
+        if let Some(preview_vectors_range) = preview_vectors_range.as_ref() {
+            validate_preview_vectors(&bytes[preview_vectors_range.clone()], dimensions, doc_count)?;
         }
 
         Ok(Self {
             dimensions,
             doc_ids,
-            exact_vectors,
-            preview_vectors,
+            exact_vectors_range,
+            preview_vectors_range,
         })
     }
 }
@@ -1310,9 +1340,7 @@ fn validate_document_vectors(
     if !bytes.len().is_multiple_of(dimensions * 4) {
         return Err("document vector payload has invalid length".to_owned());
     }
-    let values = try_cast_slice::<u8, f32>(bytes)
-        .map_err(|_| "document vector payload alignment is invalid".to_owned())?;
-    if values.len() != doc_count * dimensions {
+    if bytes.len() / 4 != doc_count * dimensions {
         return Err("document vector payload row count does not match manifest".to_owned());
     }
     Ok(())
@@ -1337,14 +1365,24 @@ fn load_query_vector_records_from_paths(
 ) -> Result<Vec<QueryVectorRecord>, String> {
     let mut records = Vec::new();
     for path in paths {
-        let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
-        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let reader = BufReader::new(File::open(path).map_err(|error| error.to_string())?);
+        for line in reader.lines() {
+            let line = line.map_err(|error| error.to_string())?;
+            if line.trim().is_empty() {
+                continue;
+            }
             let query: QueryVectorRecord =
-                serde_json::from_str(line).map_err(|error| error.to_string())?;
+                serde_json::from_str(&line).map_err(|error| error.to_string())?;
             records.push(query);
         }
     }
     Ok(records)
+}
+
+fn decode_f32le_slice(bytes: &[u8]) -> Vec<f32> {
+    bytes.chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("4-byte f32 chunk")))
+        .collect()
 }
 
 fn first_vector_query_from_records(
@@ -1372,26 +1410,30 @@ fn first_hybrid_vector_query_from_records(
         })
 }
 
-fn dot_product(left: &[f32], right: &[f32]) -> f32 {
-    let len = left.len().min(right.len());
+fn dot_product_f32le(left: &[f32], right: &[u8]) -> f32 {
     let mut sum0 = 0.0f32;
     let mut sum1 = 0.0f32;
     let mut sum2 = 0.0f32;
     let mut sum3 = 0.0f32;
+    let mut right_chunks = right.chunks_exact(4);
     let mut index = 0usize;
 
-    while index + 4 <= len {
-        sum0 += left[index] * right[index];
-        sum1 += left[index + 1] * right[index + 1];
-        sum2 += left[index + 2] * right[index + 2];
-        sum3 += left[index + 3] * right[index + 3];
+    while index + 4 <= left.len() {
+        let r0 = f32::from_le_bytes(right_chunks.next().expect("validated vector").try_into().unwrap());
+        let r1 = f32::from_le_bytes(right_chunks.next().expect("validated vector").try_into().unwrap());
+        let r2 = f32::from_le_bytes(right_chunks.next().expect("validated vector").try_into().unwrap());
+        let r3 = f32::from_le_bytes(right_chunks.next().expect("validated vector").try_into().unwrap());
+        sum0 += left[index] * r0;
+        sum1 += left[index + 1] * r1;
+        sum2 += left[index + 2] * r2;
+        sum3 += left[index + 3] * r3;
         index += 4;
     }
 
     let mut tail = 0.0f32;
-    while index < len {
-        tail += left[index] * right[index];
-        index += 1;
+    for value in left[index..].iter().zip(right_chunks) {
+        let (left_value, right_chunk) = value;
+        tail += *left_value * f32::from_le_bytes(right_chunk.try_into().expect("validated vector"));
     }
 
     sum0 + sum1 + sum2 + sum3 + tail
@@ -1460,12 +1502,12 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
     use wax_bench_model::{DatasetPackManifest, VectorQueryMode};
-    use wax_v2_core::{create_empty_store, publish_segments};
+    use wax_v2_core::{create_empty_store, publish_segments, SegmentKind};
 
     use crate::{
-        load_compatibility_raw_vectors, prepare_raw_vector_segment,
-        publish_compatibility_vector_segment, resolve_auto_vector_mode, VectorLane,
-        VectorLaneMetadata, VectorQueryInputs,
+        load_compatibility_raw_vectors, load_vector_segment, prepare_raw_vector_segment,
+        publish_compatibility_vector_segment, resolve_auto_vector_mode, ByteStorage,
+        StoreVectorSegment, VectorLane, VectorLaneMetadata, VectorQueryInputs,
     };
 
     #[test]
@@ -1697,6 +1739,49 @@ mod tests {
                 .unwrap(),
             vec!["doc-2", "doc-3"]
         );
+    }
+
+    #[test]
+    fn store_backed_vector_payloads_reuse_shared_segment_bytes() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("store.wax");
+        create_empty_store(&store_path).unwrap();
+
+        let pending = prepare_raw_vector_segment(
+            2,
+            &[
+                ("doc-1".to_owned(), vec![1.0f32, 0.0f32]),
+                ("doc-2".to_owned(), vec![0.0f32, 1.0f32]),
+            ],
+        )
+        .unwrap();
+        let published = publish_segments(&store_path, vec![pending]).unwrap();
+        let descriptor = published
+            .manifest
+            .segments
+            .iter()
+            .find(|segment| segment.family == SegmentKind::Vec)
+            .cloned()
+            .unwrap();
+        let metadata = VectorLaneMetadata {
+            dimensions: 2,
+            doc_count: 2,
+            vector_segment: Some(StoreVectorSegment {
+                store_path: store_path.clone(),
+                descriptor,
+                has_preview: false,
+            }),
+            vector_lane_skeleton_path: None,
+            document_ids_path: None,
+            document_vectors_path: temp_dir.path().join("unused.bin"),
+            preview_vectors_path: None,
+            hnsw_graph_basename: None,
+        };
+
+        let loaded = load_vector_segment(&metadata, metadata.vector_segment.as_ref().unwrap()).unwrap();
+
+        assert!(matches!(loaded.doc_vectors, ByteStorage::Shared { .. }));
+        assert!(loaded.preview_vectors.is_none());
     }
 
     #[test]

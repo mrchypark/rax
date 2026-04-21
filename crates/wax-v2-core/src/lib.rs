@@ -465,29 +465,29 @@ pub fn create_empty_store(path: &Path) -> Result<(), CoreError> {
 }
 
 pub fn open_store(path: &Path) -> Result<OpenedStore, CoreError> {
-    let mut bytes = Vec::new();
-    OpenOptions::new()
-        .read(true)
-        .open(path)?
-        .read_to_end(&mut bytes)?;
-
-    if bytes.len() < SUPERBLOCK_SIZE * 2 {
+    let mut file = OpenOptions::new().read(true).open(path)?;
+    let file_length = file.seek(SeekFrom::End(0))?;
+    if file_length < (SUPERBLOCK_SIZE * 2) as u64 {
         return Err(CoreError::UnexpectedLength {
             context: "store",
             expected_at_least: SUPERBLOCK_SIZE * 2,
-            actual: bytes.len(),
+            actual: file_length as usize,
         });
     }
+    file.seek(SeekFrom::Start(0))?;
+    let mut superblock_bytes = [0u8; SUPERBLOCK_SIZE * 2];
+    file.read_exact(&mut superblock_bytes)?;
 
-    let candidate_a = Superblock::decode(&bytes[..SUPERBLOCK_SIZE]).ok();
-    let candidate_b = Superblock::decode(&bytes[SUPERBLOCK_SIZE..SUPERBLOCK_SIZE * 2]).ok();
+    let candidate_a = Superblock::decode(&superblock_bytes[..SUPERBLOCK_SIZE]).ok();
+    let candidate_b =
+        Superblock::decode(&superblock_bytes[SUPERBLOCK_SIZE..SUPERBLOCK_SIZE * 2]).ok();
     let Some(candidates) = ordered_superblock_candidates(candidate_a, candidate_b) else {
         return Err(CoreError::NoValidSuperblock);
     };
 
     let mut last_error = None;
     for candidate in candidates {
-        match open_store_from_superblock(&bytes, candidate) {
+        match open_store_from_superblock(&mut file, file_length, candidate) {
             Ok(opened) => return Ok(opened),
             Err(error) => last_error = Some(error),
         }
@@ -640,24 +640,27 @@ fn ordered_superblock_candidates(
 }
 
 fn open_store_from_superblock(
-    bytes: &[u8],
+    file: &mut OpenOptionsFile,
+    file_length: u64,
     active_superblock: Superblock,
 ) -> Result<OpenedStore, CoreError> {
-    let manifest_offset = active_superblock.active_manifest_offset as usize;
-    let manifest_length = active_superblock.active_manifest_length as usize;
+    let manifest_offset = active_superblock.active_manifest_offset;
+    let manifest_length = active_superblock.active_manifest_length as u64;
     let manifest_end = manifest_offset
         .checked_add(manifest_length)
         .ok_or_else(|| CoreError::InvalidManifest("manifest offset overflow".to_owned()))?;
 
-    if manifest_end > bytes.len() {
+    if manifest_end > file_length {
         return Err(CoreError::InvalidManifest(
             "manifest range extends past end of file".to_owned(),
         ));
     }
 
-    let manifest_object = &bytes[manifest_offset..manifest_end];
+    let mut manifest_object = vec![0u8; manifest_length as usize];
+    file.seek(SeekFrom::Start(manifest_offset))?;
+    file.read_exact(&mut manifest_object)?;
     let manifest_bytes = decode_object(
-        manifest_object,
+        &manifest_object,
         ObjectType::Manifest,
         active_superblock.generation,
     )?;
@@ -726,9 +729,10 @@ fn append_object(
     let current_end = file.seek(SeekFrom::End(0))?;
     let object_offset = align_up(current_end, alignment.max(DEFAULT_OBJECT_ALIGNMENT));
     write_zero_padding(file, object_offset)?;
-    let object_bytes = encode_object(object_type, logical_generation, alignment, payload);
-    file.write_all(&object_bytes)?;
-    Ok((object_offset, object_bytes.len() as u64))
+    let header = encode_object_header(object_type, logical_generation, alignment, payload);
+    file.write_all(&header)?;
+    file.write_all(payload)?;
+    Ok((object_offset, (header.len() + payload.len()) as u64))
 }
 
 fn encode_object(
@@ -737,16 +741,27 @@ fn encode_object(
     alignment: u64,
     payload: &[u8],
 ) -> Vec<u8> {
-    let mut bytes = vec![0u8; OBJECT_HEADER_LENGTH];
-    bytes[..4].copy_from_slice(OBJECT_MAGIC);
-    bytes[4..6].copy_from_slice(&object_type.as_code().to_le_bytes());
-    bytes[6..8].copy_from_slice(&OBJECT_VERSION.to_le_bytes());
-    bytes[8..16].copy_from_slice(&(payload.len() as u64).to_le_bytes());
-    bytes[16..24].copy_from_slice(&logical_generation.to_le_bytes());
-    bytes[24..32].copy_from_slice(&alignment.to_le_bytes());
-    bytes[32..64].copy_from_slice(&sha256(payload));
+    let mut bytes =
+        Vec::from(encode_object_header(object_type, logical_generation, alignment, payload));
     bytes.extend_from_slice(payload);
     bytes
+}
+
+fn encode_object_header(
+    object_type: ObjectType,
+    logical_generation: u64,
+    alignment: u64,
+    payload: &[u8],
+) -> [u8; OBJECT_HEADER_LENGTH] {
+    let mut header = [0u8; OBJECT_HEADER_LENGTH];
+    header[..4].copy_from_slice(OBJECT_MAGIC);
+    header[4..6].copy_from_slice(&object_type.as_code().to_le_bytes());
+    header[6..8].copy_from_slice(&OBJECT_VERSION.to_le_bytes());
+    header[8..16].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+    header[16..24].copy_from_slice(&logical_generation.to_le_bytes());
+    header[24..32].copy_from_slice(&alignment.to_le_bytes());
+    header[32..64].copy_from_slice(&sha256(payload));
+    header
 }
 
 fn decode_object(

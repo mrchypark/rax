@@ -2,7 +2,9 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -475,10 +477,207 @@ enum DocstoreSource {
         offset_index: Option<HashMap<String, DocumentOffsetEntry>>,
     },
     Store {
-        ordered_doc_ids: Vec<String>,
-        documents_by_id: HashMap<String, Value>,
-        doc_id_map: DocIdMap,
+        segment: StoreDocSegment,
     },
+}
+
+#[derive(Debug, Clone)]
+struct StoreDocSegment {
+    bytes: Arc<[u8]>,
+    payload_range: Range<usize>,
+    ordered_doc_ids: Vec<String>,
+    entries_by_external_doc_id: HashMap<String, StoreDocEntry>,
+    doc_id_map: DocIdMap,
+}
+
+#[derive(Debug, Clone)]
+struct StoreDocEntry {
+    row: DocRow,
+}
+
+impl StoreDocSegment {
+    fn open(bytes: Vec<u8>) -> Result<Self, DocstoreError> {
+        let bytes: Arc<[u8]> = bytes.into_boxed_slice().into();
+        if bytes.len() < DOC_SEGMENT_HEADER_LENGTH {
+            return Err(DocstoreError::InvalidDocument(format!(
+                "doc segment too short: expected at least {DOC_SEGMENT_HEADER_LENGTH} bytes"
+            )));
+        }
+        if &bytes[..4] != DOC_SEGMENT_MAGIC {
+            return Err(DocstoreError::InvalidDocument(
+                "doc segment magic mismatch".to_owned(),
+            ));
+        }
+        let major = read_u16(bytes.as_ref(), 4);
+        let minor = read_u16(bytes.as_ref(), 6);
+        if major != DOC_SEGMENT_MAJOR || minor > DOC_SEGMENT_MINOR {
+            return Err(DocstoreError::InvalidDocument(
+                "unsupported doc segment version".to_owned(),
+            ));
+        }
+
+        let row_count = read_u64(bytes.as_ref(), 8) as usize;
+        let payload_bytes_offset = read_u64(bytes.as_ref(), 16) as usize;
+        let metadata_bytes_offset = read_u64(bytes.as_ref(), 24) as usize;
+        let preview_bytes_offset = read_u64(bytes.as_ref(), 32) as usize;
+        let (binding_bytes_offset, row_table_offset, checksum_start, checksum_end, header_length) =
+            if minor == 0 {
+                (
+                    preview_bytes_offset,
+                    read_u64(bytes.as_ref(), 40) as usize,
+                    48,
+                    80,
+                    80,
+                )
+            } else {
+                (
+                    read_u64(bytes.as_ref(), 40) as usize,
+                    read_u64(bytes.as_ref(), 48) as usize,
+                    56,
+                    88,
+                    88,
+                )
+            };
+        if payload_bytes_offset != header_length
+            || payload_bytes_offset > metadata_bytes_offset
+            || metadata_bytes_offset > preview_bytes_offset
+            || preview_bytes_offset > binding_bytes_offset
+            || binding_bytes_offset > row_table_offset
+            || row_table_offset > bytes.len()
+        {
+            return Err(DocstoreError::InvalidDocument(
+                "doc segment section offsets are invalid".to_owned(),
+            ));
+        }
+
+        let mut contents_checksum = [0u8; 32];
+        contents_checksum.copy_from_slice(&bytes[checksum_start..checksum_end]);
+        if sha256(&bytes[header_length..]) != contents_checksum {
+            return Err(DocstoreError::InvalidDocument(
+                "doc segment checksum mismatch".to_owned(),
+            ));
+        }
+
+        let row_table_length = row_count.checked_mul(DOC_ROW_LENGTH).ok_or_else(|| {
+            DocstoreError::InvalidDocument("row table length overflow".to_owned())
+        })?;
+        let row_table_end = row_table_offset
+            .checked_add(row_table_length)
+            .ok_or_else(|| DocstoreError::InvalidDocument("row table range overflow".to_owned()))?;
+        if row_table_end != bytes.len() {
+            return Err(DocstoreError::InvalidDocument(
+                "doc segment row table length mismatch".to_owned(),
+            ));
+        }
+
+        let payload_section = &bytes[payload_bytes_offset..metadata_bytes_offset];
+        let binding_section = &bytes[binding_bytes_offset..row_table_offset];
+        let row_table = &bytes[row_table_offset..row_table_end];
+        let mut previous_doc_id = None;
+        let mut ordered_bindings = Vec::with_capacity(row_count);
+        let mut ordered_doc_ids = Vec::with_capacity(row_count);
+        let mut entries_by_external_doc_id = HashMap::with_capacity(row_count);
+
+        for row_bytes in row_table.chunks_exact(DOC_ROW_LENGTH) {
+            let row = DocRow {
+                doc_id: read_u64(row_bytes, 0),
+                timestamp_ms: read_u64(row_bytes, 8),
+                flags: read_u32(row_bytes, 16),
+                payload_offset: read_u64(row_bytes, 24),
+                payload_length: read_u64(row_bytes, 32),
+                metadata_ref: SectionRef::from_packed(read_u64(row_bytes, 40)),
+                preview_ref: SectionRef::from_packed(read_u64(row_bytes, 48)),
+            };
+
+            if previous_doc_id.is_some_and(|previous| previous >= row.doc_id) {
+                return Err(DocstoreError::InvalidDocument(
+                    "doc rows must be sorted by doc_id".to_owned(),
+                ));
+            }
+            previous_doc_id = Some(row.doc_id);
+
+            let payload = read_section_bytes(
+                payload_section,
+                row.payload_offset,
+                row.payload_length,
+                "payload",
+            )?;
+            let payload_text = std::str::from_utf8(payload)
+                .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))?;
+            let external_doc_id =
+                parse_document_id(payload_text, "store-backed document payload")
+                    .map(Cow::into_owned)
+                    .map_err(DocstoreError::InvalidDocument)?;
+
+            if entries_by_external_doc_id
+                .insert(external_doc_id.clone(), StoreDocEntry { row: row.clone() })
+                .is_some()
+            {
+                return Err(DocstoreError::InvalidDocument(
+                    "duplicate external doc_id in store segment".to_owned(),
+                ));
+            }
+            ordered_doc_ids.push(external_doc_id.clone());
+            ordered_bindings.push(DocIdBinding::new(row.doc_id, external_doc_id));
+        }
+
+        let doc_id_map = if minor == 0 {
+            DocIdMap::from_bindings(ordered_bindings)?
+        } else {
+            DocIdMap::decode_json(binding_section)?
+        };
+
+        Ok(Self {
+            bytes,
+            payload_range: payload_bytes_offset..metadata_bytes_offset,
+            ordered_doc_ids,
+            entries_by_external_doc_id,
+            doc_id_map,
+        })
+    }
+
+    fn load_documents_by_id(
+        &self,
+        target_doc_ids: &[String],
+    ) -> Result<HashMap<String, Value>, DocstoreError> {
+        let mut documents = HashMap::new();
+        for doc_id in target_doc_ids {
+            let Some(entry) = self.entries_by_external_doc_id.get(doc_id) else {
+                continue;
+            };
+            let payload = self.payload_bytes(entry)?;
+            let value: Value = serde_json::from_slice(payload)?;
+            let object = value.as_object().ok_or_else(|| {
+                DocstoreError::InvalidDocument("document line must be a json object".to_owned())
+            })?;
+            documents.insert(doc_id.clone(), Value::Object(object.clone()));
+        }
+        Ok(documents)
+    }
+
+    fn ordered_documents(&self) -> Result<Vec<(String, Value)>, DocstoreError> {
+        let documents = self.load_documents_by_id(&self.ordered_doc_ids)?;
+        self.ordered_doc_ids
+            .iter()
+            .map(|doc_id| {
+                let document = documents.get(doc_id).cloned().ok_or_else(|| {
+                    DocstoreError::InvalidDocument(format!(
+                        "store-backed document missing for doc_id {doc_id}"
+                    ))
+                })?;
+                Ok((doc_id.clone(), document))
+            })
+            .collect()
+    }
+
+    fn payload_bytes<'a>(&'a self, entry: &StoreDocEntry) -> Result<&'a [u8], DocstoreError> {
+        read_section_bytes(
+            &self.bytes[self.payload_range.clone()],
+            entry.row.payload_offset,
+            entry.row.payload_length,
+            "payload",
+        )
+    }
 }
 
 impl Docstore {
@@ -576,17 +775,7 @@ impl Docstore {
                 }
                 Ok(documents)
             }
-            DocstoreSource::Store {
-                documents_by_id, ..
-            } => Ok(target_doc_ids
-                .iter()
-                .filter_map(|doc_id| {
-                    documents_by_id
-                        .get(doc_id)
-                        .cloned()
-                        .map(|document| (doc_id.clone(), document))
-                })
-                .collect()),
+            DocstoreSource::Store { segment } => segment.load_documents_by_id(target_doc_ids),
         }
     }
 
@@ -595,9 +784,7 @@ impl Docstore {
             DocstoreSource::DatasetPack { documents_path, .. } => {
                 load_document_ids_from_documents(documents_path)
             }
-            DocstoreSource::Store {
-                ordered_doc_ids, ..
-            } => Ok(ordered_doc_ids.clone()),
+            DocstoreSource::Store { segment } => Ok(segment.ordered_doc_ids.clone()),
         }
     }
 
@@ -607,7 +794,7 @@ impl Docstore {
                 let document_ids = self.load_document_ids()?;
                 DocIdMap::from_document_order(&document_ids)
             }
-            DocstoreSource::Store { doc_id_map, .. } => Ok(doc_id_map.clone()),
+            DocstoreSource::Store { segment } => Ok(segment.doc_id_map.clone()),
         }
     }
 
@@ -643,21 +830,7 @@ impl Docstore {
                     })
                     .collect::<Result<Vec<_>, DocstoreError>>()?
             }
-            DocstoreSource::Store {
-                ordered_doc_ids,
-                documents_by_id,
-                ..
-            } => ordered_doc_ids
-                .iter()
-                .map(|doc_id| {
-                    let document = documents_by_id.get(doc_id).cloned().ok_or_else(|| {
-                        DocstoreError::InvalidDocument(format!(
-                            "store-backed document missing for doc_id {doc_id}"
-                        ))
-                    })?;
-                    Ok((doc_id.clone(), document))
-                })
-                .collect::<Result<Vec<_>, DocstoreError>>()?,
+            DocstoreSource::Store { segment } => segment.ordered_documents()?,
         };
 
         let document_ids = ordered_documents
@@ -802,23 +975,8 @@ impl Docstore {
                     .collect::<Result<Vec<_>, DocstoreError>>()?;
                 build_binary_doc_segment_from_documents(ordered_documents, doc_id_map)
             }
-            DocstoreSource::Store {
-                ordered_doc_ids,
-                documents_by_id,
-                ..
-            } => {
-                let ordered_documents = ordered_doc_ids
-                    .iter()
-                    .map(|doc_id| {
-                        let document = documents_by_id.get(doc_id).cloned().ok_or_else(|| {
-                            DocstoreError::InvalidDocument(format!(
-                                "store-backed document missing for doc_id {doc_id}"
-                            ))
-                        })?;
-                        Ok((doc_id.clone(), document))
-                    })
-                    .collect::<Result<Vec<_>, DocstoreError>>()?;
-                build_binary_doc_segment_from_documents(ordered_documents, doc_id_map)
+            DocstoreSource::Store { segment } => {
+                build_binary_doc_segment_from_documents(segment.ordered_documents()?, doc_id_map)
             }
         }
     }
@@ -829,48 +987,10 @@ impl Docstore {
     ) -> Result<Self, DocstoreError> {
         let bytes = wax_v2_core::read_segment_object(store_path, descriptor)
             .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))?;
-        let segment = BinaryDocSegment::decode(&bytes)?;
-        let mut ordered_pairs = segment
-            .records
-            .into_iter()
-            .map(|record| {
-                let value: Value = serde_json::from_slice(&record.payload)?;
-                let object = value.as_object().ok_or_else(|| {
-                    DocstoreError::InvalidDocument("document line must be a json object".to_owned())
-                })?;
-                let external_doc_id = object
-                    .get("doc_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        DocstoreError::InvalidDocument(
-                            "store-backed document missing doc_id".to_owned(),
-                        )
-                    })?
-                    .to_owned();
-                Ok((
-                    record.row.doc_id,
-                    external_doc_id,
-                    Value::Object(object.clone()),
-                ))
-            })
-            .collect::<Result<Vec<_>, DocstoreError>>()?;
-        ordered_pairs.sort_by_key(|(wax_doc_id, _, _)| *wax_doc_id);
-
-        let ordered_doc_ids = ordered_pairs
-            .iter()
-            .map(|(_, external_doc_id, _)| external_doc_id.clone())
-            .collect::<Vec<_>>();
-        let documents_by_id = ordered_pairs
-            .into_iter()
-            .map(|(_, external_doc_id, document)| (external_doc_id, document))
-            .collect::<HashMap<_, _>>();
+        let segment = StoreDocSegment::open(bytes)?;
 
         Ok(Self {
-            source: DocstoreSource::Store {
-                ordered_doc_ids,
-                documents_by_id,
-                doc_id_map: segment.doc_id_map,
-            },
+            source: DocstoreSource::Store { segment },
         })
     }
 }
@@ -1035,7 +1155,7 @@ fn load_persisted_doc_id_map_from_store(store_path: &Path) -> Result<Option<DocI
     };
     let bytes = wax_v2_core::read_segment_object(store_path, descriptor)
         .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))?;
-    let segment = BinaryDocSegment::decode(&bytes)?;
+    let segment = StoreDocSegment::open(bytes)?;
     Ok(Some(segment.doc_id_map))
 }
 
@@ -1316,7 +1436,8 @@ mod tests {
 
     use crate::{
         parse_document_id, read_u64, sha256, BinaryDocSegment, DocIdBinding, DocIdMap, DocRow,
-        DocSegmentRecord, Docstore, DocstoreError, SectionRef, DOC_SEGMENT_HEADER_LENGTH,
+        DocSegmentRecord, Docstore, DocstoreError, DocstoreSource, SectionRef,
+        DOC_SEGMENT_HEADER_LENGTH,
     };
 
     #[test]
@@ -1518,6 +1639,38 @@ mod tests {
             vec!["doc-900", "doc-010"]
         );
         assert_eq!(documents["doc-010"]["text"], "second");
+    }
+
+    #[test]
+    fn open_store_segment_keeps_lazy_store_backing() {
+        let temp_dir = tempdir().unwrap();
+        let docs_path = temp_dir.path().join("docs.ndjson");
+        let offsets_path = temp_dir.path().join("document-offsets.jsonl");
+        let store_path = temp_dir.path().join("store.wax");
+        fs::write(
+            &docs_path,
+            concat!(
+                "{\"doc_id\":\"doc-900\",\"text\":\"first\",\"metadata\":{\"kind\":\"note\"}}\n",
+                "{\"doc_id\":\"doc-010\",\"text\":\"second\",\"metadata\":{\"kind\":\"task\"}}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(&offsets_path, "").unwrap();
+        create_empty_store(&store_path).unwrap();
+
+        let manifest = test_manifest(true);
+        let dataset_docstore = Docstore::open_dataset_pack(temp_dir.path(), &manifest).unwrap();
+        dataset_docstore.publish_to_store(&store_path).unwrap();
+        fs::remove_file(&docs_path).unwrap();
+        fs::remove_file(&offsets_path).unwrap();
+
+        let reopened = Docstore::open(temp_dir.path(), &manifest).unwrap();
+
+        assert!(matches!(
+            &reopened.source,
+            DocstoreSource::Store { segment }
+                if segment.ordered_doc_ids == vec!["doc-900".to_owned(), "doc-010".to_owned()]
+        ));
     }
 
     #[test]
