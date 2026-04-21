@@ -656,8 +656,9 @@ impl VectorLane {
         let mut reranked = Vec::with_capacity(neighbours.len());
         for neighbour in &neighbours {
             let index = neighbour.d_id;
-            let exact_score = dot_product_f32le(query, self.vector_bytes(index));
-            reranked.push((index, exact_score));
+            if let Some(hit) = self.checked_exact_hit(query, index) {
+                reranked.push(hit);
+            }
         }
 
         reranked.sort_by(|left, right| self.compare_hits(*left, *right));
@@ -759,8 +760,9 @@ impl VectorLane {
         let mut reranked = Vec::with_capacity(neighbours.len());
         for neighbour in neighbours {
             let index = neighbour.d_id;
-            let exact_score = dot_product_f32le(query, self.vector_bytes(index));
-            reranked.push((index, exact_score));
+            if let Some(hit) = self.checked_exact_hit(query, index) {
+                reranked.push(hit);
+            }
         }
 
         reranked.sort_by(|left, right| self.compare_hits(*left, *right));
@@ -805,6 +807,11 @@ impl VectorLane {
             .then_with(|| self.doc_id_bytes(left.0).cmp(self.doc_id_bytes(right.0)))
     }
 
+    fn checked_exact_hit(&self, query: &[f32], index: usize) -> Option<(usize, f32)> {
+        let exact_vector = self.checked_vector_bytes(index)?;
+        Some((index, dot_product_f32le(query, exact_vector)))
+    }
+
     fn doc_id(&self, index: usize) -> &str {
         std::str::from_utf8(self.doc_id_bytes(index)).expect("validated vector lane skeleton")
     }
@@ -823,6 +830,16 @@ impl VectorLane {
         let start = index * row_length;
         let end = start + row_length;
         &self.doc_vectors.as_slice()[start..end]
+    }
+
+    fn checked_vector_bytes(&self, index: usize) -> Option<&[u8]> {
+        if index >= self.skeleton_header.doc_count as usize {
+            return None;
+        }
+        let row_length = self.dimensions.checked_mul(4)?;
+        let start = index.checked_mul(row_length)?;
+        let end = start.checked_add(row_length)?;
+        self.doc_vectors.as_slice().get(start..end)
     }
 
     fn preview_limit(&self, limit: usize) -> usize {
@@ -932,13 +949,20 @@ fn resolve_store_vector_segment(mount_root: &Path) -> Result<Option<StoreVectorS
     }))
 }
 
-fn store_has_manifest_visible_family(mount_root: &Path, family: SegmentKind) -> Result<bool, String> {
+fn store_has_manifest_visible_family(
+    mount_root: &Path,
+    family: SegmentKind,
+) -> Result<bool, String> {
     let store_path = mount_root.join("store.wax");
     if !store_path.exists() {
         return Ok(false);
     }
     let opened = wax_v2_core::open_store(&store_path).map_err(|error| error.to_string())?;
-    Ok(opened.manifest.segments.iter().any(|segment| segment.family == family))
+    Ok(opened
+        .manifest
+        .segments
+        .iter()
+        .any(|segment| segment.family == family))
 }
 
 fn load_vector_segment(
@@ -2038,6 +2062,39 @@ mod tests {
         };
 
         assert!(error.contains("stale"));
+    }
+
+    #[test]
+    fn checked_vector_bytes_returns_none_for_out_of_range_hnsw_ids() {
+        let temp_dir = tempdir().unwrap();
+        fs::write(
+            temp_dir.path().join("document_ids.txt"),
+            concat!("{\"doc_id\":\"doc-1\"}\n", "{\"doc_id\":\"doc-2\"}\n",),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("document_vectors.bin"),
+            bytemuck::cast_slice::<f32, u8>(&[
+                1.0f32, 0.0f32, //
+                0.0f32, 1.0f32, //
+            ]),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("query_vectors.jsonl"),
+            "{\"query_id\":\"q-001\",\"top_k\":2,\"vector\":[1.0,0.0],\"lane_eligibility\":{\"text\":false,\"vector\":true,\"hybrid\":false}}\n",
+        )
+        .unwrap();
+
+        let lane = VectorLane::load(
+            temp_dir.path(),
+            &test_manifest_with_count(2, false, false),
+            VectorQueryMode::ExactFlat,
+        )
+        .unwrap();
+
+        assert!(lane.checked_vector_bytes(2).is_none());
+        assert!(lane.checked_exact_hit(&[1.0, 0.0], 2).is_none());
     }
 
     #[test]

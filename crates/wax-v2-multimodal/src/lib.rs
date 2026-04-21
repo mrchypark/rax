@@ -1,6 +1,6 @@
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -266,9 +266,6 @@ impl MultimodalIngestSession {
             )));
         }
 
-        let bytes = fs::read(&new_asset.source_path).map_err(io_error)?;
-        let byte_length = bytes.len() as u64;
-        let sha256_hex = sha256_hex(&bytes);
         let original_file_name = new_asset
             .source_path
             .file_name()
@@ -279,6 +276,13 @@ impl MultimodalIngestSession {
                 )
             })?
             .to_owned();
+        let temp_relative_path = format!(
+            "{MULTIMODAL_ASSET_DIR_NAME}/{}.importing",
+            sanitize_asset_id(&new_asset.asset_id)
+        );
+        let temp_absolute_path = self.root.join(&temp_relative_path);
+        let (byte_length, sha256_hex) =
+            copy_asset_and_hash(&new_asset.source_path, &temp_absolute_path)?;
         let stored_file_name = format!(
             "{}-{}{}",
             sanitize_asset_id(&new_asset.asset_id),
@@ -287,7 +291,7 @@ impl MultimodalIngestSession {
         );
         let stored_relative_path = format!("{MULTIMODAL_ASSET_DIR_NAME}/{stored_file_name}");
         let stored_absolute_path = self.root.join(&stored_relative_path);
-        fs::write(&stored_absolute_path, &bytes).map_err(io_error)?;
+        fs::rename(&temp_absolute_path, &stored_absolute_path).map_err(io_error)?;
 
         let asset = MultimodalAsset {
             asset_id: new_asset.asset_id,
@@ -469,16 +473,39 @@ fn file_extension_suffix(path: &Path) -> String {
         .unwrap_or_else(|| ".bin".to_owned())
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
+fn sha256_digest_hex(digest: &[u8]) -> String {
     let mut hex = String::with_capacity(digest.len() * 2);
     for byte in digest {
         hex.push(hex_nibble(byte >> 4));
         hex.push(hex_nibble(byte & 0x0f));
     }
     hex
+}
+
+fn copy_asset_and_hash(
+    source_path: &Path,
+    destination_path: &Path,
+) -> Result<(u64, String), MultimodalError> {
+    let mut source = std::fs::File::open(source_path).map_err(io_error)?;
+    let mut destination = std::fs::File::create(destination_path).map_err(io_error)?;
+    let mut hasher = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+
+    loop {
+        let read = source.read(&mut buffer).map_err(io_error)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        destination.write_all(&buffer[..read]).map_err(io_error)?;
+        total = total.checked_add(read as u64).ok_or_else(|| {
+            MultimodalError::InvalidRequest("multimodal asset length overflow".to_owned())
+        })?;
+    }
+    destination.flush().map_err(io_error)?;
+
+    Ok((total, sha256_digest_hex(hasher.finalize().as_slice())))
 }
 
 fn photo_asset_from_multimodal(asset: &MultimodalAsset) -> PhotoAsset {
@@ -523,11 +550,13 @@ fn json_error(error: serde_json::Error) -> MultimodalError {
 
 #[cfg(test)]
 mod tests {
+    use sha2::{Digest, Sha256};
     use tempfile::tempdir;
 
     use super::{
-        BootstrapImageMetadata, BootstrapVideoMetadata, MultimodalAssetKind, MultimodalAssetQuery,
-        MultimodalIngestSession, NewMultimodalAssetImport, PhotoAssetQuery, VideoAssetQuery,
+        sha256_digest_hex, BootstrapImageMetadata, BootstrapVideoMetadata, MultimodalAssetKind,
+        MultimodalAssetQuery, MultimodalIngestSession, NewMultimodalAssetImport, PhotoAssetQuery,
+        VideoAssetQuery,
     };
 
     #[test]
@@ -550,6 +579,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(imported.byte_length, 4);
+        let expected_sha = sha256_digest_hex(&Sha256::digest([1_u8, 2, 3, 4]));
+        assert_eq!(imported.sha256_hex, expected_sha);
         session.close().unwrap();
 
         let mut reopened = MultimodalIngestSession::open(root.path()).unwrap();

@@ -4,6 +4,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::Path;
 
+use fs2::FileExt;
 use memmap2::{Mmap, MmapOptions};
 use sha2::{Digest, Sha256};
 
@@ -511,6 +512,10 @@ pub fn create_empty_store(path: &Path) -> Result<(), CoreError> {
 
 pub fn open_store(path: &Path) -> Result<OpenedStore, CoreError> {
     let mut file = OpenOptions::new().read(true).open(path)?;
+    open_store_from_file(&mut file)
+}
+
+fn open_store_from_file(mut file: &mut OpenOptionsFile) -> Result<OpenedStore, CoreError> {
     let file_length = file.seek(SeekFrom::End(0))?;
     if file_length < (SUPERBLOCK_SIZE * 2) as u64 {
         return Err(CoreError::UnexpectedLength {
@@ -565,14 +570,15 @@ pub fn publish_segments(
         ));
     }
 
-    let opened = open_store(path)?;
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    file.try_lock_exclusive()?;
+
+    let opened = open_store_from_file(&mut file)?;
     let new_generation = opened
         .manifest
         .generation
         .checked_add(1)
         .ok_or_else(|| CoreError::InvalidManifest("manifest generation overflow".to_owned()))?;
-
-    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
     let mut segments = opened.manifest.segments.clone();
     for pending_segment in pending_segments {
         let object_type = object_type_for_family(pending_segment.descriptor.family);
@@ -631,7 +637,7 @@ pub fn publish_segments(
     file.flush()?;
     file.sync_all()?;
 
-    open_store(path)
+    open_store_from_file(&mut file)
 }
 
 pub fn read_segment_object(
@@ -641,6 +647,12 @@ pub fn read_segment_object(
     Ok(map_segment_object(path, descriptor)?.to_vec())
 }
 
+/// Maps a persisted segment object and returns a validated payload view.
+///
+/// Safety invariant: callers only receive a shared payload view after this function has
+/// validated that the descriptor range stays within the current file length and that the mapped
+/// payload checksum matches the manifest descriptor. The underlying file must still not be
+/// externally truncated or rewritten in place while the returned mapping is alive.
 pub fn map_segment_object(
     path: &Path,
     descriptor: &SegmentDescriptor,
@@ -911,6 +923,9 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::OpenOptions;
+
+    use fs2::FileExt;
     use tempfile::tempdir;
 
     use crate::{
@@ -1329,5 +1344,40 @@ mod tests {
         let bytes = std::fs::read(&path).expect("read padding");
         assert_eq!(bytes.len() as u64, DEFAULT_OBJECT_ALIGNMENT * 3 + 17);
         assert!(bytes.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn publish_segments_holds_exclusive_file_lock_while_mutating_store() {
+        let temp_dir = tempdir().expect("tempdir");
+        let path = temp_dir.path().join("locked.wax");
+        create_empty_store(&path).expect("create store");
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open store");
+        file.lock_exclusive().expect("take exclusive lock");
+
+        let error = publish_segment(
+            &path,
+            PendingSegmentDescriptor {
+                family: SegmentKind::Doc,
+                family_version: 1,
+                flags: 0,
+                doc_id_start: 0,
+                doc_id_end_exclusive: 1,
+                min_timestamp_ms: 0,
+                max_timestamp_ms: 0,
+                live_items: 1,
+                tombstoned_items: 0,
+                backend_id: 0,
+                backend_aux: 0,
+            },
+            b"locked-segment",
+        )
+        .expect_err("publish should fail while another writer holds the lock");
+
+        assert!(matches!(error, CoreError::Io(_)));
     }
 }
