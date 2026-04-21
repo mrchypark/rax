@@ -307,8 +307,8 @@ pub fn validate_store_segment_against_dataset_pack(
         return Ok(());
     };
 
-    let bytes =
-        wax_v2_core::map_segment_object(&store_path, descriptor).map_err(|error| error.to_string())?;
+    let bytes = wax_v2_core::map_segment_object(&store_path, descriptor)
+        .map_err(|error| error.to_string())?;
     let persisted_segment = BinaryTextSegment::decode(&bytes)?;
     let documents = load_documents_for_text_builder(&documents_path)?;
     let expected_segment = BinaryTextSegment::from_documents(&documents);

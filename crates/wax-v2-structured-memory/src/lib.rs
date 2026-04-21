@@ -487,8 +487,7 @@ fn validate_entity_inputs(entity: &NewStructuredEntity) -> Result<(), Structured
 fn validate_fact_inputs(fact: &NewStructuredFact) -> Result<(), StructuredMemoryError> {
     if is_reserved_entity_predicate(fact.predicate.as_str()) {
         return Err(StructuredMemoryError::InvalidRequest(
-            "structured memory fact predicate is reserved for entity bootstrap metadata"
-                .to_owned(),
+            "structured memory fact predicate is reserved for entity bootstrap metadata".to_owned(),
         ));
     }
 

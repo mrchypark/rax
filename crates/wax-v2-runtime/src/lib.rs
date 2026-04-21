@@ -216,7 +216,7 @@ impl RuntimeStore {
         }
         wax_v2_core::create_empty_store(&store_path)
             .map_err(|error| RuntimeError::Storage(error.to_string()))?;
-        Self::open_from_manifest(root, manifest)
+        Self::open_created_store(root, manifest, &store_path)
     }
 
     pub fn open(root: &Path) -> Result<Self, RuntimeError> {
@@ -257,6 +257,20 @@ impl RuntimeStore {
             vector_lane: None,
             closed: false,
         })
+    }
+
+    fn open_created_store(
+        root: &Path,
+        manifest: DatasetPackManifest,
+        store_path: &Path,
+    ) -> Result<Self, RuntimeError> {
+        match Self::open_from_manifest(root, manifest) {
+            Ok(store) => Ok(store),
+            Err(error) => {
+                let _ = fs::remove_file(store_path);
+                Err(error)
+            }
+        }
     }
 
     pub fn search(
@@ -435,8 +449,7 @@ impl RuntimeStoreWriter<'_> {
             wax_v2_text::prepare_text_segment_from_documents(&text_inputs)
                 .map_err(RuntimeError::Storage)?,
         ];
-        let mut published_families =
-            vec![RuntimePublishFamily::Doc, RuntimePublishFamily::Text];
+        let mut published_families = vec![RuntimePublishFamily::Doc, RuntimePublishFamily::Text];
 
         if let Some(vectors) = vectors {
             if vectors.is_empty() {
@@ -467,7 +480,7 @@ impl RuntimeStoreWriter<'_> {
             if !missing.is_empty() {
                 return Err(RuntimeError::InvalidRequest(format!(
                     "publish_raw_snapshot vectors require matching documents for all doc_ids; missing: {}",
-                    missing.join(", ")
+                    summarize_doc_ids(&missing)
                 )));
             }
 
@@ -495,16 +508,16 @@ impl RuntimeStoreWriter<'_> {
         })
     }
 
-    pub fn publish_staged_compatibility_snapshot(self) -> Result<RuntimePublishReport, RuntimeError> {
+    pub fn publish_staged_compatibility_snapshot(
+        self,
+    ) -> Result<RuntimePublishReport, RuntimeError> {
         let documents = load_compatibility_raw_documents(&self.store.root, &self.store.manifest)?;
-        let vectors = wax_v2_vector::load_compatibility_raw_vectors(
-            &self.store.root,
-            &self.store.manifest,
-        )
-        .map_err(RuntimeError::Storage)?
-        .into_iter()
-        .map(|(doc_id, values)| NewDocumentVector::new(doc_id, values))
-        .collect::<Vec<_>>();
+        let vectors =
+            wax_v2_vector::load_compatibility_raw_vectors(&self.store.root, &self.store.manifest)
+                .map_err(RuntimeError::Storage)?
+                .into_iter()
+                .map(|(doc_id, values)| NewDocumentVector::new(doc_id, values))
+                .collect::<Vec<_>>();
         self.publish_raw_snapshot(documents, Some(vectors))
     }
 
@@ -642,6 +655,23 @@ fn reject_duplicate_doc_ids<'a>(
     }
 }
 
+fn summarize_doc_ids(doc_ids: &[String]) -> String {
+    const MAX_SHOWN: usize = 5;
+
+    let shown = doc_ids
+        .iter()
+        .take(MAX_SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remaining = doc_ids.len().saturating_sub(MAX_SHOWN);
+    if remaining == 0 {
+        shown
+    } else {
+        format!("{shown} (+{remaining} more)")
+    }
+}
+
 fn load_compatibility_raw_documents(
     mount_root: &Path,
     manifest: &DatasetPackManifest,
@@ -653,8 +683,7 @@ fn load_compatibility_raw_documents(
         .map(|file| mount_root.join(&file.path))
         .ok_or_else(|| RuntimeError::Storage("documents file missing from manifest".to_owned()))?;
     BufReader::new(
-        File::open(&documents_path)
-            .map_err(|error| RuntimeError::Storage(error.to_string()))?,
+        File::open(&documents_path).map_err(|error| RuntimeError::Storage(error.to_string()))?,
     )
     .lines()
     .filter_map(|line| match line {
@@ -663,11 +692,11 @@ fn load_compatibility_raw_documents(
     })
     .map(|line| {
         let line = line.map_err(|error| RuntimeError::Storage(error.to_string()))?;
-        let value: serde_json::Value =
-            serde_json::from_str(&line).map_err(|error| RuntimeError::Storage(error.to_string()))?;
-        let object = value
-            .as_object()
-            .ok_or_else(|| RuntimeError::Storage("document line must be a json object".to_owned()))?;
+        let value: serde_json::Value = serde_json::from_str(&line)
+            .map_err(|error| RuntimeError::Storage(error.to_string()))?;
+        let object = value.as_object().ok_or_else(|| {
+            RuntimeError::Storage("document line must be a json object".to_owned())
+        })?;
         let mut document = NewDocument::new(
             object
                 .get("doc_id")
@@ -746,10 +775,9 @@ mod tests {
     use wax_v2_vector::publish_compatibility_vector_segment;
 
     use crate::{
-        NewDocument, NewDocumentVector,
-        RuntimeAccelerationAvailability, RuntimeAccelerationPreference, RuntimeExecutionBackend,
-        RuntimePlatformAccelerationFamily, RuntimePublishFamily, RuntimeSearchMode,
-        RuntimeSearchRequest, RuntimeStore,
+        read_manifest, NewDocument, NewDocumentVector, RuntimeAccelerationAvailability,
+        RuntimeAccelerationPreference, RuntimeExecutionBackend, RuntimePlatformAccelerationFamily,
+        RuntimePublishFamily, RuntimeSearchMode, RuntimeSearchRequest, RuntimeStore,
     };
 
     #[test]
@@ -877,6 +905,34 @@ mod tests {
     }
 
     #[test]
+    fn runtime_store_create_removes_store_when_initialization_fails() {
+        let dataset_dir = tempdir().unwrap();
+        let source_dir = tempdir().unwrap();
+        let docs_path = source_dir.path().join("docs.ndjson");
+        fs::write(&docs_path, "{\"doc_id\":\"doc-001\",\"text\":\"alpha\"}\n").unwrap();
+        pack_adhoc_dataset(&AdhocPackRequest::new(
+            &docs_path,
+            dataset_dir.path(),
+            "small",
+        ))
+        .unwrap();
+        let manifest = read_manifest(dataset_dir.path()).unwrap();
+        let store_path = dataset_dir.path().join("store.wax");
+        fs::write(&store_path, b"not-a-valid-store").unwrap();
+
+        let error =
+            match RuntimeStore::open_created_store(dataset_dir.path(), manifest, &store_path) {
+                Ok(_) => {
+                    panic!("create cleanup path should fail when reopen cannot validate store")
+                }
+                Err(error) => error,
+            };
+
+        assert!(matches!(error, crate::RuntimeError::Storage(_)));
+        assert!(!store_path.exists());
+    }
+
+    #[test]
     fn publish_raw_snapshot_rejects_duplicate_document_doc_ids() {
         let dataset_dir = tempdir().unwrap();
         let source_dir = tempdir().unwrap();
@@ -889,8 +945,12 @@ mod tests {
             ),
         )
         .unwrap();
-        pack_adhoc_dataset(&AdhocPackRequest::new(&docs_path, dataset_dir.path(), "small"))
-            .unwrap();
+        pack_adhoc_dataset(&AdhocPackRequest::new(
+            &docs_path,
+            dataset_dir.path(),
+            "small",
+        ))
+        .unwrap();
 
         let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
         let error = runtime
@@ -923,8 +983,12 @@ mod tests {
             ),
         )
         .unwrap();
-        pack_adhoc_dataset(&AdhocPackRequest::new(&docs_path, dataset_dir.path(), "small"))
-            .unwrap();
+        pack_adhoc_dataset(&AdhocPackRequest::new(
+            &docs_path,
+            dataset_dir.path(),
+            "small",
+        ))
+        .unwrap();
 
         let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
         let error = runtime
@@ -948,6 +1012,64 @@ mod tests {
     }
 
     #[test]
+    fn publish_raw_snapshot_truncates_missing_vector_doc_ids_in_error_message() {
+        let dataset_dir = tempdir().unwrap();
+        let source_dir = tempdir().unwrap();
+        let docs_path = source_dir.path().join("docs.ndjson");
+        fs::write(
+            &docs_path,
+            concat!(
+                "{\"doc_id\":\"doc-001\",\"text\":\"alpha\"}\n",
+                "{\"doc_id\":\"doc-002\",\"text\":\"beta\"}\n",
+                "{\"doc_id\":\"doc-003\",\"text\":\"gamma\"}\n",
+                "{\"doc_id\":\"doc-004\",\"text\":\"delta\"}\n",
+                "{\"doc_id\":\"doc-005\",\"text\":\"epsilon\"}\n",
+                "{\"doc_id\":\"doc-006\",\"text\":\"zeta\"}\n",
+            ),
+        )
+        .unwrap();
+        pack_adhoc_dataset(&AdhocPackRequest::new(
+            &docs_path,
+            dataset_dir.path(),
+            "small",
+        ))
+        .unwrap();
+
+        let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
+        let error = runtime
+            .writer()
+            .unwrap()
+            .publish_raw_snapshot(
+                vec![
+                    NewDocument::new("doc-001", "alpha"),
+                    NewDocument::new("doc-002", "beta"),
+                    NewDocument::new("doc-003", "gamma"),
+                    NewDocument::new("doc-004", "delta"),
+                    NewDocument::new("doc-005", "epsilon"),
+                    NewDocument::new("doc-006", "zeta"),
+                ],
+                Some(vec![
+                    NewDocumentVector::new("missing-001", embed_text("alpha", 384)),
+                    NewDocumentVector::new("missing-002", embed_text("beta", 384)),
+                    NewDocumentVector::new("missing-003", embed_text("gamma", 384)),
+                    NewDocumentVector::new("missing-004", embed_text("delta", 384)),
+                    NewDocumentVector::new("missing-005", embed_text("epsilon", 384)),
+                    NewDocumentVector::new("missing-006", embed_text("zeta", 384)),
+                ]),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::RuntimeError::InvalidRequest(message)
+                if message.contains("missing-001")
+                    && message.contains("missing-005")
+                    && message.contains("(+1 more)")
+                    && !message.contains("missing-006")
+        ));
+    }
+
+    #[test]
     fn publish_raw_vectors_counts_only_active_documents() {
         let dataset_dir = tempdir().unwrap();
         let source_dir = tempdir().unwrap();
@@ -960,8 +1082,12 @@ mod tests {
             ),
         )
         .unwrap();
-        pack_adhoc_dataset(&AdhocPackRequest::new(&docs_path, dataset_dir.path(), "small"))
-            .unwrap();
+        pack_adhoc_dataset(&AdhocPackRequest::new(
+            &docs_path,
+            dataset_dir.path(),
+            "small",
+        ))
+        .unwrap();
 
         let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
         runtime
@@ -994,7 +1120,10 @@ mod tests {
             )])
             .unwrap();
 
-        assert_eq!(report.published_families, vec![RuntimePublishFamily::Vector]);
+        assert_eq!(
+            report.published_families,
+            vec![RuntimePublishFamily::Vector]
+        );
     }
 
     #[test]
@@ -1025,12 +1154,18 @@ mod tests {
         let selection =
             RuntimeStore::resolve_acceleration(RuntimeAccelerationPreference::PreferPlatform);
 
-        assert_eq!(selection.preference, RuntimeAccelerationPreference::PreferPlatform);
+        assert_eq!(
+            selection.preference,
+            RuntimeAccelerationPreference::PreferPlatform
+        );
         assert_eq!(
             selection.requested_family,
             Some(RuntimePlatformAccelerationFamily::Apple)
         );
-        assert_eq!(selection.chosen_backend, RuntimeExecutionBackend::RustDefault);
+        assert_eq!(
+            selection.chosen_backend,
+            RuntimeExecutionBackend::RustDefault
+        );
         assert!(selection.fallback_reason.as_deref().unwrap_or("").len() > 0);
     }
 }

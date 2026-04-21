@@ -206,14 +206,14 @@ pub fn query_text_preview(
     query_text: &str,
     top_k: usize,
 ) -> Result<Vec<TextQueryHit>, String> {
-        let manifest_text = fs::read_to_string(dataset_path.join("manifest.json"))
-            .map_err(|error| error.to_string())?;
-        let manifest: DatasetPackManifest =
-            serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
-        validate_store_segments_against_dataset_pack(dataset_path, &manifest)?;
-        let text_lane = TextLane::load(dataset_path, &manifest)?;
-        let doc_ids = text_lane.search_with_limit(query_text, top_k);
-        let docstore = open_docstore(dataset_path, &manifest)?;
+    let manifest_text = fs::read_to_string(dataset_path.join("manifest.json"))
+        .map_err(|error| error.to_string())?;
+    let manifest: DatasetPackManifest =
+        serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
+    validate_store_segments_against_dataset_pack(dataset_path, &manifest)?;
+    let text_lane = TextLane::load(dataset_path, &manifest)?;
+    let doc_ids = text_lane.search_with_limit(query_text, top_k);
+    let docstore = open_docstore(dataset_path, &manifest)?;
     let documents = load_documents_by_id(&docstore, &doc_ids)?;
     doc_ids
         .into_iter()
@@ -243,13 +243,13 @@ pub fn query_batch_ranked_results(
     query_set_path: &Path,
     vector_mode: VectorQueryMode,
 ) -> Result<Vec<RankedQueryResult>, String> {
-        let manifest_text = fs::read_to_string(dataset_path.join("manifest.json"))
-            .map_err(|error| error.to_string())?;
-        let manifest: DatasetPackManifest =
-            serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
-        validate_store_segments_against_dataset_pack(dataset_path, &manifest)?;
-        let text_lane = TextLane::load(dataset_path, &manifest)?;
-        let mut vector_lane = VectorLane::load(dataset_path, &manifest, vector_mode)?;
+    let manifest_text = fs::read_to_string(dataset_path.join("manifest.json"))
+        .map_err(|error| error.to_string())?;
+    let manifest: DatasetPackManifest =
+        serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
+    validate_store_segments_against_dataset_pack(dataset_path, &manifest)?;
+    let text_lane = TextLane::load(dataset_path, &manifest)?;
+    let mut vector_lane = VectorLane::load(dataset_path, &manifest, vector_mode)?;
     let queries = TextBatchQuery::load_jsonl(query_set_path)?;
     let filter_candidate_limit = manifest.corpus.doc_count as usize;
     let query_vectors = load_query_vector_records(&queries, vector_lane.dimensions)?;

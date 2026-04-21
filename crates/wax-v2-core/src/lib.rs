@@ -329,7 +329,6 @@ fn validate_segments(segments: &[SegmentDescriptor]) -> Result<(), CoreError> {
                     .to_owned(),
             ));
         }
-
     }
 
     let mut by_offset = segments.iter().collect::<Vec<_>>();
@@ -642,7 +641,10 @@ pub fn read_segment_object(
     Ok(map_segment_object(path, descriptor)?.to_vec())
 }
 
-pub fn map_segment_object(path: &Path, descriptor: &SegmentDescriptor) -> Result<SegmentObject, CoreError> {
+pub fn map_segment_object(
+    path: &Path,
+    descriptor: &SegmentDescriptor,
+) -> Result<SegmentObject, CoreError> {
     let mut file = OpenOptions::new().read(true).open(path)?;
     let file_length = file.seek(SeekFrom::End(0))?;
     let object_end = descriptor
@@ -656,8 +658,8 @@ pub fn map_segment_object(path: &Path, descriptor: &SegmentDescriptor) -> Result
     }
 
     let mapped = unsafe { MmapOptions::new().map(&file)? };
-    let object_range =
-        descriptor.object_offset as usize..(descriptor.object_offset + descriptor.object_length) as usize;
+    let object_range = descriptor.object_offset as usize
+        ..(descriptor.object_offset + descriptor.object_length) as usize;
     let payload_range = decode_object_payload_range(
         &mapped[object_range.clone()],
         object_type_for_family(descriptor.family),
@@ -765,10 +767,14 @@ fn write_zero_padding(file: &mut OpenOptionsFile, target_offset: u64) -> Result<
             "target offset moved backwards".to_owned(),
         ));
     }
-    let padding = (target_offset - current_offset) as usize;
+    let mut padding = (target_offset - current_offset) as usize;
     if padding > 0 {
         let zeroes = [0u8; DEFAULT_OBJECT_ALIGNMENT as usize];
-        file.write_all(&zeroes[..padding])?;
+        while padding > 0 {
+            let chunk = padding.min(zeroes.len());
+            file.write_all(&zeroes[..chunk])?;
+            padding -= chunk;
+        }
     }
     Ok(())
 }
@@ -797,8 +803,12 @@ fn encode_object(
     alignment: u64,
     payload: &[u8],
 ) -> Vec<u8> {
-    let mut bytes =
-        Vec::from(encode_object_header(object_type, logical_generation, alignment, payload));
+    let mut bytes = Vec::from(encode_object_header(
+        object_type,
+        logical_generation,
+        alignment,
+        payload,
+    ));
     bytes.extend_from_slice(payload);
     bytes
 }
@@ -904,9 +914,9 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        create_empty_store, open_store, publish_segment, read_segment_object, ActiveManifest,
-        CoreError, PendingSegmentDescriptor, SegmentDescriptor, SegmentKind, Superblock,
-        OBJECT_HEADER_LENGTH, OBJECT_MAGIC, SUPERBLOCK_SIZE,
+        create_empty_store, open_store, publish_segment, read_segment_object, write_zero_padding,
+        ActiveManifest, CoreError, PendingSegmentDescriptor, SegmentDescriptor, SegmentKind,
+        Superblock, DEFAULT_OBJECT_ALIGNMENT, OBJECT_HEADER_LENGTH, OBJECT_MAGIC, SUPERBLOCK_SIZE,
     };
 
     #[test]
@@ -1300,5 +1310,24 @@ mod tests {
             CoreError::InvalidManifest(message)
                 if message.contains("must not overlap")
         ));
+    }
+
+    #[test]
+    fn write_zero_padding_handles_targets_larger_than_default_alignment() {
+        let temp_dir = tempdir().expect("tempdir");
+        let path = temp_dir.path().join("padding.bin");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open file");
+
+        write_zero_padding(&mut file, DEFAULT_OBJECT_ALIGNMENT * 3 + 17).expect("write padding");
+
+        let bytes = std::fs::read(&path).expect("read padding");
+        assert_eq!(bytes.len() as u64, DEFAULT_OBJECT_ALIGNMENT * 3 + 17);
+        assert!(bytes.iter().all(|byte| *byte == 0));
     }
 }

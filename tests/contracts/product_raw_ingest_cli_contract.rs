@@ -50,11 +50,7 @@ fn product_cli_ingests_documents_and_vectors_through_explicit_raw_commands() {
     )
     .unwrap();
 
-    run_wax(&[
-        "create",
-        "--root",
-        dataset_dir.path().to_str().unwrap(),
-    ]);
+    run_wax(&["create", "--root", dataset_dir.path().to_str().unwrap()]);
     run_wax(&[
         "ingest",
         "docs",

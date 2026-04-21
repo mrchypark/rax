@@ -47,7 +47,12 @@ fn raw_full_snapshot_publish_matches_compatibility_import_semantics_for_equivale
     )
     .unwrap();
 
-    pack_adhoc_dataset(&AdhocPackRequest::new(&docs_path, compat_root.path(), "small")).unwrap();
+    pack_adhoc_dataset(&AdhocPackRequest::new(
+        &docs_path,
+        compat_root.path(),
+        "small",
+    ))
+    .unwrap();
     pack_adhoc_dataset(&AdhocPackRequest::new(&docs_path, raw_root.path(), "small")).unwrap();
 
     let mut compat_runtime = RuntimeStore::create(compat_root.path()).unwrap();

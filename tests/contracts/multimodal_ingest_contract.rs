@@ -9,7 +9,11 @@ use wax_v2_multimodal::{
 fn multimodal_ingest_session_imports_image_asset_with_stable_descriptor() {
     let dataset_dir = tempdir().unwrap();
     let image_path = dataset_dir.path().join("hero.png");
-    fs::write(&image_path, [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]).unwrap();
+    fs::write(
+        &image_path,
+        [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a],
+    )
+    .unwrap();
 
     let mut session = MultimodalIngestSession::open(dataset_dir.path()).unwrap();
     let asset = session
@@ -29,7 +33,10 @@ fn multimodal_ingest_session_imports_image_asset_with_stable_descriptor() {
     assert_eq!(asset.kind, MultimodalAssetKind::Image);
     assert_eq!(asset.media_type.as_deref(), Some("image/png"));
     assert_eq!(asset.byte_length, 8);
-    assert!(dataset_dir.path().join(&asset.stored_relative_path).exists());
+    assert!(dataset_dir
+        .path()
+        .join(&asset.stored_relative_path)
+        .exists());
 }
 
 #[test]

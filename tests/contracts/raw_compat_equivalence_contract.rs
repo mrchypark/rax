@@ -55,12 +55,8 @@ fn raw_and_compatibility_ingest_produce_equivalent_runtime_results_for_the_same_
         "small",
     ))
     .unwrap();
-    let raw_manifest = pack_adhoc_dataset(&AdhocPackRequest::new(
-        &docs_path,
-        raw_root.path(),
-        "small",
-    ))
-    .unwrap();
+    let raw_manifest =
+        pack_adhoc_dataset(&AdhocPackRequest::new(&docs_path, raw_root.path(), "small")).unwrap();
 
     let mut compat_runtime = RuntimeStore::create(compat_root.path()).unwrap();
     compat_runtime
@@ -95,7 +91,14 @@ fn raw_and_compatibility_ingest_produce_equivalent_runtime_results_for_the_same_
     raw_runtime.close().unwrap();
 
     for root in [compat_root.path(), raw_root.path()] {
-        remove_sidecars(root, if root == compat_root.path() { &compat_manifest } else { &raw_manifest });
+        remove_sidecars(
+            root,
+            if root == compat_root.path() {
+                &compat_manifest
+            } else {
+                &raw_manifest
+            },
+        );
     }
 
     let compat_docstore = Docstore::open(compat_root.path(), &compat_manifest).unwrap();

@@ -74,8 +74,14 @@ fn photorag_reads_bootstrap_image_metadata_after_reopen() {
 
     assert_eq!(photo_asset.asset_id, "image:poster");
     assert_eq!(photo_asset.media_type.as_deref(), Some("image/jpeg"));
-    assert_eq!(photo_asset.image_metadata.as_ref().unwrap().width_px, Some(1600));
-    assert_eq!(photo_asset.image_metadata.as_ref().unwrap().height_px, Some(900));
+    assert_eq!(
+        photo_asset.image_metadata.as_ref().unwrap().width_px,
+        Some(1600)
+    );
+    assert_eq!(
+        photo_asset.image_metadata.as_ref().unwrap().height_px,
+        Some(900)
+    );
     assert_eq!(
         photo_asset.image_metadata.as_ref().unwrap().captured_at_ms,
         Some(1_717_171_700_000)

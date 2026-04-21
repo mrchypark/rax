@@ -66,7 +66,10 @@ fn mcp_surface_ingests_documents_and_vectors_through_explicit_raw_requests() {
             published_families,
         } => {
             assert_eq!(generation, 1);
-            assert_eq!(published_families, vec!["doc".to_owned(), "text".to_owned()]);
+            assert_eq!(
+                published_families,
+                vec!["doc".to_owned(), "text".to_owned()]
+            );
         }
         other => panic!("unexpected doc ingest response: {other:?}"),
     }

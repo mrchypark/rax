@@ -73,8 +73,7 @@ pub struct McpSearchHit {
     pub preview: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpErrorCode {
     InvalidRequest,

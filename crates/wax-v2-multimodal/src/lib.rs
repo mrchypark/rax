@@ -255,7 +255,11 @@ impl MultimodalIngestSession {
         self.ensure_open()?;
         validate_import_request(&new_asset)?;
 
-        if self.assets.iter().any(|asset| asset.asset_id == new_asset.asset_id) {
+        if self
+            .assets
+            .iter()
+            .any(|asset| asset.asset_id == new_asset.asset_id)
+        {
             return Err(MultimodalError::InvalidRequest(format!(
                 "multimodal asset id already exists: {}",
                 new_asset.asset_id
@@ -281,8 +285,7 @@ impl MultimodalIngestSession {
             &sha256_hex[..12],
             file_extension_suffix(&new_asset.source_path)
         );
-        let stored_relative_path =
-            format!("{MULTIMODAL_ASSET_DIR_NAME}/{stored_file_name}");
+        let stored_relative_path = format!("{MULTIMODAL_ASSET_DIR_NAME}/{stored_file_name}");
         let stored_absolute_path = self.root.join(&stored_relative_path);
         fs::write(&stored_absolute_path, &bytes).map_err(io_error)?;
 
@@ -329,7 +332,9 @@ impl MultimodalIngestSession {
         Ok(self
             .assets
             .iter()
-            .find(|asset| asset.asset_id == query.asset_id && asset.kind == MultimodalAssetKind::Image)
+            .find(|asset| {
+                asset.asset_id == query.asset_id && asset.kind == MultimodalAssetKind::Image
+            })
             .map(photo_asset_from_multimodal))
     }
 
@@ -351,7 +356,9 @@ impl MultimodalIngestSession {
         Ok(self
             .assets
             .iter()
-            .find(|asset| asset.asset_id == query.asset_id && asset.kind == MultimodalAssetKind::Video)
+            .find(|asset| {
+                asset.asset_id == query.asset_id && asset.kind == MultimodalAssetKind::Video
+            })
             .map(video_asset_from_multimodal))
     }
 
@@ -519,9 +526,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        BootstrapImageMetadata, BootstrapVideoMetadata, MultimodalAssetKind,
-        MultimodalAssetQuery, MultimodalIngestSession, NewMultimodalAssetImport,
-        PhotoAssetQuery, VideoAssetQuery,
+        BootstrapImageMetadata, BootstrapVideoMetadata, MultimodalAssetKind, MultimodalAssetQuery,
+        MultimodalIngestSession, NewMultimodalAssetImport, PhotoAssetQuery, VideoAssetQuery,
     };
 
     #[test]
@@ -581,11 +587,9 @@ mod tests {
                 101,
             ))
             .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("multimodal asset id already exists")
-        );
+        assert!(error
+            .to_string()
+            .contains("multimodal asset id already exists"));
     }
 
     #[test]
@@ -653,7 +657,10 @@ mod tests {
             .unwrap();
         assert_eq!(photo.image_metadata.as_ref().unwrap().width_px, Some(800));
         assert_eq!(photo.image_metadata.as_ref().unwrap().height_px, Some(600));
-        assert_eq!(photo.image_metadata.as_ref().unwrap().captured_at_ms, Some(90));
+        assert_eq!(
+            photo.image_metadata.as_ref().unwrap().captured_at_ms,
+            Some(90)
+        );
 
         let raw = reopened
             .asset(MultimodalAssetQuery::asset_id("image:poster"))
@@ -726,7 +733,10 @@ mod tests {
             .video_asset(VideoAssetQuery::asset_id("video:scene"))
             .unwrap()
             .unwrap();
-        assert_eq!(video.video_metadata.as_ref().unwrap().duration_ms, Some(3_000));
+        assert_eq!(
+            video.video_metadata.as_ref().unwrap().duration_ms,
+            Some(3_000)
+        );
         assert_eq!(
             video.video_metadata.as_ref().unwrap().frame_width_px,
             Some(1920)

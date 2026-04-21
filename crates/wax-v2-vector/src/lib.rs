@@ -149,6 +149,15 @@ impl VectorLaneMetadata {
         } else {
             None
         };
+        if prefer_store_segment
+            && vector_segment.is_none()
+            && store_has_manifest_visible_family(mount_root, SegmentKind::Doc)?
+        {
+            return Err(
+                "current store generation has manifest-visible documents but no matching vector segment; publish vectors before runtime vector search"
+                    .to_owned(),
+            );
+        }
         let doc_count = vector_segment
             .as_ref()
             .map(|segment| {
@@ -890,14 +899,29 @@ fn resolve_store_vector_segment(mount_root: &Path) -> Result<Option<StoreVectorS
         return Ok(None);
     }
     let opened = wax_v2_core::open_store(&store_path).map_err(|error| error.to_string())?;
-    let Some(descriptor) = opened
+    let latest_vec = opened
         .manifest
         .segments
         .iter()
         .filter(|segment| segment.family == SegmentKind::Vec)
         .max_by_key(|segment| (segment.segment_generation, segment.object_offset))
-        .cloned()
-    else {
+        .cloned();
+    let latest_doc_generation = opened
+        .manifest
+        .segments
+        .iter()
+        .filter(|segment| segment.family == SegmentKind::Doc)
+        .max_by_key(|segment| (segment.segment_generation, segment.object_offset))
+        .map(|segment| segment.segment_generation);
+    if let (Some(doc_generation), Some(descriptor)) = (latest_doc_generation, latest_vec.as_ref()) {
+        if descriptor.segment_generation < doc_generation {
+            return Err(
+                "latest vector segment is stale relative to the current document generation; republish vectors before runtime vector search"
+                    .to_owned(),
+            );
+        }
+    }
+    let Some(descriptor) = latest_vec else {
         return Ok(None);
     };
     let has_preview = descriptor.backend_aux != 0;
@@ -906,6 +930,15 @@ fn resolve_store_vector_segment(mount_root: &Path) -> Result<Option<StoreVectorS
         descriptor,
         has_preview,
     }))
+}
+
+fn store_has_manifest_visible_family(mount_root: &Path, family: SegmentKind) -> Result<bool, String> {
+    let store_path = mount_root.join("store.wax");
+    if !store_path.exists() {
+        return Ok(false);
+    }
+    let opened = wax_v2_core::open_store(&store_path).map_err(|error| error.to_string())?;
+    Ok(opened.manifest.segments.iter().any(|segment| segment.family == family))
 }
 
 fn load_vector_segment(
@@ -1012,7 +1045,10 @@ pub fn prepare_compatibility_vector_segment(
     manifest: &DatasetPackManifest,
 ) -> Result<PendingSegmentWrite, String> {
     let raw_vectors = load_compatibility_raw_vectors(mount_root, manifest)?;
-    prepare_raw_vector_segment(manifest.vector_profile.embedding_dimensions as usize, &raw_vectors)
+    prepare_raw_vector_segment(
+        manifest.vector_profile.embedding_dimensions as usize,
+        &raw_vectors,
+    )
 }
 
 pub fn prepare_raw_vector_segment(
@@ -1102,7 +1138,11 @@ pub fn validate_store_segment_against_dataset_pack(
     let expected_raw_vectors = load_compatibility_raw_vectors(mount_root, manifest)?;
     let mut expected_segment =
         BinaryVectorSegment::from_raw_vectors(metadata.dimensions, &expected_raw_vectors)?;
-    if let Some(preview_path) = metadata.preview_vectors_path.as_ref().filter(|path| path.exists()) {
+    if let Some(preview_path) = metadata
+        .preview_vectors_path
+        .as_ref()
+        .filter(|path| path.exists())
+    {
         let preview_vectors = fs::read(preview_path).map_err(|error| error.to_string())?;
         validate_preview_vectors(
             &preview_vectors,
@@ -1112,8 +1152,9 @@ pub fn validate_store_segment_against_dataset_pack(
         expected_segment.preview_vectors = Some(preview_vectors);
     }
 
-    let bytes = wax_v2_core::read_segment_object(&store_segment.store_path, &store_segment.descriptor)
-        .map_err(|error| error.to_string())?;
+    let bytes =
+        wax_v2_core::read_segment_object(&store_segment.store_path, &store_segment.descriptor)
+            .map_err(|error| error.to_string())?;
     let persisted_segment = BinaryVectorSegment::decode(&bytes)?;
     if persisted_segment != expected_segment {
         return Err("store vector segment does not match mounted dataset vectors".to_owned());
@@ -1154,7 +1195,9 @@ impl BinaryVectorSegment {
                 ));
             }
             if !seen_doc_ids.insert(doc_id.clone()) {
-                return Err(format!("raw vector doc_id {doc_id} was provided more than once"));
+                return Err(format!(
+                    "raw vector doc_id {doc_id} was provided more than once"
+                ));
             }
             doc_ids.push(doc_id.clone());
             exact_values.extend_from_slice(values);
@@ -1414,7 +1457,8 @@ fn validate_query_dimensions(query: &[f32], expected_dimensions: usize) -> Resul
 }
 
 fn decode_f32le_slice(bytes: &[u8]) -> Vec<f32> {
-    bytes.chunks_exact(4)
+    bytes
+        .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("4-byte f32 chunk")))
         .collect()
 }
@@ -1555,11 +1599,13 @@ mod tests {
     use tempfile::tempdir;
     use wax_bench_model::{DatasetPackManifest, VectorQueryMode};
     use wax_v2_core::{create_empty_store, publish_segments, SegmentKind};
+    use wax_v2_docstore::prepare_raw_documents_segment;
 
     use crate::{
-        load_compatibility_raw_vectors, load_vector_segment, prepare_raw_vector_segment, read_u64,
-        publish_compatibility_vector_segment, resolve_auto_vector_mode, BinaryVectorSegment,
-        ByteStorage, StoreVectorSegment, VectorLane, VectorLaneMetadata, VectorQueryInputs,
+        load_compatibility_raw_vectors, load_vector_segment, prepare_raw_vector_segment,
+        publish_compatibility_vector_segment, read_u64, resolve_auto_vector_mode,
+        BinaryVectorSegment, ByteStorage, StoreVectorSegment, VectorLane, VectorLaneMetadata,
+        VectorQueryInputs,
     };
 
     #[test]
@@ -1782,9 +1828,12 @@ mod tests {
         .unwrap();
         publish_segments(&store_path, vec![pending]).unwrap();
 
-        let mut lane =
-            VectorLane::load_runtime(temp_dir.path(), &test_manifest(false, false), VectorQueryMode::Auto)
-                .unwrap();
+        let mut lane = VectorLane::load_runtime(
+            temp_dir.path(),
+            &test_manifest(false, false),
+            VectorQueryMode::Auto,
+        )
+        .unwrap();
 
         assert_eq!(
             lane.search_with_query(&[0.0, 1.0], 2, VectorQueryMode::ExactFlat, false)
@@ -1861,9 +1910,13 @@ mod tests {
             hnsw_graph_basename: None,
         };
 
-        let loaded = load_vector_segment(&metadata, metadata.vector_segment.as_ref().unwrap()).unwrap();
+        let loaded =
+            load_vector_segment(&metadata, metadata.vector_segment.as_ref().unwrap()).unwrap();
 
-        assert!(matches!(loaded.doc_vectors, ByteStorage::SegmentSlice { .. }));
+        assert!(matches!(
+            loaded.doc_vectors,
+            ByteStorage::SegmentSlice { .. }
+        ));
         assert!(loaded.preview_vectors.is_none());
     }
 
@@ -1944,6 +1997,50 @@ mod tests {
     }
 
     #[test]
+    fn vector_lane_runtime_rejects_stale_store_segment_when_documents_are_newer() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("store.wax");
+        create_empty_store(&store_path).unwrap();
+
+        let vector_pending = prepare_raw_vector_segment(
+            2,
+            &[
+                ("doc-1".to_owned(), vec![1.0f32, 0.0f32]),
+                ("doc-2".to_owned(), vec![0.0f32, 1.0f32]),
+            ],
+        )
+        .unwrap();
+        publish_segments(&store_path, vec![vector_pending]).unwrap();
+
+        let doc_pending = prepare_raw_documents_segment(
+            &store_path,
+            vec![
+                (
+                    "doc-1".to_owned(),
+                    json!({"doc_id":"doc-1","text":"updated"}),
+                ),
+                (
+                    "doc-3".to_owned(),
+                    json!({"doc_id":"doc-3","text":"replacement"}),
+                ),
+            ],
+        )
+        .unwrap();
+        publish_segments(&store_path, vec![doc_pending]).unwrap();
+
+        let error = match VectorLane::load_runtime(
+            temp_dir.path(),
+            &test_manifest(false, false),
+            VectorQueryMode::Auto,
+        ) {
+            Ok(_) => panic!("stale vector segment should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("stale"));
+    }
+
+    #[test]
     fn compatibility_raw_vector_loader_ignores_persisted_store_segment_shape() {
         let temp_dir = tempdir().unwrap();
         let store_path = temp_dir.path().join("store.wax");
@@ -2015,9 +2112,11 @@ mod tests {
         )
         .unwrap();
 
-        let error =
-            load_compatibility_raw_vectors(temp_dir.path(), &test_manifest_with_count(2, false, false))
-                .unwrap_err();
+        let error = load_compatibility_raw_vectors(
+            temp_dir.path(),
+            &test_manifest_with_count(2, false, false),
+        )
+        .unwrap_err();
 
         assert!(error.contains("document_ids row count does not match manifest vector_count"));
     }
@@ -2174,7 +2273,8 @@ mod tests {
         documents_path: &str,
         doc_count: usize,
     ) -> DatasetPackManifest {
-        let mut value = serde_json::to_value(test_manifest_with_count(doc_count, false, false)).unwrap();
+        let mut value =
+            serde_json::to_value(test_manifest_with_count(doc_count, false, false)).unwrap();
         let files = value["files"].as_array_mut().unwrap();
         files.retain(|file| file["kind"] != "document_ids");
         files.push(json!({

@@ -3,8 +3,8 @@ use std::fmt;
 use std::path::Path;
 
 use wax_v2_runtime::{
-    NewDocument, NewDocumentVector, RuntimePublishFamily, RuntimePublishReport,
-    RuntimeSearchMode, RuntimeSearchRequest, RuntimeSearchResponse, RuntimeStore,
+    NewDocument, NewDocumentVector, RuntimePublishFamily, RuntimePublishReport, RuntimeSearchMode,
+    RuntimeSearchRequest, RuntimeSearchResponse, RuntimeStore,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -166,9 +166,8 @@ impl WaxBroker {
                 documents
                     .into_iter()
                     .map(|document| {
-                        let mut runtime_document =
-                            NewDocument::new(document.doc_id, document.text)
-                                .with_metadata(document.metadata);
+                        let mut runtime_document = NewDocument::new(document.doc_id, document.text)
+                            .with_metadata(document.metadata);
                         if let Some(timestamp_ms) = document.timestamp_ms {
                             runtime_document = runtime_document.with_timestamp_ms(timestamp_ms);
                         }

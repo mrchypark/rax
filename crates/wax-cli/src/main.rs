@@ -89,9 +89,8 @@ fn main() -> Result<(), String> {
                 let documents = read_jsonl::<CliNewDocument>(&input)?
                     .into_iter()
                     .map(|document| {
-                        let mut runtime_document =
-                            NewDocument::new(document.doc_id, document.text)
-                                .with_metadata(document.metadata);
+                        let mut runtime_document = NewDocument::new(document.doc_id, document.text)
+                            .with_metadata(document.metadata);
                         if let Some(timestamp_ms) = document.timestamp_ms {
                             runtime_document = runtime_document.with_timestamp_ms(timestamp_ms);
                         }

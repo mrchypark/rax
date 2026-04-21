@@ -14,11 +14,7 @@ fn runtime_store_preserves_text_and_serves_vector_search_when_raw_vectors_are_pu
     let source_dir = tempdir().unwrap();
     let dataset_dir = tempdir().unwrap();
     let docs_path = source_dir.path().join("docs.ndjson");
-    fs::write(
-        &docs_path,
-        "{\"doc_id\":\"seed-001\",\"text\":\"seed\"}\n",
-    )
-    .unwrap();
+    fs::write(&docs_path, "{\"doc_id\":\"seed-001\",\"text\":\"seed\"}\n").unwrap();
     let manifest = pack_adhoc_dataset(&AdhocPackRequest::new(
         &docs_path,
         dataset_dir.path(),
@@ -58,7 +54,10 @@ fn runtime_store_preserves_text_and_serves_vector_search_when_raw_vectors_are_pu
         ])
         .unwrap();
     assert_eq!(raw_vector_report.generation, 2);
-    assert_eq!(raw_vector_report.published_families, vec![RuntimePublishFamily::Vector]);
+    assert_eq!(
+        raw_vector_report.published_families,
+        vec![RuntimePublishFamily::Vector]
+    );
     runtime.close().unwrap();
 
     for kind in [

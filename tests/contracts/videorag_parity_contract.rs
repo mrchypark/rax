@@ -44,7 +44,11 @@ fn videorag_lists_only_video_assets_through_typed_video_api() {
 fn videorag_reads_bootstrap_video_metadata_after_reopen() {
     let dataset_dir = tempdir().unwrap();
     let video_path = dataset_dir.path().join("scene.mov");
-    fs::write(&video_path, [0x00, 0x00, 0x00, 0x14, b'f', b't', b'y', b'p']).unwrap();
+    fs::write(
+        &video_path,
+        [0x00, 0x00, 0x00, 0x14, b'f', b't', b'y', b'p'],
+    )
+    .unwrap();
 
     let mut initial = MultimodalIngestSession::open(dataset_dir.path()).unwrap();
     initial
@@ -88,7 +92,11 @@ fn videorag_reads_bootstrap_video_metadata_after_reopen() {
         Some(1080)
     );
     assert_eq!(
-        video_asset.video_metadata.as_ref().unwrap().frame_rate_milli_fps,
+        video_asset
+            .video_metadata
+            .as_ref()
+            .unwrap()
+            .frame_rate_milli_fps,
         Some(29_970)
     );
 }

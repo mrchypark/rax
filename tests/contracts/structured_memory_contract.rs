@@ -77,9 +77,14 @@ fn structured_memory_session_upserts_entities_with_kind_and_aliases() {
     let mut initial = StructuredMemorySession::open(dataset_dir.path()).unwrap();
     initial
         .upsert_entity(
-            NewStructuredEntity::new("person:alice", "person", "bootstrap-test", 1_717_171_719_000)
-                .with_alias("Alice")
-                .with_alias("Alice Kim"),
+            NewStructuredEntity::new(
+                "person:alice",
+                "person",
+                "bootstrap-test",
+                1_717_171_719_000,
+            )
+            .with_alias("Alice")
+            .with_alias("Alice Kim"),
         )
         .unwrap();
     initial.close().unwrap();
@@ -101,11 +106,16 @@ fn structured_memory_entity_upsert_deduplicates_aliases_within_single_request() 
     let mut session = StructuredMemorySession::open(dataset_dir.path()).unwrap();
     session
         .upsert_entity(
-            NewStructuredEntity::new("person:alice", "person", "bootstrap-test", 1_717_171_719_000)
-                .with_alias("Alice")
-                .with_alias("Alice")
-                .with_alias("Alice Kim")
-                .with_alias("Alice"),
+            NewStructuredEntity::new(
+                "person:alice",
+                "person",
+                "bootstrap-test",
+                1_717_171_719_000,
+            )
+            .with_alias("Alice")
+            .with_alias("Alice")
+            .with_alias("Alice Kim")
+            .with_alias("Alice"),
         )
         .unwrap();
     session.close().unwrap();
