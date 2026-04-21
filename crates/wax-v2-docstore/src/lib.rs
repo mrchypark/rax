@@ -465,12 +465,12 @@ impl BinaryDocSegment {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Docstore {
     source: DocstoreSource,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum DocstoreSource {
     DatasetPack {
         documents_path: PathBuf,
@@ -481,9 +481,9 @@ enum DocstoreSource {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct StoreDocSegment {
-    bytes: Arc<[u8]>,
+    bytes: Arc<wax_v2_core::SegmentObject>,
     payload_range: Range<usize>,
     ordered_doc_ids: Vec<String>,
     entries_by_external_doc_id: HashMap<String, StoreDocEntry>,
@@ -496,8 +496,8 @@ struct StoreDocEntry {
 }
 
 impl StoreDocSegment {
-    fn open(bytes: Vec<u8>) -> Result<Self, DocstoreError> {
-        let bytes: Arc<[u8]> = bytes.into_boxed_slice().into();
+    fn open(bytes: wax_v2_core::SegmentObject) -> Result<Self, DocstoreError> {
+        let bytes = Arc::new(bytes);
         if bytes.len() < DOC_SEGMENT_HEADER_LENGTH {
             return Err(DocstoreError::InvalidDocument(format!(
                 "doc segment too short: expected at least {DOC_SEGMENT_HEADER_LENGTH} bytes"
@@ -574,6 +574,11 @@ impl StoreDocSegment {
         let binding_section = &bytes[binding_bytes_offset..row_table_offset];
         let row_table = &bytes[row_table_offset..row_table_end];
         let mut previous_doc_id = None;
+        let doc_id_map = if minor == 0 {
+            None
+        } else {
+            Some(DocIdMap::decode_json(binding_section)?)
+        };
         let mut ordered_bindings = Vec::with_capacity(row_count);
         let mut ordered_doc_ids = Vec::with_capacity(row_count);
         let mut entries_by_external_doc_id = HashMap::with_capacity(row_count);
@@ -596,22 +601,30 @@ impl StoreDocSegment {
             }
             previous_doc_id = Some(row.doc_id);
 
-            let payload = read_section_bytes(
-                payload_section,
-                row.payload_offset,
-                row.payload_length,
-                "payload",
-            )?;
-            let payload_text = std::str::from_utf8(payload)
-                .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))?;
-            let external_doc_id =
+            let external_doc_id = if let Some(doc_id_map) = doc_id_map.as_ref() {
+                doc_id_map.external_doc_id(row.doc_id).map(str::to_owned).ok_or_else(|| {
+                    DocstoreError::InvalidDocument(format!(
+                        "missing external doc_id binding for wax_doc_id {}",
+                        row.doc_id
+                    ))
+                })?
+            } else {
+                let payload = read_section_bytes(
+                    payload_section,
+                    row.payload_offset,
+                    row.payload_length,
+                    "payload",
+                )?;
+                let payload_text = std::str::from_utf8(payload)
+                    .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))?;
                 parse_document_id(payload_text, "store-backed document payload")
                     .map(Cow::into_owned)
-                    .map_err(DocstoreError::InvalidDocument)?;
+                    .map_err(DocstoreError::InvalidDocument)?
+            };
 
             if entries_by_external_doc_id
                 .insert(external_doc_id.clone(), StoreDocEntry { row: row.clone() })
-                .is_some()
+            .is_some()
             {
                 return Err(DocstoreError::InvalidDocument(
                     "duplicate external doc_id in store segment".to_owned(),
@@ -621,11 +634,7 @@ impl StoreDocSegment {
             ordered_bindings.push(DocIdBinding::new(row.doc_id, external_doc_id));
         }
 
-        let doc_id_map = if minor == 0 {
-            DocIdMap::from_bindings(ordered_bindings)?
-        } else {
-            DocIdMap::decode_json(binding_section)?
-        };
+        let doc_id_map = doc_id_map.unwrap_or(DocIdMap::from_bindings(ordered_bindings)?);
 
         Ok(Self {
             bytes,
@@ -985,7 +994,7 @@ impl Docstore {
         store_path: &Path,
         descriptor: &wax_v2_core::SegmentDescriptor,
     ) -> Result<Self, DocstoreError> {
-        let bytes = wax_v2_core::read_segment_object(store_path, descriptor)
+        let bytes = wax_v2_core::map_segment_object(store_path, descriptor)
             .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))?;
         let segment = StoreDocSegment::open(bytes)?;
 
@@ -1153,7 +1162,7 @@ fn load_persisted_doc_id_map_from_store(store_path: &Path) -> Result<Option<DocI
     else {
         return Ok(None);
     };
-    let bytes = wax_v2_core::read_segment_object(store_path, descriptor)
+    let bytes = wax_v2_core::map_segment_object(store_path, descriptor)
         .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))?;
     let segment = StoreDocSegment::open(bytes)?;
     Ok(Some(segment.doc_id_map))
@@ -1443,7 +1452,10 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
     use wax_bench_model::DatasetPackManifest;
-    use wax_v2_core::{create_empty_store, open_store, read_segment_object, SegmentKind};
+    use wax_v2_core::{
+        create_empty_store, open_store, publish_segment, read_segment_object,
+        PendingSegmentDescriptor, SegmentKind,
+    };
 
     use crate::{
         parse_document_id, read_u64, sha256, BinaryDocSegment, DocIdBinding, DocIdMap, DocRow,
@@ -1682,6 +1694,64 @@ mod tests {
             DocstoreSource::Store { segment }
                 if segment.ordered_doc_ids == vec!["doc-900".to_owned(), "doc-010".to_owned()]
         ));
+    }
+
+    #[test]
+    fn open_store_segment_uses_binding_section_for_doc_ids_in_minor_v1() {
+        let temp_dir = tempdir().unwrap();
+        let docs_path = temp_dir.path().join("docs.ndjson");
+        let offsets_path = temp_dir.path().join("document-offsets.jsonl");
+        let store_path = temp_dir.path().join("store.wax");
+        fs::write(
+            &docs_path,
+            concat!(
+                "{\"doc_id\":\"doc-900\",\"text\":\"first\",\"metadata\":{\"kind\":\"note\"}}\n",
+                "{\"doc_id\":\"doc-010\",\"text\":\"second\",\"metadata\":{\"kind\":\"task\"}}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(&offsets_path, "").unwrap();
+        create_empty_store(&store_path).unwrap();
+
+        let manifest = test_manifest(true);
+        let dataset_docstore = Docstore::open_dataset_pack(temp_dir.path(), &manifest).unwrap();
+        let published = dataset_docstore.publish_to_store(&store_path).unwrap();
+        let descriptor = published.manifest.segments[0].clone();
+        let mut bytes = read_segment_object(&store_path, &descriptor).unwrap();
+        let replaced = bytes
+            .windows(b"doc-900".len())
+            .position(|window| window == b"doc-900")
+            .unwrap();
+        bytes[replaced..replaced + 7].copy_from_slice(b"doc-999");
+        let checksum = sha256(&bytes[88..]);
+        bytes[56..88].copy_from_slice(&checksum);
+        publish_segment(
+            &store_path,
+            PendingSegmentDescriptor {
+                family: SegmentKind::Doc,
+                family_version: descriptor.family_version,
+                flags: descriptor.flags,
+                doc_id_start: descriptor.doc_id_start,
+                doc_id_end_exclusive: descriptor.doc_id_end_exclusive,
+                min_timestamp_ms: descriptor.min_timestamp_ms,
+                max_timestamp_ms: descriptor.max_timestamp_ms,
+                live_items: descriptor.live_items,
+                tombstoned_items: descriptor.tombstoned_items,
+                backend_id: descriptor.backend_id,
+                backend_aux: descriptor.backend_aux,
+            },
+            &bytes,
+        )
+        .unwrap();
+        fs::remove_file(&docs_path).unwrap();
+        fs::remove_file(&offsets_path).unwrap();
+
+        let reopened = Docstore::open(temp_dir.path(), &manifest).unwrap();
+
+        assert_eq!(
+            reopened.load_document_ids().unwrap(),
+            vec!["doc-900", "doc-010"]
+        );
     }
 
     #[test]

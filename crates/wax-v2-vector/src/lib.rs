@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use bytemuck::cast_slice;
+use bytemuck::{cast_slice, try_cast_slice};
 use hnsw_rs::prelude::{DistCosine, Hnsw, HnswIo};
 use memmap2::{Mmap, MmapOptions};
 use self_cell::self_cell;
@@ -84,8 +84,8 @@ pub struct VectorLane {
 enum ByteStorage {
     Mapped(Mmap),
     Owned(Vec<u8>),
-    Shared {
-        bytes: Arc<[u8]>,
+    SegmentSlice {
+        object: Arc<wax_v2_core::SegmentObject>,
         range: Range<usize>,
     },
 }
@@ -95,7 +95,7 @@ impl ByteStorage {
         match self {
             Self::Mapped(bytes) => bytes.as_ref(),
             Self::Owned(bytes) => bytes.as_slice(),
-            Self::Shared { bytes, range } => &bytes[range.start..range.end],
+            Self::SegmentSlice { object, range } => &object[range.start..range.end],
         }
     }
 }
@@ -106,6 +106,7 @@ struct VectorLaneMetadata {
     doc_count: usize,
     vector_segment: Option<StoreVectorSegment>,
     vector_lane_skeleton_path: Option<PathBuf>,
+    documents_path: Option<PathBuf>,
     document_ids_path: Option<PathBuf>,
     document_vectors_path: PathBuf,
     preview_vectors_path: Option<PathBuf>,
@@ -166,6 +167,11 @@ impl VectorLaneMetadata {
                 .files
                 .iter()
                 .find(|file| file.kind == "vector_lane_skeleton")
+                .map(|file| mount_root.join(&file.path)),
+            documents_path: manifest
+                .files
+                .iter()
+                .find(|file| file.kind == "documents")
                 .map(|file| mount_root.join(&file.path)),
             document_ids_path: manifest
                 .files
@@ -853,10 +859,9 @@ fn load_vector_lane_skeleton(metadata: &VectorLaneMetadata) -> Result<ByteStorag
         load_document_ids(&document_ids_path)?
     } else {
         let documents_path = metadata
-            .document_vectors_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("docs.ndjson");
+            .documents_path
+            .as_ref()
+            .ok_or_else(|| "documents file missing from manifest".to_owned())?;
         load_document_ids_from_documents(&documents_path).map_err(docstore_error)?
     };
     Ok(ByteStorage::Owned(build_vector_lane_skeleton(
@@ -907,10 +912,11 @@ fn load_vector_segment(
     metadata: &VectorLaneMetadata,
     segment: &StoreVectorSegment,
 ) -> Result<LoadedVectorPayloads, String> {
-    let bytes = wax_v2_core::read_segment_object(&segment.store_path, &segment.descriptor)
-        .map_err(|error| error.to_string())?;
-    let shared_bytes: Arc<[u8]> = bytes.into_boxed_slice().into();
-    let layout = BinaryVectorSegmentLayout::decode(shared_bytes.as_ref())?;
+    let bytes = Arc::new(
+        wax_v2_core::map_segment_object(&segment.store_path, &segment.descriptor)
+            .map_err(|error| error.to_string())?,
+    );
+    let layout = BinaryVectorSegmentLayout::decode(&bytes)?;
     if layout.dimensions != metadata.dimensions {
         return Err("vector segment dimensions do not match manifest".to_owned());
     }
@@ -922,8 +928,8 @@ fn load_vector_segment(
         &layout.doc_ids,
         layout.dimensions as u32,
     ));
-    let doc_vectors = ByteStorage::Shared {
-        bytes: shared_bytes.clone(),
+    let doc_vectors = ByteStorage::SegmentSlice {
+        object: bytes.clone(),
         range: layout.exact_vectors_range.clone(),
     };
     validate_document_vectors(
@@ -934,8 +940,8 @@ fn load_vector_segment(
     let preview_vectors = layout
         .preview_vectors_range
         .map(|range| -> Result<ByteStorage, String> {
-            let storage = ByteStorage::Shared {
-                bytes: shared_bytes.clone(),
+            let storage = ByteStorage::SegmentSlice {
+                object: bytes.clone(),
                 range,
             };
             validate_preview_vectors(storage.as_slice(), metadata.dimensions, metadata.doc_count)?;
@@ -1058,15 +1064,17 @@ pub fn load_compatibility_raw_vectors(
         load_document_ids(document_ids_path)?
     } else {
         let documents_path = metadata
-            .document_vectors_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("docs.ndjson");
-        load_document_ids_from_documents(&documents_path).map_err(docstore_error)?
+            .documents_path
+            .as_ref()
+            .ok_or_else(|| "documents file missing from manifest".to_owned())?;
+        load_document_ids_from_documents(documents_path).map_err(docstore_error)?
     };
     let exact_vectors =
         fs::read(&metadata.document_vectors_path).map_err(|error| error.to_string())?;
     validate_document_vectors(&exact_vectors, metadata.dimensions, metadata.doc_count)?;
+    if doc_ids.len() != metadata.doc_count {
+        return Err("document_ids row count does not match manifest vector_count".to_owned());
+    }
 
     Ok(doc_ids
         .into_iter()
@@ -1180,7 +1188,9 @@ impl BinaryVectorSegment {
             doc_ids_section.extend_from_slice(doc_id.as_bytes());
         }
         let doc_ids_offset = VECTOR_SEGMENT_HEADER_LENGTH as u64;
-        let exact_vectors_offset = doc_ids_offset + doc_ids_section.len() as u64;
+        let exact_vectors_offset =
+            align_up_usize(doc_ids_offset as usize + doc_ids_section.len(), 4) as u64;
+        doc_ids_section.resize(exact_vectors_offset as usize - doc_ids_offset as usize, 0);
         let preview_vectors_offset = if self.preview_vectors.is_some() {
             exact_vectors_offset + self.exact_vectors.len() as u64
         } else {
@@ -1246,6 +1256,7 @@ impl BinaryVectorSegmentLayout {
         if doc_ids_offset != VECTOR_SEGMENT_HEADER_LENGTH
             || doc_ids_offset > exact_vectors_offset
             || exact_vectors_offset > bytes.len()
+            || exact_vectors_offset % 4 != 0
         {
             return Err("vector segment section offsets are invalid".to_owned());
         }
@@ -1301,7 +1312,7 @@ impl BinaryVectorSegmentLayout {
             cursor = value_end;
             doc_ids.push(doc_id);
         }
-        if cursor != doc_ids_section.len() {
+        if doc_ids_section[cursor..].iter().any(|byte| *byte != 0) {
             return Err("vector segment doc_id section length mismatch".to_owned());
         }
         validate_document_vectors(&bytes[exact_vectors_range.clone()], dimensions, doc_count)?;
@@ -1328,6 +1339,18 @@ fn read_u32(bytes: &[u8], offset: usize) -> u32 {
 
 fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("u64 slice"))
+}
+
+fn align_up_usize(value: usize, alignment: usize) -> usize {
+    if alignment == 0 {
+        return value;
+    }
+    let remainder = value % alignment;
+    if remainder == 0 {
+        value
+    } else {
+        value + (alignment - remainder)
+    }
 }
 
 fn validate_document_vectors(
@@ -1422,6 +1445,14 @@ fn first_hybrid_vector_query_from_records(
 }
 
 fn dot_product_f32le(left: &[f32], right: &[u8]) -> f32 {
+    if let Ok(right_f32) = try_cast_slice::<u8, f32>(right) {
+        return left
+            .iter()
+            .zip(right_f32.iter())
+            .map(|(lhs, rhs)| lhs * rhs)
+            .sum();
+    }
+
     let lane_count = left.len().min(right.len() / 4);
     let mut sum0 = 0.0f32;
     let mut sum1 = 0.0f32;
@@ -1526,9 +1557,9 @@ mod tests {
     use wax_v2_core::{create_empty_store, publish_segments, SegmentKind};
 
     use crate::{
-        load_compatibility_raw_vectors, load_vector_segment, prepare_raw_vector_segment,
-        publish_compatibility_vector_segment, resolve_auto_vector_mode, ByteStorage,
-        StoreVectorSegment, VectorLane, VectorLaneMetadata, VectorQueryInputs,
+        load_compatibility_raw_vectors, load_vector_segment, prepare_raw_vector_segment, read_u64,
+        publish_compatibility_vector_segment, resolve_auto_vector_mode, BinaryVectorSegment,
+        ByteStorage, StoreVectorSegment, VectorLane, VectorLaneMetadata, VectorQueryInputs,
     };
 
     #[test]
@@ -1823,6 +1854,7 @@ mod tests {
                 has_preview: false,
             }),
             vector_lane_skeleton_path: None,
+            documents_path: None,
             document_ids_path: None,
             document_vectors_path: temp_dir.path().join("unused.bin"),
             preview_vectors_path: None,
@@ -1831,7 +1863,7 @@ mod tests {
 
         let loaded = load_vector_segment(&metadata, metadata.vector_segment.as_ref().unwrap()).unwrap();
 
-        assert!(matches!(loaded.doc_vectors, ByteStorage::Shared { .. }));
+        assert!(matches!(loaded.doc_vectors, ByteStorage::SegmentSlice { .. }));
         assert!(loaded.preview_vectors.is_none());
     }
 
@@ -1962,6 +1994,82 @@ mod tests {
         assert_eq!(raw_vectors[2].0, "doc-3");
     }
 
+    #[test]
+    fn compatibility_raw_vector_loader_rejects_document_id_count_mismatch() {
+        let temp_dir = tempdir().unwrap();
+        fs::write(
+            temp_dir.path().join("document_ids.txt"),
+            concat!(
+                "{\"doc_id\":\"doc-1\"}\n",
+                "{\"doc_id\":\"doc-2\"}\n",
+                "{\"doc_id\":\"doc-3\"}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("document_vectors.bin"),
+            bytemuck::cast_slice::<f32, u8>(&[
+                1.0f32, 0.0f32, //
+                0.0f32, 1.0f32, //
+            ]),
+        )
+        .unwrap();
+
+        let error =
+            load_compatibility_raw_vectors(temp_dir.path(), &test_manifest_with_count(2, false, false))
+                .unwrap_err();
+
+        assert!(error.contains("document_ids row count does not match manifest vector_count"));
+    }
+
+    #[test]
+    fn compatibility_raw_vector_loader_uses_manifest_documents_path_when_document_ids_missing() {
+        let temp_dir = tempdir().unwrap();
+        let docs_dir = temp_dir.path().join("corpus");
+        fs::create_dir_all(&docs_dir).unwrap();
+        fs::write(
+            docs_dir.join("documents.ndjson"),
+            concat!(
+                "{\"doc_id\":\"doc-1\",\"text\":\"first\"}\n",
+                "{\"doc_id\":\"doc-2\",\"text\":\"second\"}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("document_vectors.bin"),
+            bytemuck::cast_slice::<f32, u8>(&[
+                1.0f32, 0.0f32, //
+                0.0f32, 1.0f32, //
+            ]),
+        )
+        .unwrap();
+
+        let raw_vectors = load_compatibility_raw_vectors(
+            temp_dir.path(),
+            &test_manifest_without_document_ids("corpus/documents.ndjson", 2),
+        )
+        .unwrap();
+
+        assert_eq!(raw_vectors[0].0, "doc-1");
+        assert_eq!(raw_vectors[1].0, "doc-2");
+    }
+
+    #[test]
+    fn binary_vector_segment_aligns_exact_vector_payloads_to_four_bytes() {
+        let bytes = BinaryVectorSegment::from_raw_vectors(
+            3,
+            &[("doc-1".to_owned(), vec![1.0f32, 0.0f32, 0.5f32])],
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+
+        let exact_vectors_offset = read_u64(&bytes, 32) as usize;
+
+        assert_eq!(exact_vectors_offset % 4, 0);
+        assert!(BinaryVectorSegment::decode(&bytes).is_ok());
+    }
+
     fn test_manifest(with_preview: bool, with_hnsw: bool) -> DatasetPackManifest {
         test_manifest_with_count(3, with_preview, with_hnsw)
     }
@@ -2060,5 +2168,22 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    fn test_manifest_without_document_ids(
+        documents_path: &str,
+        doc_count: usize,
+    ) -> DatasetPackManifest {
+        let mut value = serde_json::to_value(test_manifest_with_count(doc_count, false, false)).unwrap();
+        let files = value["files"].as_array_mut().unwrap();
+        files.retain(|file| file["kind"] != "document_ids");
+        files.push(json!({
+            "path": documents_path,
+            "kind": "documents",
+            "format": "jsonl",
+            "record_count": doc_count,
+            "checksum": "sha256:docs"
+        }));
+        serde_json::from_value(value).unwrap()
     }
 }

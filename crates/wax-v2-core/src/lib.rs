@@ -1,8 +1,10 @@
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::path::Path;
 
+use memmap2::{Mmap, MmapOptions};
 use sha2::{Digest, Sha256};
 
 const FILE_MAGIC: &[u8; 8] = b"RAXWAXV2";
@@ -437,6 +439,38 @@ pub struct OpenedStore {
     pub manifest: ActiveManifest,
 }
 
+#[derive(Debug)]
+pub struct SegmentObject {
+    backing: SegmentObjectBacking,
+    payload_range: Range<usize>,
+}
+
+#[derive(Debug)]
+enum SegmentObjectBacking {
+    Mapped(Mmap),
+}
+
+impl SegmentObject {
+    pub fn as_slice(&self) -> &[u8] {
+        let bytes = match &self.backing {
+            SegmentObjectBacking::Mapped(bytes) => bytes.as_ref(),
+        };
+        &bytes[self.payload_range.clone()]
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.as_slice().to_vec()
+    }
+}
+
+impl std::ops::Deref for SegmentObject {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
 pub fn create_empty_store(path: &Path) -> Result<(), CoreError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -605,6 +639,10 @@ pub fn read_segment_object(
     path: &Path,
     descriptor: &SegmentDescriptor,
 ) -> Result<Vec<u8>, CoreError> {
+    Ok(map_segment_object(path, descriptor)?.to_vec())
+}
+
+pub fn map_segment_object(path: &Path, descriptor: &SegmentDescriptor) -> Result<SegmentObject, CoreError> {
     let mut file = OpenOptions::new().read(true).open(path)?;
     let file_length = file.seek(SeekFrom::End(0))?;
     let object_end = descriptor
@@ -617,20 +655,25 @@ pub fn read_segment_object(
         ));
     }
 
-    let mut bytes = vec![0u8; descriptor.object_length as usize];
-    file.seek(SeekFrom::Start(descriptor.object_offset))?;
-    file.read_exact(&mut bytes)?;
-    let payload = decode_object(
-        &bytes,
+    let mapped = unsafe { MmapOptions::new().map(&file)? };
+    let object_range =
+        descriptor.object_offset as usize..(descriptor.object_offset + descriptor.object_length) as usize;
+    let payload_range = decode_object_payload_range(
+        &mapped[object_range.clone()],
         object_type_for_family(descriptor.family),
         descriptor.segment_generation,
     )?;
-    if sha256(&payload) != descriptor.object_checksum {
+    let absolute_payload_range =
+        (object_range.start + payload_range.start)..(object_range.start + payload_range.end);
+    if sha256(&mapped[absolute_payload_range.clone()]) != descriptor.object_checksum {
         return Err(CoreError::ChecksumMismatch {
             context: "segment object",
         });
     }
-    Ok(payload)
+    Ok(SegmentObject {
+        backing: SegmentObjectBacking::Mapped(mapped),
+        payload_range: absolute_payload_range,
+    })
 }
 
 fn ordered_superblock_candidates(
@@ -724,7 +767,8 @@ fn write_zero_padding(file: &mut OpenOptionsFile, target_offset: u64) -> Result<
     }
     let padding = (target_offset - current_offset) as usize;
     if padding > 0 {
-        file.write_all(&vec![0u8; padding])?;
+        let zeroes = [0u8; DEFAULT_OBJECT_ALIGNMENT as usize];
+        file.write_all(&zeroes[..padding])?;
     }
     Ok(())
 }
@@ -781,6 +825,16 @@ fn decode_object(
     expected_type: ObjectType,
     expected_generation: u64,
 ) -> Result<Vec<u8>, CoreError> {
+    let payload_range =
+        decode_object_payload_range(object_bytes, expected_type, expected_generation)?;
+    Ok(object_bytes[payload_range].to_vec())
+}
+
+fn decode_object_payload_range(
+    object_bytes: &[u8],
+    expected_type: ObjectType,
+    expected_generation: u64,
+) -> Result<Range<usize>, CoreError> {
     if object_bytes.len() < OBJECT_HEADER_LENGTH {
         return Err(CoreError::UnexpectedLength {
             context: "object",
@@ -816,13 +870,13 @@ fn decode_object(
             "object payload extends past end of object".to_owned(),
         ));
     }
-    let payload = object_bytes[OBJECT_HEADER_LENGTH..payload_end].to_vec();
+    let payload_range = OBJECT_HEADER_LENGTH..payload_end;
     let mut expected_checksum = [0u8; 32];
     expected_checksum.copy_from_slice(&object_bytes[32..64]);
-    if sha256(&payload) != expected_checksum {
+    if sha256(&object_bytes[payload_range.clone()]) != expected_checksum {
         return Err(CoreError::ChecksumMismatch { context: "object" });
     }
-    Ok(payload)
+    Ok(payload_range)
 }
 
 fn object_type_for_family(family: SegmentKind) -> ObjectType {
