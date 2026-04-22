@@ -143,8 +143,7 @@ pub fn hybrid_search_report(
     fused.sort_by(|left, right| {
         right
             .1
-            .partial_cmp(&left.1)
-            .unwrap()
+            .total_cmp(&left.1)
             .then_with(|| left.0.cmp(&right.0))
     });
 

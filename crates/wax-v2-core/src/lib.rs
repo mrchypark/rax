@@ -487,7 +487,7 @@ pub fn create_empty_store(path: &Path) -> Result<(), CoreError> {
         DEFAULT_OBJECT_ALIGNMENT,
         &manifest_bytes,
     );
-    let manifest_offset = align_up((SUPERBLOCK_SIZE * 2) as u64, DEFAULT_OBJECT_ALIGNMENT);
+    let manifest_offset = align_up((SUPERBLOCK_SIZE * 2) as u64, DEFAULT_OBJECT_ALIGNMENT)?;
     let superblock = Superblock::new(
         manifest.generation,
         manifest_offset,
@@ -760,15 +760,17 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     checksum
 }
 
-fn align_up(value: u64, alignment: u64) -> u64 {
+fn align_up(value: u64, alignment: u64) -> Result<u64, CoreError> {
     if alignment == 0 {
-        return value;
+        return Ok(value);
     }
     let remainder = value % alignment;
     if remainder == 0 {
-        value
+        Ok(value)
     } else {
-        value + (alignment - remainder)
+        value
+            .checked_add(alignment - remainder)
+            .ok_or_else(|| CoreError::InvalidManifest("file offset overflow".to_owned()))
     }
 }
 
@@ -779,12 +781,12 @@ fn write_zero_padding(file: &mut OpenOptionsFile, target_offset: u64) -> Result<
             "target offset moved backwards".to_owned(),
         ));
     }
-    let mut padding = (target_offset - current_offset) as usize;
+    let mut padding = target_offset - current_offset;
     if padding > 0 {
         let zeroes = [0u8; DEFAULT_OBJECT_ALIGNMENT as usize];
         while padding > 0 {
-            let chunk = padding.min(zeroes.len());
-            file.write_all(&zeroes[..chunk])?;
+            let chunk = padding.min(zeroes.len() as u64);
+            file.write_all(&zeroes[..chunk as usize])?;
             padding -= chunk;
         }
     }
@@ -801,7 +803,7 @@ fn append_object(
     payload: &[u8],
 ) -> Result<(u64, u64), CoreError> {
     let current_end = file.seek(SeekFrom::End(0))?;
-    let object_offset = align_up(current_end, alignment.max(DEFAULT_OBJECT_ALIGNMENT));
+    let object_offset = align_up(current_end, alignment.max(DEFAULT_OBJECT_ALIGNMENT))?;
     write_zero_padding(file, object_offset)?;
     let header = encode_object_header(object_type, logical_generation, alignment, payload);
     file.write_all(&header)?;
@@ -929,9 +931,10 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        create_empty_store, open_store, publish_segment, read_segment_object, write_zero_padding,
-        ActiveManifest, CoreError, PendingSegmentDescriptor, SegmentDescriptor, SegmentKind,
-        Superblock, DEFAULT_OBJECT_ALIGNMENT, OBJECT_HEADER_LENGTH, OBJECT_MAGIC, SUPERBLOCK_SIZE,
+        align_up, create_empty_store, open_store, publish_segment, read_segment_object,
+        write_zero_padding, ActiveManifest, CoreError, PendingSegmentDescriptor, SegmentDescriptor,
+        SegmentKind, Superblock, DEFAULT_OBJECT_ALIGNMENT, OBJECT_HEADER_LENGTH, OBJECT_MAGIC,
+        SUPERBLOCK_SIZE,
     };
 
     #[test]
@@ -1344,6 +1347,14 @@ mod tests {
         let bytes = std::fs::read(&path).expect("read padding");
         assert_eq!(bytes.len() as u64, DEFAULT_OBJECT_ALIGNMENT * 3 + 17);
         assert!(bytes.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn align_up_rejects_file_offset_overflow() {
+        let error = align_up(u64::MAX, DEFAULT_OBJECT_ALIGNMENT).expect_err("overflow");
+        assert!(
+            matches!(error, CoreError::InvalidManifest(message) if message.contains("overflow"))
+        );
     }
 
     #[test]

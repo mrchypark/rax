@@ -9,7 +9,6 @@ pub(crate) fn load_query_vector_records(
         .iter()
         .map(|query| {
             Ok(QueryVectorRecord {
-                query_id: query.query_id.clone(),
                 vector: embed_text(&query.query_text, dimensions as u32),
             })
         })
@@ -18,6 +17,5 @@ pub(crate) fn load_query_vector_records(
 
 #[derive(Debug)]
 pub(crate) struct QueryVectorRecord {
-    pub(crate) query_id: String,
     pub(crate) vector: Vec<f32>,
 }

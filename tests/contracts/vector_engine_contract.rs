@@ -262,7 +262,7 @@ fn packed_engine_uses_persisted_vector_lane_without_document_id_sidecar() {
 }
 
 #[test]
-fn packed_engine_open_rejects_store_vector_segment_that_does_not_match_mounted_pack() {
+fn packed_engine_vector_query_rejects_store_vector_segment_that_does_not_match_mounted_pack() {
     let dataset_dir = tempdir().unwrap();
     let manifest = pack_dataset(&PackRequest::new(
         "fixtures/bench/source/minimal",
@@ -291,7 +291,12 @@ fn packed_engine_open_rejects_store_vector_segment_that_does_not_match_mounted_p
             store_path: dataset_dir.path().to_path_buf(),
         })
         .unwrap();
-    let error = engine.open(OpenRequest).unwrap_err();
+    engine.open(OpenRequest).unwrap();
+    let error = engine
+        .search(SearchRequest {
+            query_text: "__ttfq_vector__".to_owned(),
+        })
+        .unwrap_err();
 
     assert!(
         error.contains("store vector segment does not match mounted dataset vectors"),

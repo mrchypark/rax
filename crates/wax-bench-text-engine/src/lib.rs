@@ -23,6 +23,7 @@ use wax_v2_vector::{elapsed_ms, VectorLane};
 
 use crate::documents::{
     load_documents_by_id, open_docstore, validate_store_segments_against_dataset_pack,
+    SegmentValidationOptions,
 };
 use crate::query_support::load_query_vector_records;
 
@@ -108,6 +109,11 @@ impl PackedTextEngine {
         if self.vector_lane.is_none() {
             let mount_root = self.mount_root()?.to_path_buf();
             let manifest = self.manifest()?.clone();
+            validate_store_segments_against_dataset_pack(
+                &mount_root,
+                &manifest,
+                SegmentValidationOptions::WITH_VECTORS,
+            )?;
             self.vector_lane = Some(VectorLane::load(&mount_root, &manifest, self.vector_mode)?);
         }
         self.vector_lane
@@ -210,7 +216,11 @@ pub fn query_text_preview(
         .map_err(|error| error.to_string())?;
     let manifest: DatasetPackManifest =
         serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
-    validate_store_segments_against_dataset_pack(dataset_path, &manifest)?;
+    validate_store_segments_against_dataset_pack(
+        dataset_path,
+        &manifest,
+        SegmentValidationOptions::TEXT_ONLY,
+    )?;
     let text_lane = TextLane::load(dataset_path, &manifest)?;
     let doc_ids = text_lane.search_with_limit(query_text, top_k);
     let docstore = open_docstore(dataset_path, &manifest)?;
@@ -247,12 +257,31 @@ pub fn query_batch_ranked_results(
         .map_err(|error| error.to_string())?;
     let manifest: DatasetPackManifest =
         serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
-    validate_store_segments_against_dataset_pack(dataset_path, &manifest)?;
-    let text_lane = TextLane::load(dataset_path, &manifest)?;
-    let mut vector_lane = VectorLane::load(dataset_path, &manifest, vector_mode)?;
     let queries = TextBatchQuery::load_jsonl(query_set_path)?;
+    let uses_vector_lane = queries
+        .iter()
+        .any(|query| query.lane_eligibility.vector || query.lane_eligibility.hybrid);
+    validate_store_segments_against_dataset_pack(
+        dataset_path,
+        &manifest,
+        if uses_vector_lane {
+            SegmentValidationOptions::WITH_VECTORS
+        } else {
+            SegmentValidationOptions::TEXT_ONLY
+        },
+    )?;
+    let text_lane = TextLane::load(dataset_path, &manifest)?;
     let filter_candidate_limit = manifest.corpus.doc_count as usize;
-    let query_vectors = load_query_vector_records(&queries, vector_lane.dimensions)?;
+    let mut vector_lane = if uses_vector_lane {
+        Some(VectorLane::load(dataset_path, &manifest, vector_mode)?)
+    } else {
+        None
+    };
+    let query_vectors = if let Some(lane) = vector_lane.as_ref() {
+        Some(load_query_vector_records(&queries, lane.dimensions)?)
+    } else {
+        None
+    };
     let docstore = if queries.iter().any(|query| !query.filter_spec.is_empty()) {
         Some(open_docstore(dataset_path, &manifest)?)
     } else {
@@ -276,15 +305,17 @@ pub fn query_batch_ranked_results(
         .map(|result| (result.query_id, result.hits))
         .collect::<HashMap<_, _>>();
 
-    if queries.len() != query_vectors.len() {
-        return Err("query_set and query vector records must align".to_owned());
+    if let Some(vectors) = query_vectors.as_ref() {
+        if queries.len() != vectors.len() {
+            return Err("query_set and query vector records must align".to_owned());
+        }
     }
 
     let mut auto_vector_query_pending = matches!(vector_mode, VectorQueryMode::Auto);
     queries
         .into_iter()
-        .zip(query_vectors)
-        .map(|(query, vector_record)| {
+        .enumerate()
+        .map(|(index, query)| {
             let limit = query.top_k;
             let search_limit = if query.filter_spec.is_empty() {
                 limit
@@ -295,6 +326,15 @@ pub fn query_batch_ranked_results(
                 || (query.lane_eligibility.vector && !query.lane_eligibility.text);
             let force_exact = auto_vector_query_pending && uses_vector_lane;
             let hits = if query.lane_eligibility.hybrid {
+                let vector_record = query_vectors
+                    .as_ref()
+                    .and_then(|records| records.get(index))
+                    .ok_or_else(|| {
+                        format!(
+                            "query vector missing for hybrid query_id: {}",
+                            query.query_id
+                        )
+                    })?;
                 let text_hits = text_hits_by_query
                     .get(&query.query_id)
                     .cloned()
@@ -303,7 +343,9 @@ pub fn query_batch_ranked_results(
                     })?;
                 let report = hybrid_search_with_diagnostics(
                     &text_hits,
-                    &mut vector_lane,
+                    vector_lane
+                        .as_mut()
+                        .ok_or_else(|| "vector lane not available for hybrid query".to_owned())?,
                     &vector_record.vector,
                     search_limit,
                     vector_mode,
@@ -311,12 +353,24 @@ pub fn query_batch_ranked_results(
                 )?;
                 report.fused_hits
             } else if query.lane_eligibility.vector && !query.lane_eligibility.text {
-                vector_lane.search_with_query(
-                    &vector_record.vector,
-                    search_limit,
-                    vector_mode,
-                    force_exact,
-                )?
+                let vector_record = query_vectors
+                    .as_ref()
+                    .and_then(|records| records.get(index))
+                    .ok_or_else(|| {
+                        format!(
+                            "query vector missing for vector query_id: {}",
+                            query.query_id
+                        )
+                    })?;
+                vector_lane
+                    .as_mut()
+                    .ok_or_else(|| "vector lane not available for vector query".to_owned())?
+                    .search_with_query(
+                        &vector_record.vector,
+                        search_limit,
+                        vector_mode,
+                        force_exact,
+                    )?
             } else {
                 text_hits_by_query
                     .get(&query.query_id)
@@ -346,7 +400,7 @@ pub fn query_batch_ranked_results(
             }
 
             Ok(RankedQueryResult {
-                query_id: vector_record.query_id,
+                query_id: query.query_id,
                 hits: hits
                     .into_iter()
                     .map(|doc_id| RankedDocumentHit { doc_id })
@@ -364,7 +418,11 @@ pub fn profile_first_vector_query(
         .map_err(|error| error.to_string())?;
     let manifest: DatasetPackManifest =
         serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
-    validate_store_segments_against_dataset_pack(dataset_path, &manifest)?;
+    validate_store_segments_against_dataset_pack(
+        dataset_path,
+        &manifest,
+        SegmentValidationOptions::WITH_VECTORS,
+    )?;
     let load_start = Instant::now();
     let (vector_lane, hnsw_sidecar_load_ms) =
         VectorLane::load_with_report(dataset_path, &manifest, vector_mode)?;
@@ -416,7 +474,11 @@ impl WaxEngine for PackedTextEngine {
             .map_err(|error| error.to_string())?;
         let manifest: DatasetPackManifest =
             serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
-        validate_store_segments_against_dataset_pack(self.mount_root()?, &manifest)?;
+        validate_store_segments_against_dataset_pack(
+            self.mount_root()?,
+            &manifest,
+            SegmentValidationOptions::TEXT_ONLY,
+        )?;
 
         self.docstore = Some(open_docstore(self.mount_root()?, &manifest)?);
         self.manifest = Some(manifest);

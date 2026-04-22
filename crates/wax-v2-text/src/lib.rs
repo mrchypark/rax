@@ -117,6 +117,13 @@ impl TextLaneMetadata {
         let store_path = mount_root.join("store.wax");
         if store_path.exists() {
             let opened = wax_v2_core::open_store(&store_path).map_err(|error| error.to_string())?;
+            let latest_doc_generation = opened
+                .manifest
+                .segments
+                .iter()
+                .filter(|segment| segment.family == SegmentKind::Doc)
+                .max_by_key(|segment| (segment.segment_generation, segment.object_offset))
+                .map(|segment| segment.segment_generation);
             if let Some(descriptor) = opened
                 .manifest
                 .segments
@@ -125,6 +132,14 @@ impl TextLaneMetadata {
                 .max_by_key(|segment| (segment.segment_generation, segment.object_offset))
                 .cloned()
             {
+                if let Some(doc_generation) = latest_doc_generation {
+                    if descriptor.segment_generation < doc_generation {
+                        return Err(
+                            "latest text segment is stale relative to the current document generation; republish text before runtime text search"
+                                .to_owned(),
+                        );
+                    }
+                }
                 return Ok(Self {
                     indexed_doc_count: manifest.corpus.doc_count as usize,
                     source: TextLaneSource::Store {
@@ -598,7 +613,8 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
     use wax_bench_model::DatasetPackManifest;
-    use wax_v2_core::create_empty_store;
+    use wax_v2_core::{create_empty_store, publish_segments};
+    use wax_v2_docstore::prepare_raw_documents_segment;
 
     use crate::{
         publish_compatibility_text_segment, TextBatchQuery, TextLane, TextLaneMetadata,
@@ -740,6 +756,51 @@ mod tests {
 
         assert_eq!(lane.search_first_text_query(), vec!["doc-2", "doc-1"]);
         assert_eq!(lane.search("alpha"), vec!["doc-1", "doc-2"]);
+    }
+
+    #[test]
+    fn text_lane_rejects_stale_store_segment_when_documents_are_newer() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("store.wax");
+        fs::write(
+            temp_dir.path().join("docs.ndjson"),
+            concat!(
+                "{\"doc_id\":\"doc-1\",\"text\":\"alpha\"}\n",
+                "{\"doc_id\":\"doc-2\",\"text\":\"beta\"}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("postings.jsonl"),
+            concat!(
+                "{\"token\":\"alpha\",\"doc_ids\":[\"doc-1\"]}\n",
+                "{\"token\":\"beta\",\"doc_ids\":[\"doc-2\"]}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("queries.jsonl"),
+            "{\"query_id\":\"q-001\",\"query_class\":\"keyword\",\"difficulty\":\"easy\",\"query_text\":\"alpha\",\"top_k\":2,\"filter_spec\":{},\"preview_expected\":true,\"embedding_available\":false,\"lane_eligibility\":{\"text\":true,\"vector\":false,\"hybrid\":false}}\n",
+        )
+        .unwrap();
+        create_empty_store(&store_path).unwrap();
+        publish_compatibility_text_segment(temp_dir.path(), &test_manifest(), &store_path).unwrap();
+
+        let doc_pending = prepare_raw_documents_segment(
+            &store_path,
+            vec![
+                (
+                    "doc-1".to_owned(),
+                    json!({"doc_id":"doc-1","text":"alpha updated"}),
+                ),
+                ("doc-2".to_owned(), json!({"doc_id":"doc-2","text":"beta"})),
+            ],
+        )
+        .unwrap();
+        publish_segments(&store_path, vec![doc_pending]).unwrap();
+
+        let error = TextLane::load(temp_dir.path(), &test_manifest()).unwrap_err();
+        assert!(error.contains("stale"));
     }
 
     #[test]

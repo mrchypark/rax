@@ -11,3 +11,4 @@ wax-v2-core = { path = "../wax-v2-core" }
 
 [dev-dependencies]
 tempfile = "3.23.0"
+wax-v2-docstore = { path = "../wax-v2-docstore" }

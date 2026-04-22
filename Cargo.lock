@@ -1299,6 +1299,7 @@ dependencies = [
  "tempfile",
  "wax-bench-model",
  "wax-v2-core",
+ "wax-v2-docstore",
 ]
 
 [[package]]

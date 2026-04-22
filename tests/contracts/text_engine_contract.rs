@@ -6,6 +6,7 @@ use wax_bench_packer::{pack_dataset, PackRequest};
 use wax_bench_text_engine::{query_text_preview, PackedTextEngine};
 use wax_v2_core::create_empty_store;
 use wax_v2_docstore::Docstore;
+use wax_v2_runtime::{NewDocument, RuntimeStore};
 use wax_v2_text::publish_compatibility_text_segment;
 
 #[test]
@@ -357,4 +358,72 @@ fn query_text_preview_rejects_store_segments_that_do_not_match_mounted_pack() {
         error.contains("does not match mounted dataset"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn packed_text_engine_open_allows_text_queries_when_vectors_are_stale() {
+    let dataset_dir = tempdir().unwrap();
+    pack_dataset(&PackRequest::new(
+        "fixtures/bench/source/minimal",
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+
+    let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
+    runtime
+        .writer()
+        .unwrap()
+        .import_compatibility_snapshot()
+        .unwrap();
+    runtime
+        .writer()
+        .unwrap()
+        .publish_raw_documents(vec![
+            NewDocument::new("doc-001", "vector stale text still works")
+                .with_metadata(serde_json::json!({"kind":"guide","workspace":"prod"})),
+            NewDocument::new("doc-002", "semantic latency notes")
+                .with_metadata(serde_json::json!({"kind":"note","workspace":"prod"})),
+            NewDocument::new("doc-003", "cold open overview")
+                .with_metadata(serde_json::json!({"kind":"memo","workspace":"dev"})),
+        ])
+        .unwrap();
+    runtime.close().unwrap();
+    fs::write(
+        dataset_dir.path().join("docs.ndjson"),
+        concat!(
+            "{\"doc_id\":\"doc-001\",\"text\":\"vector stale text still works\",\"metadata\":{\"kind\":\"guide\",\"workspace\":\"prod\"}}\n",
+            "{\"doc_id\":\"doc-002\",\"text\":\"semantic latency notes\",\"metadata\":{\"kind\":\"note\",\"workspace\":\"prod\"}}\n",
+            "{\"doc_id\":\"doc-003\",\"text\":\"cold open overview\",\"metadata\":{\"kind\":\"memo\",\"workspace\":\"dev\"}}\n"
+        ),
+    )
+    .unwrap();
+    if let Some(path) = serde_json::from_str::<wax_bench_model::DatasetPackManifest>(
+        &fs::read_to_string(dataset_dir.path().join("manifest.json")).unwrap(),
+    )
+    .unwrap()
+    .files
+    .iter()
+    .find(|file| file.kind == "document_offsets")
+    .map(|file| dataset_dir.path().join(&file.path))
+    {
+        fs::remove_file(path).unwrap();
+    }
+
+    let mut engine = PackedTextEngine::default();
+    engine
+        .mount(MountRequest {
+            store_path: dataset_dir.path().to_path_buf(),
+        })
+        .unwrap();
+    engine.open(OpenRequest).unwrap();
+
+    let result = engine
+        .search(SearchRequest {
+            query_text: "stale text".to_owned(),
+        })
+        .unwrap();
+
+    assert_eq!(result.hits.first().map(String::as_str), Some("doc-001"));
 }

@@ -322,9 +322,13 @@ impl RuntimeStore {
                         "vector_query is required for hybrid search".to_owned(),
                     )
                 })?;
+                let text_limit = request
+                    .top_k
+                    .saturating_mul(3)
+                    .clamp(request.top_k, self.manifest.corpus.doc_count as usize);
                 let text_hits = self
                     .ensure_text_lane()?
-                    .search_with_limit(text_query, request.top_k);
+                    .search_with_limit(text_query, text_limit);
                 let report = hybrid_search_with_diagnostics(
                     &text_hits,
                     self.ensure_vector_lane()?,
@@ -831,6 +835,51 @@ mod tests {
         assert_eq!(hybrid.hits[0].preview, None);
 
         runtime.close().unwrap();
+    }
+
+    #[test]
+    fn runtime_hybrid_search_overfetches_text_candidates_before_rrf() {
+        let dataset_dir = tempdir().unwrap();
+        let fixture_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/bench/source/minimal");
+        pack_dataset(&PackRequest::new(
+            &fixture_root,
+            dataset_dir.path(),
+            "small",
+            "clean",
+        ))
+        .unwrap();
+
+        let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
+        runtime
+            .writer()
+            .unwrap()
+            .publish_raw_snapshot(
+                vec![
+                    NewDocument::new("doc-001", "alpha"),
+                    NewDocument::new("doc-002", "beta"),
+                    NewDocument::new("doc-003", "alpha"),
+                ],
+                Some(vec![
+                    NewDocumentVector::new("doc-001", embed_text("other", 384)),
+                    NewDocumentVector::new("doc-002", embed_text("different", 384)),
+                    NewDocumentVector::new("doc-003", embed_text("alpha target", 384)),
+                ]),
+            )
+            .unwrap();
+
+        let response = runtime
+            .search(RuntimeSearchRequest {
+                mode: RuntimeSearchMode::Hybrid,
+                text_query: Some("alpha".to_owned()),
+                vector_query: Some(embed_text("alpha target", 384)),
+                top_k: 1,
+                include_preview: false,
+            })
+            .unwrap();
+
+        assert_eq!(response.hits.len(), 1);
+        assert_eq!(response.hits[0].doc_id, "doc-003");
     }
 
     #[test]
