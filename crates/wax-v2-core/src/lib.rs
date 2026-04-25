@@ -16,6 +16,10 @@ const SUPERBLOCK_CHECKSUM_OFFSET: usize = 64;
 const SUPERBLOCK_CHECKSUM_LENGTH: usize = 32;
 const MANIFEST_HEADER_LENGTH: usize = 24;
 const SEGMENT_DESCRIPTOR_LENGTH: usize = 128;
+const MAX_SEGMENT_DESCRIPTOR_COUNT: usize = 3;
+const MAX_MANIFEST_PAYLOAD_LENGTH: usize =
+    MANIFEST_HEADER_LENGTH + (MAX_SEGMENT_DESCRIPTOR_COUNT * SEGMENT_DESCRIPTOR_LENGTH);
+const MAX_MANIFEST_OBJECT_LENGTH: usize = OBJECT_HEADER_LENGTH + MAX_MANIFEST_PAYLOAD_LENGTH;
 const OBJECT_HEADER_LENGTH: usize = 64;
 const OBJECT_VERSION: u16 = 1;
 const DEFAULT_OBJECT_ALIGNMENT: u64 = 4096;
@@ -761,6 +765,11 @@ fn open_store_from_superblock(
 ) -> Result<OpenedStore, CoreError> {
     let manifest_offset = active_superblock.active_manifest_offset;
     let manifest_length = active_superblock.active_manifest_length as u64;
+    if manifest_length > MAX_MANIFEST_OBJECT_LENGTH as u64 {
+        return Err(CoreError::InvalidManifest(format!(
+            "active manifest object length exceeds supported bound: {manifest_length} > {MAX_MANIFEST_OBJECT_LENGTH}"
+        )));
+    }
     let manifest_end = manifest_offset
         .checked_add(manifest_length)
         .ok_or_else(|| CoreError::InvalidManifest("manifest offset overflow".to_owned()))?;
@@ -984,7 +993,8 @@ mod tests {
         write_zero_padding, ActiveManifest, CoreError, ObjectType, PendingSegmentDescriptor,
         PendingSegmentWrite, SegmentDescriptor, SegmentKind, SegmentObjectBacking, Superblock,
         DEFAULT_OBJECT_ALIGNMENT, FORMAT_VERSION, MANIFEST_HEADER_LENGTH, MANIFEST_MAGIC,
-        OBJECT_HEADER_LENGTH, OBJECT_MAGIC, SEGMENT_DESCRIPTOR_LENGTH, SUPERBLOCK_SIZE,
+        MAX_MANIFEST_OBJECT_LENGTH, OBJECT_HEADER_LENGTH, OBJECT_MAGIC, SEGMENT_DESCRIPTOR_LENGTH,
+        SUPERBLOCK_SIZE,
     };
 
     #[test]
@@ -1087,6 +1097,38 @@ mod tests {
             &encoded[descriptor_start + 96..descriptor_start + 128],
             checksum.as_slice()
         );
+    }
+
+    #[test]
+    fn manifest_encode_writes_full_descriptor_length() {
+        let manifest = ActiveManifest {
+            generation: 3,
+            segments: vec![SegmentDescriptor {
+                family: SegmentKind::Doc,
+                family_version: 1,
+                flags: 0x10,
+                object_offset: 16384,
+                object_length: 512,
+                segment_generation: 9,
+                doc_id_start: 100,
+                doc_id_end_exclusive: 140,
+                min_timestamp_ms: 1_000,
+                max_timestamp_ms: 9_000,
+                live_items: 37,
+                tombstoned_items: 2,
+                backend_id: 11,
+                backend_aux: 99,
+                object_checksum: [0xab; 32],
+            }],
+        };
+
+        let encoded = manifest.encode();
+
+        assert_eq!(
+            encoded.len() - MANIFEST_HEADER_LENGTH,
+            SEGMENT_DESCRIPTOR_LENGTH
+        );
+        ActiveManifest::decode(&encoded).expect("manifest should decode");
     }
 
     #[test]
@@ -1227,6 +1269,34 @@ mod tests {
 
         let error = open_store(&path).expect_err("open should fail");
         assert!(matches!(error, CoreError::NoValidSuperblock));
+    }
+
+    #[test]
+    fn open_store_rejects_oversized_manifest_length_before_allocation() {
+        let temp_dir = tempdir().expect("tempdir");
+        let path = temp_dir.path().join("oversized-manifest.wax");
+
+        create_empty_store(&path).expect("store should be created");
+        let mut bytes = std::fs::read(&path).expect("store bytes");
+        let superblock = Superblock::decode(&bytes[..SUPERBLOCK_SIZE]).expect("superblock");
+        let oversized = Superblock::new(
+            superblock.generation,
+            superblock.active_manifest_offset,
+            (MAX_MANIFEST_OBJECT_LENGTH + 1) as u32,
+            superblock.manifest_checksum,
+        )
+        .encode();
+        bytes[..SUPERBLOCK_SIZE].copy_from_slice(&oversized);
+        bytes[SUPERBLOCK_SIZE..SUPERBLOCK_SIZE * 2].copy_from_slice(&oversized);
+        std::fs::write(&path, bytes).expect("rewrite store");
+
+        let error = open_store(&path).expect_err("open should fail before allocation");
+
+        assert!(matches!(
+            error,
+            CoreError::InvalidManifest(message)
+                if message.contains("active manifest object length exceeds supported bound")
+        ));
     }
 
     #[test]

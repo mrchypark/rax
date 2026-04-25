@@ -1,6 +1,6 @@
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 const STRUCTURED_MEMORY_FILE_NAME: &str = "structured-memory.ndjson";
 const ENTITY_KIND_PREDICATE: &str = "__entity_kind";
 const ENTITY_ALIAS_PREDICATE: &str = "__entity_alias";
+const RECORD_ID_TAIL_SCAN_CHUNK_SIZE: u64 = 8192;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StructuredMemoryStatus {
@@ -473,17 +474,53 @@ fn load_records_from_file(
 }
 
 fn next_record_id_from_file(file: &mut std::fs::File) -> Result<u64, StructuredMemoryError> {
-    file.seek(SeekFrom::Start(0)).map_err(io_error)?;
-    let mut next_record_id = 0;
-    for line in BufReader::new(file).lines() {
-        let line = line.map_err(io_error)?;
-        if line.trim().is_empty() {
-            continue;
+    let mut end = file.metadata().map_err(io_error)?.len();
+    let mut suffix = Vec::new();
+    while end > 0 {
+        let start = end.saturating_sub(RECORD_ID_TAIL_SCAN_CHUNK_SIZE);
+        let mut bytes = vec![0; (end - start) as usize];
+        file.seek(SeekFrom::Start(start)).map_err(io_error)?;
+        file.read_exact(&mut bytes).map_err(io_error)?;
+        bytes.extend_from_slice(&suffix);
+
+        let mut scan_end = bytes.len();
+        loop {
+            let Some(line_start) = bytes[..scan_end].iter().rposition(|byte| *byte == b'\n') else {
+                if start == 0 {
+                    let line = trim_ascii_whitespace(&bytes[..scan_end]);
+                    if line.is_empty() {
+                        return Ok(0);
+                    }
+                    let record: RecordIdOnly = serde_json::from_slice(line).map_err(json_error)?;
+                    return Ok(record.record_id + 1);
+                }
+                suffix = bytes;
+                end = start;
+                break;
+            };
+
+            let line = trim_ascii_whitespace(&bytes[line_start + 1..scan_end]);
+            if !line.is_empty() {
+                let record: RecordIdOnly = serde_json::from_slice(line).map_err(json_error)?;
+                return Ok(record.record_id + 1);
+            }
+            scan_end = line_start;
         }
-        let record: RecordIdOnly = serde_json::from_str(&line).map_err(json_error)?;
-        next_record_id = record.record_id + 1;
     }
-    Ok(next_record_id)
+    Ok(0)
+}
+
+fn trim_ascii_whitespace(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map(|index| index + 1)
+        .unwrap_or(start);
+    &bytes[start..end]
 }
 
 fn validate_record_inputs(record: &NewStructuredMemoryRecord) -> Result<(), StructuredMemoryError> {
