@@ -120,7 +120,7 @@ def fetch_reviews(owner: str, repo: str, number: int) -> dict[str, Any]:
         current = require_pr(payload, owner, repo, number)
         page = current["reviews"]
         total_count = page["totalCount"]
-        reviews.extend(page["nodes"])
+        reviews.extend(review for review in page["nodes"] if review is not None)
         page_info = page["pageInfo"]
         if not page_info["hasNextPage"]:
             break

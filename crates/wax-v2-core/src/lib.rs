@@ -515,7 +515,7 @@ pub fn open_store(path: &Path) -> Result<OpenedStore, CoreError> {
 }
 
 fn open_store_from_file(mut file: &mut OpenOptionsFile) -> Result<OpenedStore, CoreError> {
-    let file_length = file.seek(SeekFrom::End(0))?;
+    let file_length = file.metadata()?.len();
     if file_length < (SUPERBLOCK_SIZE * 2) as u64 {
         return Err(CoreError::UnexpectedLength {
             context: "store",
@@ -578,7 +578,16 @@ pub fn publish_segments(
         .generation
         .checked_add(1)
         .ok_or_else(|| CoreError::InvalidManifest("manifest generation overflow".to_owned()))?;
-    let mut segments = opened.manifest.segments.clone();
+    let published_families = pending_segments
+        .iter()
+        .map(|segment| segment.descriptor.family)
+        .collect::<Vec<_>>();
+    let mut segments = opened
+        .manifest
+        .segments
+        .into_iter()
+        .filter(|segment| !published_families.contains(&segment.family))
+        .collect::<Vec<_>>();
     for pending_segment in pending_segments {
         let object_type = object_type_for_family(pending_segment.descriptor.family);
         let (object_offset, object_length) = append_object(
@@ -656,8 +665,8 @@ pub fn map_segment_object(
     path: &Path,
     descriptor: &SegmentDescriptor,
 ) -> Result<SegmentObject, CoreError> {
-    let mut file = OpenOptions::new().read(true).open(path)?;
-    let file_length = file.seek(SeekFrom::End(0))?;
+    let file = OpenOptions::new().read(true).open(path)?;
+    let file_length = file.metadata()?.len();
     let object_end = descriptor
         .object_offset
         .checked_add(descriptor.object_length)
@@ -668,24 +677,28 @@ pub fn map_segment_object(
         ));
     }
 
-    let mapped = unsafe { MmapOptions::new().map(&file)? };
-    let object_range = descriptor.object_offset as usize
-        ..(descriptor.object_offset + descriptor.object_length) as usize;
+    let object_length = usize::try_from(descriptor.object_length).map_err(|_| {
+        CoreError::InvalidManifest("segment object length exceeds addressable memory".to_owned())
+    })?;
+    let mapped = unsafe {
+        MmapOptions::new()
+            .offset(descriptor.object_offset)
+            .len(object_length)
+            .map(&file)?
+    };
     let payload_range = decode_object_payload_range(
-        &mapped[object_range.clone()],
+        &mapped,
         object_type_for_family(descriptor.family),
         descriptor.segment_generation,
     )?;
-    let absolute_payload_range =
-        (object_range.start + payload_range.start)..(object_range.start + payload_range.end);
-    if sha256(&mapped[absolute_payload_range.clone()]) != descriptor.object_checksum {
+    if sha256(&mapped[payload_range.clone()]) != descriptor.object_checksum {
         return Err(CoreError::ChecksumMismatch {
             context: "segment object",
         });
     }
     Ok(SegmentObject {
         backing: SegmentObjectBacking::Mapped(mapped),
-        payload_range: absolute_payload_range,
+        payload_range,
     })
 }
 
@@ -732,14 +745,14 @@ fn open_store_from_superblock(
         ObjectType::Manifest,
         active_superblock.generation,
     )?;
-    let manifest_checksum = ActiveManifest::checksum(&manifest_bytes);
+    let manifest_checksum = ActiveManifest::checksum(manifest_bytes);
     if manifest_checksum != active_superblock.manifest_checksum {
         return Err(CoreError::ChecksumMismatch {
             context: "manifest",
         });
     }
 
-    let manifest = ActiveManifest::decode(&manifest_bytes)?;
+    let manifest = ActiveManifest::decode(manifest_bytes)?;
     if manifest.generation != active_superblock.generation {
         return Err(CoreError::InvalidManifest(
             "manifest generation does not match active superblock".to_owned(),
@@ -843,14 +856,14 @@ fn encode_object_header(
     header
 }
 
-fn decode_object(
-    object_bytes: &[u8],
+fn decode_object<'a>(
+    object_bytes: &'a [u8],
     expected_type: ObjectType,
     expected_generation: u64,
-) -> Result<Vec<u8>, CoreError> {
+) -> Result<&'a [u8], CoreError> {
     let payload_range =
         decode_object_payload_range(object_bytes, expected_type, expected_generation)?;
-    Ok(object_bytes[payload_range].to_vec())
+    Ok(&object_bytes[payload_range])
 }
 
 fn decode_object_payload_range(
@@ -1188,10 +1201,97 @@ mod tests {
         assert_eq!(snapshot.manifest.generation, 1);
         assert_eq!(snapshot.manifest.segments.len(), 1);
         assert_eq!(generation_two.manifest.generation, 2);
-        assert_eq!(generation_two.manifest.segments.len(), 2);
+        assert_eq!(generation_two.manifest.segments.len(), 1);
         assert_eq!(
             read_segment_object(&path, &snapshot.manifest.segments[0]).expect("snapshot object"),
             b"segment-one"
+        );
+        assert_eq!(
+            read_segment_object(&path, &generation_two.manifest.segments[0])
+                .expect("latest object"),
+            b"segment-two"
+        );
+    }
+
+    #[test]
+    fn publish_segment_replaces_only_the_published_family() {
+        let temp_dir = tempdir().expect("tempdir");
+        let path = temp_dir.path().join("family-replace.wax");
+
+        create_empty_store(&path).expect("store should be created");
+        publish_segment(
+            &path,
+            PendingSegmentDescriptor {
+                family: SegmentKind::Doc,
+                family_version: 1,
+                flags: 0,
+                doc_id_start: 0,
+                doc_id_end_exclusive: 1,
+                min_timestamp_ms: 0,
+                max_timestamp_ms: 0,
+                live_items: 1,
+                tombstoned_items: 0,
+                backend_id: 0,
+                backend_aux: 0,
+            },
+            b"doc-one",
+        )
+        .expect("first doc publish");
+        publish_segment(
+            &path,
+            PendingSegmentDescriptor {
+                family: SegmentKind::Txt,
+                family_version: 1,
+                flags: 0,
+                doc_id_start: 0,
+                doc_id_end_exclusive: 1,
+                min_timestamp_ms: 0,
+                max_timestamp_ms: 0,
+                live_items: 1,
+                tombstoned_items: 0,
+                backend_id: 0,
+                backend_aux: 0,
+            },
+            b"text-one",
+        )
+        .expect("text publish");
+        let opened = publish_segment(
+            &path,
+            PendingSegmentDescriptor {
+                family: SegmentKind::Doc,
+                family_version: 1,
+                flags: 0,
+                doc_id_start: 1,
+                doc_id_end_exclusive: 2,
+                min_timestamp_ms: 0,
+                max_timestamp_ms: 0,
+                live_items: 1,
+                tombstoned_items: 0,
+                backend_id: 0,
+                backend_aux: 0,
+            },
+            b"doc-two",
+        )
+        .expect("second doc publish");
+
+        assert_eq!(opened.manifest.segments.len(), 2);
+        assert_eq!(
+            opened
+                .manifest
+                .segments
+                .iter()
+                .filter(|segment| segment.family == SegmentKind::Doc)
+                .count(),
+            1
+        );
+        assert_eq!(
+            opened
+                .manifest
+                .segments
+                .iter()
+                .filter(|segment| segment.family == SegmentKind::Txt)
+                .count(),
+            1
         );
     }
 

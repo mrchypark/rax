@@ -454,12 +454,16 @@ impl RuntimeStoreWriter<'_> {
 
         let ordered_documents = raw_ordered_documents(&documents);
         let text_inputs = raw_text_inputs(&documents);
-        let mut pending_segments = vec![
+        let doc_pending =
             wax_v2_docstore::prepare_raw_documents_segment(&store_path, ordered_documents)
-                .map_err(|error| RuntimeError::Storage(docstore_error(error)))?,
-            wax_v2_text::prepare_text_segment_from_documents(&text_inputs)
-                .map_err(RuntimeError::Storage)?,
-        ];
+                .map_err(|error| RuntimeError::Storage(docstore_error(error)))?;
+        let mut text_pending = wax_v2_text::prepare_text_segment_from_documents(&text_inputs)
+            .map_err(RuntimeError::Storage)?;
+        text_pending.descriptor.doc_id_start = doc_pending.descriptor.doc_id_start;
+        text_pending.descriptor.doc_id_end_exclusive = doc_pending.descriptor.doc_id_end_exclusive;
+        let active_doc_id_range =
+            doc_pending.descriptor.doc_id_start..doc_pending.descriptor.doc_id_end_exclusive;
+        let mut pending_segments = vec![doc_pending, text_pending];
         let mut published_families = vec![RuntimePublishFamily::Doc, RuntimePublishFamily::Text];
 
         if let Some(vectors) = vectors {
@@ -499,13 +503,14 @@ impl RuntimeStoreWriter<'_> {
                 .into_iter()
                 .map(|vector| (vector.doc_id, vector.values))
                 .collect::<Vec<_>>();
-            pending_segments.push(
-                wax_v2_vector::prepare_raw_vector_segment(
-                    self.store.manifest.vector_profile.embedding_dimensions as usize,
-                    &vector_inputs,
-                )
-                .map_err(RuntimeError::Storage)?,
-            );
+            let mut vector_pending = wax_v2_vector::prepare_raw_vector_segment(
+                self.store.manifest.vector_profile.embedding_dimensions as usize,
+                &vector_inputs,
+            )
+            .map_err(RuntimeError::Storage)?;
+            vector_pending.descriptor.doc_id_start = active_doc_id_range.start;
+            vector_pending.descriptor.doc_id_end_exclusive = active_doc_id_range.end;
+            pending_segments.push(vector_pending);
             published_families.push(RuntimePublishFamily::Vector);
         }
 
@@ -587,11 +592,33 @@ impl RuntimeStoreWriter<'_> {
             .into_iter()
             .map(|vector| (vector.doc_id, vector.values))
             .collect::<Vec<_>>();
-        let pending_segment = wax_v2_vector::prepare_raw_vector_segment(
+        let doc_id_map = self
+            .store
+            .docstore
+            .build_doc_id_map()
+            .map_err(|error| RuntimeError::Storage(docstore_error(error)))?;
+        let mut active_wax_doc_ids = vector_inputs
+            .iter()
+            .map(|(doc_id, _)| {
+                doc_id_map.wax_doc_id(doc_id).ok_or_else(|| {
+                    RuntimeError::Storage(format!("missing wax doc id binding for {doc_id}"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        active_wax_doc_ids.sort_unstable();
+        let doc_id_start = active_wax_doc_ids.first().copied().unwrap_or(0);
+        let doc_id_end_exclusive = active_wax_doc_ids
+            .last()
+            .map(|doc_id| doc_id + 1)
+            .unwrap_or(doc_id_start);
+
+        let mut pending_segment = wax_v2_vector::prepare_raw_vector_segment(
             self.store.manifest.vector_profile.embedding_dimensions as usize,
             &vector_inputs,
         )
         .map_err(RuntimeError::Storage)?;
+        pending_segment.descriptor.doc_id_start = doc_id_start;
+        pending_segment.descriptor.doc_id_end_exclusive = doc_id_end_exclusive;
         let opened = wax_v2_core::publish_segments(&store_path, vec![pending_segment])
             .map_err(|error| RuntimeError::Storage(error.to_string()))?;
 
@@ -780,7 +807,7 @@ mod tests {
     use tempfile::tempdir;
     use wax_bench_model::embed_text;
     use wax_bench_packer::{pack_adhoc_dataset, pack_dataset, AdhocPackRequest, PackRequest};
-    use wax_v2_core::create_empty_store;
+    use wax_v2_core::{create_empty_store, open_store, SegmentKind};
     use wax_v2_docstore::Docstore;
     use wax_v2_text::publish_compatibility_text_segment;
     use wax_v2_vector::publish_compatibility_vector_segment;
@@ -1268,6 +1295,85 @@ mod tests {
             report.published_families,
             vec![RuntimePublishFamily::Vector]
         );
+    }
+
+    #[test]
+    fn publish_raw_snapshot_replaces_family_segments_and_preserves_doc_id_ranges() {
+        let dataset_dir = tempdir().unwrap();
+        let source_dir = tempdir().unwrap();
+        let docs_path = source_dir.path().join("docs.ndjson");
+        fs::write(
+            &docs_path,
+            concat!(
+                "{\"doc_id\":\"doc-001\",\"text\":\"alpha\"}\n",
+                "{\"doc_id\":\"doc-002\",\"text\":\"beta\"}\n",
+            ),
+        )
+        .unwrap();
+        pack_adhoc_dataset(&AdhocPackRequest::new(
+            &docs_path,
+            dataset_dir.path(),
+            "small",
+        ))
+        .unwrap();
+
+        let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
+        runtime
+            .writer()
+            .unwrap()
+            .publish_raw_snapshot(
+                vec![
+                    NewDocument::new("doc-001", "alpha"),
+                    NewDocument::new("doc-002", "beta"),
+                ],
+                Some(vec![
+                    NewDocumentVector::new("doc-001", embed_text("alpha", 384)),
+                    NewDocumentVector::new("doc-002", embed_text("beta", 384)),
+                ]),
+            )
+            .unwrap();
+
+        runtime
+            .writer()
+            .unwrap()
+            .publish_raw_snapshot(
+                vec![NewDocument::new("doc-003", "gamma")],
+                Some(vec![NewDocumentVector::new(
+                    "doc-003",
+                    embed_text("gamma", 384),
+                )]),
+            )
+            .unwrap();
+
+        let opened = open_store(&dataset_dir.path().join("store.wax")).unwrap();
+        let doc_segments = opened
+            .manifest
+            .segments
+            .iter()
+            .filter(|segment| segment.family == SegmentKind::Doc)
+            .collect::<Vec<_>>();
+        let text_segments = opened
+            .manifest
+            .segments
+            .iter()
+            .filter(|segment| segment.family == SegmentKind::Txt)
+            .collect::<Vec<_>>();
+        let vector_segments = opened
+            .manifest
+            .segments
+            .iter()
+            .filter(|segment| segment.family == SegmentKind::Vec)
+            .collect::<Vec<_>>();
+
+        assert_eq!(doc_segments.len(), 1);
+        assert_eq!(text_segments.len(), 1);
+        assert_eq!(vector_segments.len(), 1);
+        assert_eq!(doc_segments[0].doc_id_start, 2);
+        assert_eq!(doc_segments[0].doc_id_end_exclusive, 3);
+        assert_eq!(text_segments[0].doc_id_start, 2);
+        assert_eq!(text_segments[0].doc_id_end_exclusive, 3);
+        assert_eq!(vector_segments[0].doc_id_start, 2);
+        assert_eq!(vector_segments[0].doc_id_end_exclusive, 3);
     }
 
     #[test]
