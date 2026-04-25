@@ -5,7 +5,6 @@ use std::ops::Range;
 use std::path::Path;
 
 use fs2::FileExt;
-use memmap2::{Mmap, MmapOptions};
 use sha2::{Digest, Sha256};
 
 const FILE_MAGIC: &[u8; 8] = b"RAXWAXV2";
@@ -456,13 +455,13 @@ pub struct SegmentObject {
 
 #[derive(Debug)]
 enum SegmentObjectBacking {
-    Mapped(Mmap),
+    Owned(Vec<u8>),
 }
 
 impl SegmentObject {
     pub fn as_slice(&self) -> &[u8] {
         let bytes = match &self.backing {
-            SegmentObjectBacking::Mapped(bytes) => bytes.as_ref(),
+            SegmentObjectBacking::Owned(bytes) => bytes.as_slice(),
         };
         &bytes[self.payload_range.clone()]
     }
@@ -661,12 +660,12 @@ pub fn read_segment_object(
     Ok(map_segment_object(path, descriptor)?.to_vec())
 }
 
-/// Maps a persisted segment object and returns a validated payload view.
+/// Reads a persisted segment object and returns a validated payload view.
 ///
 /// Safety invariant: callers only receive a shared payload view after this function has
-/// validated that the descriptor range stays within the current file length and that the mapped
-/// payload checksum matches the manifest descriptor. The underlying file must still not be
-/// externally truncated or rewritten in place while the returned mapping is alive.
+/// validated that the descriptor range stays within the current file length and that the payload
+/// checksum matches the manifest descriptor. The object bytes are owned by the returned value, so
+/// callers do not hold file descriptors or mmap handles after this function returns.
 pub fn map_segment_object(
     path: &Path,
     descriptor: &SegmentDescriptor,
@@ -691,28 +690,23 @@ pub fn map_segment_object(
     let object_length = usize::try_from(descriptor.object_length).map_err(|_| {
         CoreError::InvalidManifest("segment object length exceeds addressable memory".to_owned())
     })?;
-    let object_offset = usize::try_from(descriptor.object_offset).map_err(|_| {
-        CoreError::InvalidManifest("segment object offset exceeds addressable memory".to_owned())
-    })?;
-    let mapped = unsafe { MmapOptions::new().map(&file)? };
-    let object_end = object_offset
-        .checked_add(object_length)
-        .ok_or_else(|| CoreError::InvalidManifest("segment object range overflow".to_owned()))?;
-    let local_payload_range = decode_object_payload_range(
-        &mapped[object_offset..object_end],
+    let mut object_bytes = vec![0u8; object_length];
+    let mut file = file;
+    file.seek(SeekFrom::Start(descriptor.object_offset))?;
+    file.read_exact(&mut object_bytes)?;
+    let decoded = decode_object_payload(
+        &object_bytes,
         object_type_for_family(descriptor.family),
         descriptor.segment_generation,
     )?;
-    let payload_range =
-        object_offset + local_payload_range.start..object_offset + local_payload_range.end;
-    if sha256(&mapped[payload_range.clone()]) != descriptor.object_checksum {
+    if decoded.payload_checksum != descriptor.object_checksum {
         return Err(CoreError::ChecksumMismatch {
             context: "segment object",
         });
     }
     Ok(SegmentObject {
-        backing: SegmentObjectBacking::Mapped(mapped),
-        payload_range,
+        backing: SegmentObjectBacking::Owned(object_bytes),
+        payload_range: decoded.payload_range,
     })
 }
 
@@ -754,18 +748,18 @@ fn open_store_from_superblock(
     let mut manifest_object = vec![0u8; manifest_length as usize];
     file.seek(SeekFrom::Start(manifest_offset))?;
     file.read_exact(&mut manifest_object)?;
-    let manifest_bytes = decode_object(
+    let decoded_manifest = decode_object_payload(
         &manifest_object,
         ObjectType::Manifest,
         active_superblock.generation,
     )?;
-    let manifest_checksum = ActiveManifest::checksum(manifest_bytes);
-    if manifest_checksum != active_superblock.manifest_checksum {
+    if decoded_manifest.payload_checksum != active_superblock.manifest_checksum {
         return Err(CoreError::ChecksumMismatch {
             context: "manifest",
         });
     }
 
+    let manifest_bytes = &manifest_object[decoded_manifest.payload_range.clone()];
     let manifest = ActiveManifest::decode(manifest_bytes)?;
     if manifest.generation != active_superblock.generation {
         return Err(CoreError::InvalidManifest(
@@ -870,21 +864,17 @@ fn encode_object_header(
     header
 }
 
-fn decode_object<'a>(
-    object_bytes: &'a [u8],
-    expected_type: ObjectType,
-    expected_generation: u64,
-) -> Result<&'a [u8], CoreError> {
-    let payload_range =
-        decode_object_payload_range(object_bytes, expected_type, expected_generation)?;
-    Ok(&object_bytes[payload_range])
+#[derive(Debug)]
+struct DecodedObject {
+    payload_range: Range<usize>,
+    payload_checksum: [u8; 32],
 }
 
-fn decode_object_payload_range(
+fn decode_object_payload(
     object_bytes: &[u8],
     expected_type: ObjectType,
     expected_generation: u64,
-) -> Result<Range<usize>, CoreError> {
+) -> Result<DecodedObject, CoreError> {
     if object_bytes.len() < OBJECT_HEADER_LENGTH {
         return Err(CoreError::UnexpectedLength {
             context: "object",
@@ -925,10 +915,14 @@ fn decode_object_payload_range(
     let payload_range = OBJECT_HEADER_LENGTH..payload_end;
     let mut expected_checksum = [0u8; 32];
     expected_checksum.copy_from_slice(&object_bytes[32..64]);
-    if sha256(&object_bytes[payload_range.clone()]) != expected_checksum {
+    let payload_checksum = sha256(&object_bytes[payload_range.clone()]);
+    if payload_checksum != expected_checksum {
         return Err(CoreError::ChecksumMismatch { context: "object" });
     }
-    Ok(payload_range)
+    Ok(DecodedObject {
+        payload_range,
+        payload_checksum,
+    })
 }
 
 fn object_type_for_family(family: SegmentKind) -> ObjectType {
@@ -959,7 +953,7 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        align_up, create_empty_store, decode_object_payload_range, map_segment_object, open_store,
+        align_up, create_empty_store, decode_object_payload, map_segment_object, open_store,
         publish_segment, read_segment_object, write_zero_padding, ActiveManifest, CoreError,
         ObjectType, PendingSegmentDescriptor, SegmentDescriptor, SegmentKind, Superblock,
         DEFAULT_OBJECT_ALIGNMENT, FORMAT_VERSION, MANIFEST_MAGIC, OBJECT_HEADER_LENGTH,
@@ -1079,7 +1073,7 @@ mod tests {
         bytes[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
         bytes[16..24].copy_from_slice(&1u64.to_le_bytes());
 
-        let error = decode_object_payload_range(&bytes, ObjectType::DocSegment, 1)
+        let error = decode_object_payload(&bytes, ObjectType::DocSegment, 1)
             .expect_err("object length should fail");
 
         assert!(matches!(

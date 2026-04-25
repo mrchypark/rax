@@ -1,7 +1,7 @@
 mod documents;
 mod query_support;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -287,7 +287,7 @@ pub fn query_batch_ranked_results(
     } else {
         None
     };
-    let text_hits_by_query = text_lane
+    let mut text_hits_by_query = text_lane
         .search_batch(
             &queries
                 .iter()
@@ -302,8 +302,13 @@ pub fn query_batch_ranked_results(
                 .collect::<Vec<_>>(),
         )
         .into_iter()
-        .map(|result| (result.query_id, result.hits))
-        .collect::<HashMap<_, _>>();
+        .fold(HashMap::new(), |mut by_query, result| {
+            by_query
+                .entry(result.query_id)
+                .or_insert_with(VecDeque::new)
+                .push_back(result.hits);
+            by_query
+        });
 
     if let Some(vectors) = query_vectors.as_ref() {
         if queries.len() != vectors.len() {
@@ -335,12 +340,7 @@ pub fn query_batch_ranked_results(
                             query.query_id
                         )
                     })?;
-                let text_hits = text_hits_by_query
-                    .get(&query.query_id)
-                    .cloned()
-                    .ok_or_else(|| {
-                        format!("text hits missing for hybrid query_id: {}", query.query_id)
-                    })?;
+                let text_hits = pop_text_hits(&mut text_hits_by_query, &query.query_id)?;
                 let report = hybrid_search_with_diagnostics(
                     &text_hits,
                     vector_lane
@@ -372,12 +372,7 @@ pub fn query_batch_ranked_results(
                         force_exact,
                     )?
             } else {
-                text_hits_by_query
-                    .get(&query.query_id)
-                    .cloned()
-                    .ok_or_else(|| {
-                        format!("text hits missing for text query_id: {}", query.query_id)
-                    })?
+                pop_text_hits(&mut text_hits_by_query, &query.query_id)?
             };
             let hits: Vec<String> = if query.filter_spec.is_empty() {
                 hits.into_iter().take(limit).collect()
@@ -408,6 +403,16 @@ pub fn query_batch_ranked_results(
             })
         })
         .collect()
+}
+
+fn pop_text_hits(
+    text_hits_by_query: &mut HashMap<String, VecDeque<Vec<String>>>,
+    query_id: &str,
+) -> Result<Vec<String>, String> {
+    text_hits_by_query
+        .get_mut(query_id)
+        .and_then(VecDeque::pop_front)
+        .ok_or_else(|| format!("text hits missing for text query_id: {query_id}"))
 }
 
 pub fn profile_first_vector_query(
@@ -588,9 +593,13 @@ impl WaxEngine for PackedTextEngine {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{HashMap, VecDeque};
+
     use wax_bench_model::VectorQueryMode;
     use wax_v2_docstore::parse_document_id;
     use wax_v2_vector::resolve_auto_vector_mode;
+
+    use crate::pop_text_hits;
 
     #[test]
     fn auto_mode_prefers_exact_flat_for_small_corpora() {
@@ -654,6 +663,24 @@ mod tests {
         let doc_id = parse_document_id(line, "document line").unwrap();
 
         assert_eq!(doc_id.as_ref(), "doc-001");
+    }
+
+    #[test]
+    fn pop_text_hits_preserves_duplicate_query_id_order() {
+        let mut hits_by_query = HashMap::from([(
+            "q-duplicate".to_owned(),
+            VecDeque::from([vec!["doc-001".to_owned()], vec!["doc-002".to_owned()]]),
+        )]);
+
+        assert_eq!(
+            pop_text_hits(&mut hits_by_query, "q-duplicate").unwrap(),
+            vec!["doc-001".to_owned()]
+        );
+        assert_eq!(
+            pop_text_hits(&mut hits_by_query, "q-duplicate").unwrap(),
+            vec!["doc-002".to_owned()]
+        );
+        assert!(pop_text_hits(&mut hits_by_query, "q-duplicate").is_err());
     }
 
     #[test]
