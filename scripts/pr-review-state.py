@@ -67,6 +67,26 @@ query($owner:String!,$repo:String!,$number:Int!,$cursor:String) {
 }
 """
 
+REVIEWS_QUERY = """
+query($owner:String!,$repo:String!,$number:Int!,$cursor:String) {
+  repository(owner:$owner,name:$repo) {
+    pullRequest(number:$number) {
+      reviews(first: 100, after:$cursor) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          state
+          author { login }
+          submittedAt
+          body
+        }
+      }
+    }
+  }
+}
+"""
+
 
 def run_gh(query: str, variables: dict[str, Any]) -> dict[str, Any]:
     command = ["gh", "api", "graphql", "-f", f"query={query}"]
@@ -78,6 +98,36 @@ def run_gh(query: str, variables: dict[str, Any]) -> dict[str, Any]:
     return json.loads(result.stdout)
 
 
+def require_pr(payload: dict[str, Any], owner: str, repo: str, number: int) -> dict[str, Any]:
+    repository = payload.get("data", {}).get("repository")
+    if repository is None:
+        raise ValueError(f"repository not found: {owner}/{repo}")
+    pull_request = repository.get("pullRequest")
+    if pull_request is None:
+        raise ValueError(f"pull request not found: {owner}/{repo}#{number}")
+    return pull_request
+
+
+def fetch_reviews(owner: str, repo: str, number: int) -> dict[str, Any]:
+    cursor = None
+    total_count = 0
+    reviews: list[dict[str, Any]] = []
+    while True:
+        payload = run_gh(
+            REVIEWS_QUERY,
+            {"owner": owner, "repo": repo, "number": number, "cursor": cursor},
+        )
+        current = require_pr(payload, owner, repo, number)
+        page = current["reviews"]
+        total_count = page["totalCount"]
+        reviews.extend(page["nodes"])
+        page_info = page["pageInfo"]
+        if not page_info["hasNextPage"]:
+            break
+        cursor = page_info["endCursor"]
+    return {"totalCount": total_count, "nodes": reviews}
+
+
 def fetch_pr(owner: str, repo: str, number: int) -> dict[str, Any]:
     cursor = None
     pull_request = None
@@ -87,12 +137,7 @@ def fetch_pr(owner: str, repo: str, number: int) -> dict[str, Any]:
             QUERY,
             {"owner": owner, "repo": repo, "number": number, "cursor": cursor},
         )
-        repository = payload.get("data", {}).get("repository")
-        if repository is None:
-            raise ValueError(f"repository not found: {owner}/{repo}")
-        current = repository.get("pullRequest")
-        if current is None:
-            raise ValueError(f"pull request not found: {owner}/{repo}#{number}")
+        current = require_pr(payload, owner, repo, number)
         if pull_request is None:
             pull_request = current
         threads.extend(current["reviewThreads"]["nodes"])
@@ -103,6 +148,7 @@ def fetch_pr(owner: str, repo: str, number: int) -> dict[str, Any]:
 
     assert pull_request is not None
     pull_request["reviewThreads"]["nodes"] = threads
+    pull_request["reviews"] = fetch_reviews(owner, repo, number)
     return pull_request
 
 

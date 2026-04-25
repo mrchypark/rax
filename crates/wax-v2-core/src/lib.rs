@@ -232,7 +232,10 @@ impl ActiveManifest {
 
         let generation = read_u64(bytes, 12);
         let segment_count = read_u32(bytes, 20) as usize;
-        let expected_length = MANIFEST_HEADER_LENGTH + segment_count * SEGMENT_DESCRIPTOR_LENGTH;
+        let expected_length = segment_count
+            .checked_mul(SEGMENT_DESCRIPTOR_LENGTH)
+            .and_then(|length| length.checked_add(MANIFEST_HEADER_LENGTH))
+            .ok_or_else(|| CoreError::InvalidManifest("manifest length overflow".to_owned()))?;
         if bytes.len() != expected_length {
             return Err(CoreError::InvalidManifest(format!(
                 "manifest length mismatch: expected {expected_length} bytes, found {}",
@@ -929,8 +932,8 @@ mod tests {
     use crate::{
         align_up, create_empty_store, open_store, publish_segment, read_segment_object,
         write_zero_padding, ActiveManifest, CoreError, PendingSegmentDescriptor, SegmentDescriptor,
-        SegmentKind, Superblock, DEFAULT_OBJECT_ALIGNMENT, OBJECT_HEADER_LENGTH, OBJECT_MAGIC,
-        SUPERBLOCK_SIZE,
+        SegmentKind, Superblock, DEFAULT_OBJECT_ALIGNMENT, FORMAT_VERSION, MANIFEST_MAGIC,
+        OBJECT_HEADER_LENGTH, OBJECT_MAGIC, SUPERBLOCK_SIZE,
     };
 
     #[test]
@@ -1022,6 +1025,19 @@ mod tests {
             ActiveManifest::decode(&encoded).expect_err("manifest should reject invalid ranges");
 
         assert!(matches!(error, CoreError::InvalidManifest(message) if message.contains("doc_id")));
+    }
+
+    #[test]
+    fn manifest_decode_rejects_implausible_segment_count_before_allocation() {
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(MANIFEST_MAGIC);
+        encoded.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        encoded.extend_from_slice(&1_u64.to_le_bytes());
+        encoded.extend_from_slice(&u32::MAX.to_le_bytes());
+
+        let error = ActiveManifest::decode(&encoded).expect_err("manifest length should fail");
+
+        assert!(matches!(error, CoreError::InvalidManifest(message) if message.contains("length")));
     }
 
     #[test]

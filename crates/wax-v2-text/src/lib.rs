@@ -512,11 +512,17 @@ impl BinaryTextSegment {
 
         let record_count = read_u64(bytes, 8) as usize;
         let mut cursor = TEXT_SEGMENT_HEADER_LENGTH;
+        if record_count > bytes[cursor..].len() / 8 {
+            return Err("text segment record_count exceeds possible records in slice".to_owned());
+        }
         let mut postings = Vec::with_capacity(record_count);
         for _ in 0..record_count {
             let token_length = read_u32_at(bytes, &mut cursor)? as usize;
             let doc_count = read_u32_at(bytes, &mut cursor)? as usize;
             let token = read_string_at(bytes, &mut cursor, token_length)?;
+            if doc_count > bytes[cursor..].len() / 4 {
+                return Err("text segment doc_count exceeds possible records in slice".to_owned());
+            }
             let mut doc_ids = Vec::with_capacity(doc_count);
             for _ in 0..doc_count {
                 let doc_id_length = read_u32_at(bytes, &mut cursor)? as usize;
@@ -617,9 +623,23 @@ mod tests {
     use wax_v2_docstore::prepare_raw_documents_segment;
 
     use crate::{
-        publish_compatibility_text_segment, TextBatchQuery, TextLane, TextLaneMetadata,
-        TextLaneSource, TextQueryInputs,
+        publish_compatibility_text_segment, BinaryTextSegment, TextBatchQuery, TextLane,
+        TextLaneMetadata, TextLaneSource, TextQueryInputs,
     };
+
+    #[test]
+    fn text_segment_decode_rejects_impossible_record_count_before_allocation() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"WXTG");
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+
+        let error =
+            BinaryTextSegment::decode(&bytes).expect_err("record count should exceed payload");
+
+        assert!(error.contains("record_count"));
+    }
 
     #[test]
     fn text_lane_loads_postings_and_searches() {

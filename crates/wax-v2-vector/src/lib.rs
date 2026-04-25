@@ -1150,8 +1150,9 @@ pub fn validate_store_segment_against_dataset_pack(
     }
 
     let expected_raw_vectors = load_compatibility_raw_vectors(mount_root, manifest)?;
-    let mut expected_segment =
+    let expected_without_preview =
         BinaryVectorSegment::from_raw_vectors(metadata.dimensions, &expected_raw_vectors)?;
+    let mut expected_with_preview = expected_without_preview.clone();
     if let Some(preview_path) = metadata
         .preview_vectors_path
         .as_ref()
@@ -1163,14 +1164,14 @@ pub fn validate_store_segment_against_dataset_pack(
             metadata.dimensions,
             expected_raw_vectors.len(),
         )?;
-        expected_segment.preview_vectors = Some(preview_vectors);
+        expected_with_preview.preview_vectors = Some(preview_vectors);
     }
 
     let bytes =
         wax_v2_core::read_segment_object(&store_segment.store_path, &store_segment.descriptor)
             .map_err(|error| error.to_string())?;
     let persisted_segment = BinaryVectorSegment::decode(&bytes)?;
-    if persisted_segment != expected_segment {
+    if persisted_segment != expected_without_preview && persisted_segment != expected_with_preview {
         return Err("store vector segment does not match mounted dataset vectors".to_owned());
     }
 
@@ -1407,6 +1408,9 @@ fn read_length_prefixed_strings(
     count: usize,
     cursor: &mut usize,
 ) -> Result<Vec<String>, String> {
+    if count > bytes[*cursor..].len() / 4 {
+        return Err("vector segment string count exceeds possible records in slice".to_owned());
+    }
     let mut values = Vec::with_capacity(count);
     for _ in 0..count {
         let length = read_u32_at(bytes, cursor, "doc_id")? as usize;
@@ -1630,9 +1634,10 @@ mod tests {
 
     use crate::{
         dot_product_f32le, load_compatibility_raw_vectors, load_vector_segment,
-        prepare_raw_vector_segment, publish_compatibility_vector_segment, read_u64,
-        resolve_auto_vector_mode, BinaryVectorSegment, ByteStorage, StoreVectorSegment, VectorLane,
-        VectorLaneMetadata, VectorQueryInputs,
+        prepare_raw_vector_segment, publish_compatibility_vector_segment,
+        read_length_prefixed_strings, read_u64, resolve_auto_vector_mode,
+        validate_store_segment_against_dataset_pack, BinaryVectorSegment, ByteStorage,
+        StoreVectorSegment, VectorLane, VectorLaneMetadata, VectorQueryInputs,
     };
 
     #[test]
@@ -1641,6 +1646,15 @@ mod tests {
         let score = dot_product_f32le(&[1.0, 1.0, 1.0, 1.0, 1.0], bytemuck::cast_slice(&right));
 
         assert_eq!(score, 20.0);
+    }
+
+    #[test]
+    fn vector_segment_string_reader_rejects_impossible_count_before_allocation() {
+        let mut cursor = 0usize;
+        let error = read_length_prefixed_strings(&[], usize::MAX, &mut cursor)
+            .expect_err("string count should exceed payload");
+
+        assert!(error.contains("count"));
     }
 
     #[test]
@@ -2029,6 +2043,43 @@ mod tests {
             Some("doc-017")
         );
         assert!(!lane.is_hnsw_sidecar_materialized());
+    }
+
+    #[test]
+    fn store_vector_validation_allows_raw_segment_without_preview_when_sidecar_exists() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("store.wax");
+        create_empty_store(&store_path).unwrap();
+        fs::write(
+            temp_dir.path().join("document_ids.txt"),
+            concat!("{\"doc_id\":\"doc-1\"}\n", "{\"doc_id\":\"doc-2\"}\n"),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("document_vectors.bin"),
+            bytemuck::cast_slice::<f32, u8>(&[
+                1.0f32, 0.0f32, //
+                0.0f32, 1.0f32, //
+            ]),
+        )
+        .unwrap();
+        fs::write(temp_dir.path().join("preview.bin"), [1_u8, 0, 0, 1]).unwrap();
+
+        let pending = prepare_raw_vector_segment(
+            2,
+            &[
+                ("doc-1".to_owned(), vec![1.0f32, 0.0f32]),
+                ("doc-2".to_owned(), vec![0.0f32, 1.0f32]),
+            ],
+        )
+        .unwrap();
+        publish_segments(&store_path, vec![pending]).unwrap();
+
+        validate_store_segment_against_dataset_pack(
+            temp_dir.path(),
+            &test_manifest_with_count(2, true, false),
+        )
+        .unwrap();
     }
 
     #[test]
