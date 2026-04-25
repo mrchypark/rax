@@ -87,7 +87,12 @@ def fetch_pr(owner: str, repo: str, number: int) -> dict[str, Any]:
             QUERY,
             {"owner": owner, "repo": repo, "number": number, "cursor": cursor},
         )
-        current = payload["data"]["repository"]["pullRequest"]
+        repository = payload.get("data", {}).get("repository")
+        if repository is None:
+            raise ValueError(f"repository not found: {owner}/{repo}")
+        current = repository.get("pullRequest")
+        if current is None:
+            raise ValueError(f"pull request not found: {owner}/{repo}#{number}")
         if pull_request is None:
             pull_request = current
         threads.extend(current["reviewThreads"]["nodes"])
