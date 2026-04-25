@@ -15,7 +15,9 @@ use wax_v2_core::{OpenedStore, PendingSegmentDescriptor, PendingSegmentWrite, Se
 const DOC_SEGMENT_MAGIC: &[u8; 4] = b"WXDG";
 const DOC_SEGMENT_MAJOR: u16 = 1;
 const DOC_SEGMENT_MINOR: u16 = 1;
+const DOC_SEGMENT_MINOR_V0_HEADER_LENGTH: usize = 80;
 const DOC_SEGMENT_HEADER_LENGTH: usize = 88;
+const DOC_SEGMENT_VERSION_PREFIX_LENGTH: usize = 8;
 const DOC_ROW_LENGTH: usize = 56;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,9 +332,9 @@ impl BinaryDocSegment {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, DocstoreError> {
-        if bytes.len() < DOC_SEGMENT_HEADER_LENGTH {
+        if bytes.len() < DOC_SEGMENT_VERSION_PREFIX_LENGTH {
             return Err(DocstoreError::InvalidDocument(format!(
-                "doc segment too short: expected at least {DOC_SEGMENT_HEADER_LENGTH} bytes"
+                "doc segment too short: expected at least {DOC_SEGMENT_VERSION_PREFIX_LENGTH} bytes"
             )));
         }
         if &bytes[..4] != DOC_SEGMENT_MAGIC {
@@ -346,6 +348,16 @@ impl BinaryDocSegment {
             return Err(DocstoreError::InvalidDocument(
                 "unsupported doc segment version".to_owned(),
             ));
+        }
+        let header_length = if minor == 0 {
+            DOC_SEGMENT_MINOR_V0_HEADER_LENGTH
+        } else {
+            DOC_SEGMENT_HEADER_LENGTH
+        };
+        if bytes.len() < header_length {
+            return Err(DocstoreError::InvalidDocument(format!(
+                "doc segment too short: expected at least {header_length} bytes"
+            )));
         }
 
         let row_count = read_u64_as_usize(bytes, 8, "doc segment row count")?;
@@ -364,7 +376,7 @@ impl BinaryDocSegment {
                     read_u64_as_usize(bytes, 40, "row table offset")?,
                     48,
                     80,
-                    80,
+                    DOC_SEGMENT_MINOR_V0_HEADER_LENGTH,
                 )
             } else {
                 (
@@ -372,7 +384,7 @@ impl BinaryDocSegment {
                     read_u64_as_usize(bytes, 48, "row table offset")?,
                     56,
                     88,
-                    88,
+                    DOC_SEGMENT_HEADER_LENGTH,
                 )
             };
         if payload_bytes_offset != header_length
@@ -524,9 +536,9 @@ struct StoreDocEntry {
 impl StoreDocSegment {
     fn open(bytes: wax_v2_core::SegmentObject) -> Result<Self, DocstoreError> {
         let bytes = Arc::new(bytes);
-        if bytes.len() < DOC_SEGMENT_HEADER_LENGTH {
+        if bytes.len() < DOC_SEGMENT_VERSION_PREFIX_LENGTH {
             return Err(DocstoreError::InvalidDocument(format!(
-                "doc segment too short: expected at least {DOC_SEGMENT_HEADER_LENGTH} bytes"
+                "doc segment too short: expected at least {DOC_SEGMENT_VERSION_PREFIX_LENGTH} bytes"
             )));
         }
         if &bytes[..4] != DOC_SEGMENT_MAGIC {
@@ -541,6 +553,16 @@ impl StoreDocSegment {
                 "unsupported doc segment version".to_owned(),
             ));
         }
+        let header_length = if minor == 0 {
+            DOC_SEGMENT_MINOR_V0_HEADER_LENGTH
+        } else {
+            DOC_SEGMENT_HEADER_LENGTH
+        };
+        if bytes.len() < header_length {
+            return Err(DocstoreError::InvalidDocument(format!(
+                "doc segment too short: expected at least {header_length} bytes"
+            )));
+        }
 
         let row_count = read_u64_as_usize(bytes.as_ref(), 8, "doc segment row count")?;
         let payload_bytes_offset = read_u64_as_usize(bytes.as_ref(), 16, "payload offset")?;
@@ -553,7 +575,7 @@ impl StoreDocSegment {
                     read_u64_as_usize(bytes.as_ref(), 40, "row table offset")?,
                     48,
                     80,
-                    80,
+                    DOC_SEGMENT_MINOR_V0_HEADER_LENGTH,
                 )
             } else {
                 (
@@ -561,7 +583,7 @@ impl StoreDocSegment {
                     read_u64_as_usize(bytes.as_ref(), 48, "row table offset")?,
                     56,
                     88,
-                    88,
+                    DOC_SEGMENT_HEADER_LENGTH,
                 )
             };
         if payload_bytes_offset != header_length
@@ -1599,6 +1621,20 @@ mod tests {
     }
 
     #[test]
+    fn binary_doc_segment_decode_accepts_minimal_minor_v0_header() {
+        let segment = BinaryDocSegment {
+            doc_id_map: test_doc_id_map(&[]),
+            records: Vec::new(),
+        };
+        let bytes = encode_minor_v0_segment(&segment).unwrap();
+
+        let decoded = BinaryDocSegment::decode(&bytes).unwrap();
+
+        assert_eq!(bytes.len(), 80);
+        assert!(decoded.records.is_empty());
+    }
+
+    #[test]
     fn open_dataset_pack_loads_documents_by_id_from_offsets() {
         let temp_dir = tempdir().unwrap();
         let docs_path = temp_dir.path().join("docs.ndjson");
@@ -1951,6 +1987,40 @@ mod tests {
             .unwrap();
 
         assert_eq!(documents["doc-001"]["text"], "alpha");
+    }
+
+    #[test]
+    fn open_store_segment_accepts_minimal_minor_v0_header() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("store.wax");
+        create_empty_store(&store_path).unwrap();
+        let segment = BinaryDocSegment {
+            doc_id_map: test_doc_id_map(&[]),
+            records: Vec::new(),
+        };
+        let bytes = encode_minor_v0_segment(&segment).unwrap();
+        publish_segment(
+            &store_path,
+            PendingSegmentDescriptor {
+                family: SegmentKind::Doc,
+                family_version: 1,
+                flags: 0,
+                doc_id_start: 0,
+                doc_id_end_exclusive: 0,
+                min_timestamp_ms: 0,
+                max_timestamp_ms: 0,
+                live_items: 0,
+                tombstoned_items: 0,
+                backend_id: 0,
+                backend_aux: 0,
+            },
+            &bytes,
+        )
+        .unwrap();
+
+        let reopened = Docstore::open(temp_dir.path(), &test_manifest(false)).unwrap();
+
+        assert!(reopened.load_document_ids().unwrap().is_empty());
     }
 
     #[test]

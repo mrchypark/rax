@@ -1,6 +1,6 @@
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
@@ -254,7 +254,7 @@ impl StructuredMemorySession {
             .map_err(io_error)?;
         file.lock_exclusive().map_err(io_error)?;
 
-        let mut records = load_records(&self.storage_path)?;
+        let mut records = load_records_from_file(&mut file)?;
         self.next_record_id = records
             .last()
             .map(|record| record.record_id + 1)
@@ -439,7 +439,15 @@ impl StructuredMemorySession {
 }
 
 fn load_records(path: &Path) -> Result<Vec<StructuredMemoryRecord>, StructuredMemoryError> {
-    BufReader::new(OpenOptions::new().read(true).open(path).map_err(io_error)?)
+    let mut file = OpenOptions::new().read(true).open(path).map_err(io_error)?;
+    load_records_from_file(&mut file)
+}
+
+fn load_records_from_file(
+    file: &mut std::fs::File,
+) -> Result<Vec<StructuredMemoryRecord>, StructuredMemoryError> {
+    file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+    BufReader::new(file)
         .lines()
         .filter_map(|line| match line {
             Ok(line) if line.trim().is_empty() => None,
@@ -603,6 +611,35 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].record_id, 0);
+    }
+
+    #[test]
+    fn structured_memory_record_reloads_latest_records_before_assigning_id() {
+        let root = tempdir().unwrap();
+        let mut first = StructuredMemorySession::open(root.path()).unwrap();
+        let mut second = StructuredMemorySession::open(root.path()).unwrap();
+
+        second
+            .record(NewStructuredMemoryRecord::fact(
+                "person:bob",
+                "name",
+                serde_json::json!("Bob"),
+                "bootstrap-test",
+                100,
+            ))
+            .unwrap();
+        let record = first
+            .record(NewStructuredMemoryRecord::fact(
+                "person:alice",
+                "name",
+                serde_json::json!("Alice"),
+                "bootstrap-test",
+                200,
+            ))
+            .unwrap();
+
+        assert_eq!(record.record_id, 1);
+        assert_eq!(first.records.len(), 2);
     }
 
     #[test]
