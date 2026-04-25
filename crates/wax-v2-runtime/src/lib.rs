@@ -322,10 +322,10 @@ impl RuntimeStore {
                         "vector_query is required for hybrid search".to_owned(),
                     )
                 })?;
-                let text_limit = request
-                    .top_k
-                    .saturating_mul(3)
-                    .clamp(request.top_k, self.manifest.corpus.doc_count as usize);
+                let corpus_doc_count = self.manifest.corpus.doc_count as usize;
+                let text_limit = corpus_doc_count
+                    .max(1)
+                    .min(request.top_k.saturating_mul(3).max(1));
                 let text_hits = self
                     .ensure_text_lane()?
                     .search_with_limit(text_query, text_limit);
@@ -880,6 +880,52 @@ mod tests {
 
         assert_eq!(response.hits.len(), 1);
         assert_eq!(response.hits[0].doc_id, "doc-003");
+    }
+
+    #[test]
+    fn runtime_hybrid_search_handles_top_k_larger_than_corpus() {
+        let dataset_dir = tempdir().unwrap();
+        let fixture_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/bench/source/minimal");
+        pack_dataset(&PackRequest::new(
+            &fixture_root,
+            dataset_dir.path(),
+            "small",
+            "clean",
+        ))
+        .unwrap();
+
+        let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
+        runtime
+            .writer()
+            .unwrap()
+            .publish_raw_snapshot(
+                vec![
+                    NewDocument::new("doc-001", "alpha note"),
+                    NewDocument::new("doc-002", "beta note"),
+                    NewDocument::new("doc-003", "gamma note"),
+                ],
+                Some(vec![
+                    NewDocumentVector::new("doc-001", embed_text("alpha note", 384)),
+                    NewDocumentVector::new("doc-002", embed_text("beta note", 384)),
+                    NewDocumentVector::new("doc-003", embed_text("gamma note", 384)),
+                ]),
+            )
+            .unwrap();
+
+        let response = runtime
+            .search(RuntimeSearchRequest {
+                mode: RuntimeSearchMode::Hybrid,
+                text_query: Some("alpha".to_owned()),
+                vector_query: Some(embed_text("alpha note", 384)),
+                top_k: 5,
+                include_preview: false,
+            })
+            .unwrap();
+
+        assert!(!response.hits.is_empty());
+        assert!(response.hits.len() <= 3);
+        assert_eq!(response.hits[0].doc_id, "doc-001");
     }
 
     #[test]

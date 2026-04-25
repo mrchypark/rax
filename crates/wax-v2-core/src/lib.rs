@@ -495,11 +495,7 @@ pub fn create_empty_store(path: &Path) -> Result<(), CoreError> {
         ActiveManifest::checksum(&manifest_bytes),
     );
 
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(path)?;
+    let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
     let encoded_superblock = superblock.encode();
     file.write_all(&encoded_superblock)?;
     file.write_all(&encoded_superblock)?;
@@ -1045,6 +1041,16 @@ mod tests {
                 ..opened.superblock.active_manifest_offset as usize + 4],
             OBJECT_MAGIC
         );
+    }
+
+    #[test]
+    fn create_empty_store_rejects_existing_path() {
+        let temp_dir = tempdir().expect("tempdir");
+        let path = temp_dir.path().join("empty.wax");
+        std::fs::write(&path, b"existing").expect("seed existing file");
+
+        let error = create_empty_store(&path).expect_err("existing store path should fail");
+        assert!(matches!(error, CoreError::Io(_)));
     }
 
     #[test]
