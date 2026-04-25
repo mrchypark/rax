@@ -457,6 +457,7 @@ impl RuntimeStoreWriter<'_> {
             documents.iter().map(|document| document.doc_id.as_str()),
             "publish_raw_snapshot documents",
         )?;
+        self.store.refresh_read_state()?;
 
         let ordered_documents = raw_ordered_documents(&documents);
         let text_inputs = raw_text_inputs(&documents);
@@ -1430,6 +1431,66 @@ mod tests {
         assert_eq!(
             report.published_families,
             vec![RuntimePublishFamily::Vector]
+        );
+    }
+
+    #[test]
+    fn publish_raw_snapshot_vectors_use_latest_store_doc_id_map() {
+        let dataset_dir = tempdir().unwrap();
+        let source_dir = tempdir().unwrap();
+        let docs_path = source_dir.path().join("docs.ndjson");
+        fs::write(
+            &docs_path,
+            concat!(
+                "{\"doc_id\":\"doc-001\",\"text\":\"alpha\"}\n",
+                "{\"doc_id\":\"doc-002\",\"text\":\"beta\"}\n",
+            ),
+        )
+        .unwrap();
+        pack_adhoc_dataset(&AdhocPackRequest::new(
+            &docs_path,
+            dataset_dir.path(),
+            "small",
+        ))
+        .unwrap();
+
+        let mut stale_runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
+        let mut writer_runtime = RuntimeStore::open(dataset_dir.path()).unwrap();
+        writer_runtime
+            .writer()
+            .unwrap()
+            .publish_raw_documents(vec![NewDocument::new("doc-002", "beta first")])
+            .unwrap();
+
+        stale_runtime
+            .writer()
+            .unwrap()
+            .publish_raw_snapshot(
+                vec![
+                    NewDocument::new("doc-002", "beta first"),
+                    NewDocument::new("doc-001", "alpha second"),
+                ],
+                Some(vec![
+                    NewDocumentVector::new("doc-002", embed_text("beta first", 384)),
+                    NewDocumentVector::new("doc-001", embed_text("alpha second", 384)),
+                ]),
+            )
+            .unwrap();
+
+        let opened = open_store(&dataset_dir.path().join("store.wax")).unwrap();
+        let vector_segment = opened
+            .manifest
+            .segments
+            .iter()
+            .filter(|segment| segment.family == SegmentKind::Vec)
+            .last()
+            .unwrap();
+        let bytes =
+            map_segment_object(&dataset_dir.path().join("store.wax"), vector_segment).unwrap();
+
+        assert_eq!(
+            read_vector_segment_doc_ids(&bytes),
+            vec!["doc-002".to_owned(), "doc-001".to_owned()]
         );
     }
 

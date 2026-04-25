@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 use std::cell::UnsafeCell;
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -40,6 +42,42 @@ impl HnswIoOwner {
                 .load_hnsw::<f32, DistCosine>()
                 .map_err(|error| error.to_string())
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TopHit {
+    index: usize,
+    score: f32,
+    doc_id: Vec<u8>,
+}
+
+impl PartialEq for TopHit {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for TopHit {}
+
+impl PartialOrd for TopHit {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TopHit {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .score
+            .total_cmp(&self.score)
+            .then_with(|| self.doc_id.cmp(&other.doc_id))
+    }
+}
+
+impl TopHit {
+    fn as_tuple(&self) -> (usize, f32) {
+        (self.index, self.score)
     }
 }
 
@@ -602,15 +640,14 @@ impl VectorLane {
             .expect("preview path checked by caller");
         let preview_limit = self.preview_limit(limit);
         let approximate_start = Instant::now();
-        let mut candidates = Vec::with_capacity(preview_limit);
-        for (index, vector) in preview_vectors
-            .as_slice()
-            .chunks_exact(self.dimensions)
-            .enumerate()
-        {
-            let score = dot_product_i8_preview(query, vector);
-            self.collect_top_hit(&mut candidates, preview_limit, index, score);
-        }
+        let candidates = self.top_hits_from_scores(
+            preview_limit,
+            preview_vectors
+                .as_slice()
+                .chunks_exact(self.dimensions)
+                .enumerate()
+                .map(|(index, vector)| (index, dot_product_i8_preview(query, vector))),
+        );
         let approximate_search_ms = elapsed_ms(approximate_start.elapsed());
 
         let rerank_start = Instant::now();
@@ -706,16 +743,14 @@ impl VectorLane {
     }
 
     fn search_exact(&self, query: &[f32], limit: usize) -> Vec<String> {
-        let mut hits = Vec::with_capacity(limit.min(self.skeleton_header.doc_count as usize));
-        for index in 0..self.skeleton_header.doc_count as usize {
-            let score = dot_product_f32le(query, self.vector_bytes(index));
-            self.collect_top_hit(&mut hits, limit, index, score);
-        }
-
-        hits.sort_by(|left, right| self.compare_hits(*left, *right));
-        hits.into_iter()
-            .map(|(index, _)| self.doc_id(index).to_owned())
-            .collect()
+        self.top_hits_from_scores(
+            limit,
+            (0..self.skeleton_header.doc_count as usize)
+                .map(|index| (index, dot_product_f32le(query, self.vector_bytes(index)))),
+        )
+        .into_iter()
+        .map(|(index, _)| self.doc_id(index).to_owned())
+        .collect()
     }
 
     fn search_with_quantized_preview(&self, query: &[f32], limit: usize) -> Vec<String> {
@@ -724,15 +759,14 @@ impl VectorLane {
             .as_ref()
             .expect("preview path checked by caller");
         let preview_limit = self.preview_limit(limit);
-        let mut candidates = Vec::with_capacity(preview_limit);
-        for (index, vector) in preview_vectors
-            .as_slice()
-            .chunks_exact(self.dimensions)
-            .enumerate()
-        {
-            let score = dot_product_i8_preview(query, vector);
-            self.collect_top_hit(&mut candidates, preview_limit, index, score);
-        }
+        let candidates = self.top_hits_from_scores(
+            preview_limit,
+            preview_vectors
+                .as_slice()
+                .chunks_exact(self.dimensions)
+                .enumerate()
+                .map(|(index, vector)| (index, dot_product_i8_preview(query, vector))),
+        );
 
         let mut reranked = Vec::with_capacity(candidates.len());
         for (index, _) in candidates {
@@ -774,28 +808,53 @@ impl VectorLane {
 
     fn collect_top_hit(
         &self,
-        hits: &mut Vec<(usize, f32)>,
+        hits: &mut BinaryHeap<TopHit>,
         limit: usize,
         index: usize,
         score: f32,
     ) {
         let candidate = (index, score);
         if hits.len() < limit {
-            hits.push(candidate);
+            hits.push(self.top_hit(index, score));
             return;
         }
 
-        let Some((worst_index, worst_hit)) = hits
-            .iter()
-            .copied()
-            .enumerate()
-            .max_by(|(_, left), (_, right)| self.compare_hits(*left, *right))
-        else {
-            return;
-        };
+        if hits
+            .peek()
+            .is_some_and(|worst_hit| self.compare_hits(candidate, worst_hit.as_tuple()).is_lt())
+        {
+            hits.pop();
+            hits.push(self.top_hit(index, score));
+        }
+    }
 
-        if self.compare_hits(candidate, worst_hit).is_lt() {
-            hits[worst_index] = candidate;
+    fn top_hits_from_scores(
+        &self,
+        limit: usize,
+        scores: impl IntoIterator<Item = (usize, f32)>,
+    ) -> Vec<(usize, f32)> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        let mut hits = BinaryHeap::with_capacity(limit);
+        for (index, score) in scores {
+            self.collect_top_hit(&mut hits, limit, index, score);
+        }
+
+        let mut hits = hits
+            .into_iter()
+            .map(|hit| hit.as_tuple())
+            .collect::<Vec<_>>();
+        hits.sort_by(|left, right| self.compare_hits(*left, *right));
+        hits
+    }
+
+    fn top_hit(&self, index: usize, score: f32) -> TopHit {
+        TopHit {
+            index,
+            score,
+            doc_id: self.doc_id_bytes(index).to_vec(),
         }
     }
 
