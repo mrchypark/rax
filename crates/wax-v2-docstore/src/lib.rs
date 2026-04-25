@@ -523,14 +523,10 @@ struct StoreDocSegment {
     minor: u16,
     bytes: Arc<wax_v2_core::SegmentObject>,
     payload_range: Range<usize>,
-    rows_by_wax_doc_id: Vec<StoreDocEntry>,
+    row_table_range: Range<usize>,
+    row_count: usize,
     ordered_doc_ids: Vec<String>,
     doc_id_map: Option<DocIdMap>,
-}
-
-#[derive(Debug, Clone)]
-struct StoreDocEntry {
-    row: DocRow,
 }
 
 impl StoreDocSegment {
@@ -619,27 +615,19 @@ impl StoreDocSegment {
         }
 
         let binding_section = &bytes[binding_bytes_offset..row_table_offset];
-        let row_table = &bytes[row_table_offset..row_table_end];
         let mut previous_doc_id = None;
         let doc_id_map = if minor == 0 {
             None
         } else {
             Some(DocIdMap::decode_json(binding_section)?)
         };
-        let mut rows_by_wax_doc_id = Vec::with_capacity(row_count);
         let mut ordered_doc_ids = Vec::with_capacity(row_count);
 
-        for row_bytes in row_table.chunks_exact(DOC_ROW_LENGTH) {
-            let row = DocRow {
-                doc_id: read_u64(row_bytes, 0),
-                timestamp_ms: read_u64(row_bytes, 8),
-                flags: read_u32(row_bytes, 16),
-                payload_offset: read_u64(row_bytes, 24),
-                payload_length: read_u64(row_bytes, 32),
-                metadata_ref: SectionRef::from_packed(read_u64(row_bytes, 40)),
-                preview_ref: SectionRef::from_packed(read_u64(row_bytes, 48)),
-            };
-
+        for row_index in 0..row_count {
+            let row = read_doc_row(
+                &bytes[row_table_offset + row_index * DOC_ROW_LENGTH
+                    ..row_table_offset + (row_index + 1) * DOC_ROW_LENGTH],
+            );
             if previous_doc_id.is_some_and(|previous| previous >= row.doc_id) {
                 return Err(DocstoreError::InvalidDocument(
                     "doc rows must be sorted by doc_id".to_owned(),
@@ -659,15 +647,14 @@ impl StoreDocSegment {
                     })?;
                 ordered_doc_ids.push(external_doc_id);
             }
-
-            rows_by_wax_doc_id.push(StoreDocEntry { row });
         }
 
         Ok(Self {
             minor,
             bytes,
             payload_range: payload_bytes_offset..metadata_bytes_offset,
-            rows_by_wax_doc_id,
+            row_table_range: row_table_offset..row_table_end,
+            row_count,
             ordered_doc_ids,
             doc_id_map,
         })
@@ -689,14 +676,10 @@ impl StoreDocSegment {
             let Some(wax_doc_id) = doc_id_map.wax_doc_id(doc_id) else {
                 continue;
             };
-            let Ok(index) = self
-                .rows_by_wax_doc_id
-                .binary_search_by_key(&wax_doc_id, |entry| entry.row.doc_id)
-            else {
+            let Some(row) = self.find_row_by_wax_doc_id(wax_doc_id) else {
                 continue;
             };
-            let entry = &self.rows_by_wax_doc_id[index];
-            let (_, value) = self.parse_payload_document(entry)?;
+            let (_, value) = self.parse_payload_document(&row)?;
             documents.insert(doc_id.clone(), value);
         }
         Ok(documents)
@@ -705,9 +688,8 @@ impl StoreDocSegment {
     fn ordered_documents(&self) -> Result<Vec<(String, Value)>, DocstoreError> {
         if self.minor == 0 {
             return self
-                .rows_by_wax_doc_id
-                .iter()
-                .map(|entry| self.parse_payload_document(entry))
+                .rows()
+                .map(|row| self.parse_payload_document(&row))
                 .collect();
         }
 
@@ -728,9 +710,8 @@ impl StoreDocSegment {
     fn load_document_ids(&self) -> Result<Vec<String>, DocstoreError> {
         if self.minor == 0 {
             return self
-                .rows_by_wax_doc_id
-                .iter()
-                .map(|entry| self.parse_payload_doc_id(entry))
+                .rows()
+                .map(|row| self.parse_payload_doc_id(&row))
                 .collect();
         }
 
@@ -743,11 +724,10 @@ impl StoreDocSegment {
         }
 
         let bindings = self
-            .rows_by_wax_doc_id
-            .iter()
-            .map(|entry| {
-                self.parse_payload_doc_id(entry)
-                    .map(|external_doc_id| DocIdBinding::new(entry.row.doc_id, external_doc_id))
+            .rows()
+            .map(|row| {
+                self.parse_payload_doc_id(&row)
+                    .map(|external_doc_id| DocIdBinding::new(row.doc_id, external_doc_id))
             })
             .collect::<Result<Vec<_>, _>>()?;
         DocIdMap::from_bindings(bindings)
@@ -763,8 +743,8 @@ impl StoreDocSegment {
             .collect::<HashSet<_>>();
         let mut documents = HashMap::new();
 
-        for entry in &self.rows_by_wax_doc_id {
-            let (external_doc_id, value) = self.parse_payload_document(entry)?;
+        for row in self.rows() {
+            let (external_doc_id, value) = self.parse_payload_document(&row)?;
             if remaining.remove(external_doc_id.as_str()) {
                 documents.insert(external_doc_id, value);
                 if remaining.is_empty() {
@@ -776,8 +756,32 @@ impl StoreDocSegment {
         Ok(documents)
     }
 
-    fn parse_payload_doc_id(&self, entry: &StoreDocEntry) -> Result<String, DocstoreError> {
-        let payload = self.payload_bytes(entry)?;
+    fn row_at(&self, index: usize) -> DocRow {
+        let start = self.row_table_range.start + index * DOC_ROW_LENGTH;
+        read_doc_row(&self.bytes[start..start + DOC_ROW_LENGTH])
+    }
+
+    fn rows(&self) -> impl Iterator<Item = DocRow> + '_ {
+        (0..self.row_count).map(|index| self.row_at(index))
+    }
+
+    fn find_row_by_wax_doc_id(&self, wax_doc_id: u64) -> Option<DocRow> {
+        let mut low = 0usize;
+        let mut high = self.row_count;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let row = self.row_at(mid);
+            match row.doc_id.cmp(&wax_doc_id) {
+                std::cmp::Ordering::Less => low = mid + 1,
+                std::cmp::Ordering::Equal => return Some(row),
+                std::cmp::Ordering::Greater => high = mid,
+            }
+        }
+        None
+    }
+
+    fn parse_payload_doc_id(&self, row: &DocRow) -> Result<String, DocstoreError> {
+        let payload = self.payload_bytes(row)?;
         let payload_text = std::str::from_utf8(payload)
             .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))?;
         parse_document_id(payload_text, "store-backed document payload")
@@ -785,11 +789,8 @@ impl StoreDocSegment {
             .map_err(DocstoreError::InvalidDocument)
     }
 
-    fn parse_payload_document(
-        &self,
-        entry: &StoreDocEntry,
-    ) -> Result<(String, Value), DocstoreError> {
-        let payload = self.payload_bytes(entry)?;
+    fn parse_payload_document(&self, row: &DocRow) -> Result<(String, Value), DocstoreError> {
+        let payload = self.payload_bytes(row)?;
         let value: Value = serde_json::from_slice(payload)?;
         let object = value.as_object().ok_or_else(|| {
             DocstoreError::InvalidDocument("document line must be a json object".to_owned())
@@ -806,13 +807,25 @@ impl StoreDocSegment {
         Ok((external_doc_id, Value::Object(object.clone())))
     }
 
-    fn payload_bytes<'a>(&'a self, entry: &StoreDocEntry) -> Result<&'a [u8], DocstoreError> {
+    fn payload_bytes<'a>(&'a self, row: &DocRow) -> Result<&'a [u8], DocstoreError> {
         read_section_bytes(
             &self.bytes[self.payload_range.clone()],
-            entry.row.payload_offset,
-            entry.row.payload_length,
+            row.payload_offset,
+            row.payload_length,
             "payload",
         )
+    }
+}
+
+fn read_doc_row(row_bytes: &[u8]) -> DocRow {
+    DocRow {
+        doc_id: read_u64(row_bytes, 0),
+        timestamp_ms: read_u64(row_bytes, 8),
+        flags: read_u32(row_bytes, 16),
+        payload_offset: read_u64(row_bytes, 24),
+        payload_length: read_u64(row_bytes, 32),
+        metadata_ref: SectionRef::from_packed(read_u64(row_bytes, 40)),
+        preview_ref: SectionRef::from_packed(read_u64(row_bytes, 48)),
     }
 }
 

@@ -298,6 +298,29 @@ impl RuntimeStore {
                 "runtime store is already closed".to_owned(),
             ));
         }
+        match &request.mode {
+            RuntimeSearchMode::Text if request.text_query.is_none() => {
+                return Err(RuntimeError::InvalidRequest(
+                    "text_query is required for text search".to_owned(),
+                ));
+            }
+            RuntimeSearchMode::Vector if request.vector_query.is_none() => {
+                return Err(RuntimeError::InvalidRequest(
+                    "vector_query is required for vector search".to_owned(),
+                ));
+            }
+            RuntimeSearchMode::Hybrid if request.text_query.is_none() => {
+                return Err(RuntimeError::InvalidRequest(
+                    "text_query is required for hybrid search".to_owned(),
+                ));
+            }
+            RuntimeSearchMode::Hybrid if request.vector_query.is_none() => {
+                return Err(RuntimeError::InvalidRequest(
+                    "vector_query is required for hybrid search".to_owned(),
+                ));
+            }
+            _ => {}
+        }
         if request.top_k == 0 {
             return Ok(RuntimeSearchResponse { hits: Vec::new() });
         }
@@ -384,6 +407,9 @@ impl RuntimeStore {
     fn refresh_read_state_if_store_generation_changed(&mut self) -> Result<(), RuntimeError> {
         let store_path = self.store_path();
         if !store_path.exists() {
+            if self.store_generation.is_some() {
+                self.refresh_read_state()?;
+            }
             return Ok(());
         }
         let current_generation = store_manifest_generation_from_store(&store_path)?;
@@ -1268,6 +1294,36 @@ mod tests {
     }
 
     #[test]
+    fn runtime_search_validates_mode_inputs_before_zero_top_k_short_circuit() {
+        let dataset_dir = tempdir().unwrap();
+        let fixture_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/bench/source/minimal");
+        pack_dataset(&PackRequest::new(
+            &fixture_root,
+            dataset_dir.path(),
+            "small",
+            "clean",
+        ))
+        .unwrap();
+
+        let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
+
+        let error = runtime
+            .search(RuntimeSearchRequest {
+                mode: RuntimeSearchMode::Hybrid,
+                text_query: Some("alpha".to_owned()),
+                vector_query: None,
+                top_k: 0,
+                include_preview: false,
+            })
+            .unwrap_err();
+
+        assert!(
+            matches!(error, crate::RuntimeError::InvalidRequest(message) if message.contains("vector_query is required for hybrid search"))
+        );
+    }
+
+    #[test]
     fn runtime_hybrid_search_uses_live_doc_count_for_raw_publish_overfetch() {
         let dataset_dir = tempdir().unwrap();
         let source_dir = tempdir().unwrap();
@@ -1771,6 +1827,64 @@ mod tests {
             refreshed.hits[0].preview.as_deref(),
             Some("fresh remote token")
         );
+    }
+
+    #[test]
+    fn runtime_search_invalidates_cached_lanes_when_store_file_is_removed() {
+        let dataset_dir = tempdir().unwrap();
+        let fixture_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/bench/source/minimal");
+        let manifest = pack_dataset(&PackRequest::new(
+            &fixture_root,
+            dataset_dir.path(),
+            "small",
+            "clean",
+        ))
+        .unwrap();
+
+        let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
+        runtime
+            .writer()
+            .unwrap()
+            .import_compatibility_snapshot()
+            .unwrap();
+        let first = runtime
+            .search(RuntimeSearchRequest {
+                mode: RuntimeSearchMode::Text,
+                text_query: Some("rust benchmark".to_owned()),
+                vector_query: None,
+                top_k: 1,
+                include_preview: false,
+            })
+            .unwrap();
+        assert_eq!(first.hits[0].doc_id, "doc-001");
+
+        fs::remove_file(dataset_dir.path().join("store.wax")).unwrap();
+        for kind in [
+            "documents",
+            "document_offsets",
+            "text_postings",
+            "document_ids",
+        ] {
+            for file in manifest.files.iter().filter(|file| file.kind == kind) {
+                let path = dataset_dir.path().join(&file.path);
+                if path.exists() {
+                    fs::remove_file(path).unwrap();
+                }
+            }
+        }
+
+        let error = runtime
+            .search(RuntimeSearchRequest {
+                mode: RuntimeSearchMode::Text,
+                text_query: Some("rust benchmark".to_owned()),
+                vector_query: None,
+                top_k: 1,
+                include_preview: false,
+            })
+            .unwrap_err();
+
+        assert!(matches!(error, crate::RuntimeError::Storage(_)));
     }
 
     #[test]
