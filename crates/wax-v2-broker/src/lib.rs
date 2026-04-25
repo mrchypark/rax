@@ -41,6 +41,7 @@ pub struct SessionNewDocument {
     pub text: String,
     pub metadata: serde_json::Value,
     pub timestamp_ms: Option<u64>,
+    pub extra_fields: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -200,6 +201,9 @@ impl WaxBroker {
                             .with_metadata(document.metadata);
                         if let Some(timestamp_ms) = document.timestamp_ms {
                             runtime_document = runtime_document.with_timestamp_ms(timestamp_ms);
+                        }
+                        for (key, value) in document.extra_fields {
+                            runtime_document = runtime_document.with_extra_field(key, value);
                         }
                         runtime_document
                     })

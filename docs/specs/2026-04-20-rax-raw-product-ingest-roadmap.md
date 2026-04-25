@@ -271,6 +271,9 @@ Slice G handoff status:
 - `wax-v2-broker` now exposes raw document and raw vector ingest requests above the existing session boundary
 - `wax-v2-mcp` now exposes transport-ready `IngestDocuments` and `IngestVectors` requests plus `RawIngested` responses
 - the first product raw-ingest migration keeps family boundaries explicit rather than inventing a generic multi-family envelope before the runtime actually has one
+- `publish_raw_documents` is now incremental only against active store-owned raw document segments; it does not silently merge compatibility pack sidecars into product ingest state when the store has no `Doc` segment yet
+- long-lived runtime, broker, structured-memory, and multimodal sessions now refresh read state before serving reads that may otherwise observe stale data after another session writes
+- the MCP surface now requires an allowed root and preserves unknown flattened top-level document payload fields through broker raw ingest
 - `import-compat` remains available as the explicit legacy bridge alongside the new raw product-ingest surface
 - targeted CLI and MCP raw-ingest contracts are green, and fresh full-workspace verification is also green when `cargo test --workspace --quiet` runs under a workspace-local `TMPDIR`
 
@@ -308,6 +311,10 @@ Slice H handoff status:
 - The first raw document ingest implementation is a bootstrap product surface over `Doc` plus `Txt` only; it intentionally stops short of vector ingest, multimodal session unification, or root-level manifest independence.
 - Family-explicit product verbs remain the public partial-update surface, while a separate shared full-snapshot runtime primitive now carries the stricter equivalence and compatibility-bridge convergence semantics.
 - Benchmark coverage remains mandatory, but the target is shared builder verification rather than permanent compatibility-only publication logic.
+- Product raw document ingest now treats the active store `Doc` segment as the only carry-forward source. Compatibility pack documents remain a bridge input for explicit compatibility import or full-snapshot equivalence, not an implicit merge source for incremental product writes.
+- Store publication paths now use generation or document-segment preconditions around merge, validation, and publish so concurrent writers fail closed instead of clobbering unseen updates.
+- MCP session roots are now fail-closed to a configured allowed root; arbitrary filesystem roots are no longer part of the transport-ready surface.
+- Missing HNSW sidecar files now fall back to exact-flat even when HNSW mode is explicitly requested, matching runtime search fallback behavior instead of failing during lane load.
 
 ## Verification Strategy
 

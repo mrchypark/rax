@@ -255,6 +255,7 @@ impl MultimodalIngestSession {
     ) -> Result<MultimodalAsset, MultimodalError> {
         self.ensure_open()?;
         validate_import_request(&new_asset)?;
+        reject_managed_source_path(&new_asset.source_path, &self.root)?;
 
         let mut metadata_file = OpenOptions::new()
             .read(true)
@@ -326,6 +327,7 @@ impl MultimodalIngestSession {
         query: MultimodalAssetQuery,
     ) -> Result<Option<MultimodalAsset>, MultimodalError> {
         self.ensure_open()?;
+        self.refresh_assets()?;
         Ok(self
             .assets
             .iter()
@@ -335,6 +337,7 @@ impl MultimodalIngestSession {
 
     pub fn list_assets(&mut self) -> Result<Vec<MultimodalAsset>, MultimodalError> {
         self.ensure_open()?;
+        self.refresh_assets()?;
         Ok(self.assets.clone())
     }
 
@@ -343,6 +346,7 @@ impl MultimodalIngestSession {
         query: PhotoAssetQuery,
     ) -> Result<Option<PhotoAsset>, MultimodalError> {
         self.ensure_open()?;
+        self.refresh_assets()?;
         Ok(self
             .assets
             .iter()
@@ -354,6 +358,7 @@ impl MultimodalIngestSession {
 
     pub fn list_photo_assets(&mut self) -> Result<Vec<PhotoAsset>, MultimodalError> {
         self.ensure_open()?;
+        self.refresh_assets()?;
         Ok(self
             .assets
             .iter()
@@ -367,6 +372,7 @@ impl MultimodalIngestSession {
         query: VideoAssetQuery,
     ) -> Result<Option<VideoAsset>, MultimodalError> {
         self.ensure_open()?;
+        self.refresh_assets()?;
         Ok(self
             .assets
             .iter()
@@ -378,6 +384,7 @@ impl MultimodalIngestSession {
 
     pub fn list_video_assets(&mut self) -> Result<Vec<VideoAsset>, MultimodalError> {
         self.ensure_open()?;
+        self.refresh_assets()?;
         Ok(self
             .assets
             .iter()
@@ -397,6 +404,11 @@ impl MultimodalIngestSession {
                 "multimodal ingest session is already closed".to_owned(),
             ));
         }
+        Ok(())
+    }
+
+    fn refresh_assets(&mut self) -> Result<(), MultimodalError> {
+        self.assets = load_assets(&self.metadata_path)?;
         Ok(())
     }
 }
@@ -462,6 +474,21 @@ fn validate_import_request(request: &NewMultimodalAssetImport) -> Result<(), Mul
         return Err(MultimodalError::InvalidRequest(format!(
             "multimodal source path is not a file: {}",
             request.source_path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn reject_managed_source_path(source_path: &Path, root: &Path) -> Result<(), MultimodalError> {
+    let source_path = source_path.canonicalize().map_err(io_error)?;
+    let asset_root = root
+        .join(MULTIMODAL_ASSET_DIR_NAME)
+        .canonicalize()
+        .map_err(io_error)?;
+    if source_path.starts_with(&asset_root) {
+        return Err(MultimodalError::InvalidRequest(format!(
+            "multimodal source path cannot be inside managed asset directory: {}",
+            source_path.display()
         )));
     }
     Ok(())

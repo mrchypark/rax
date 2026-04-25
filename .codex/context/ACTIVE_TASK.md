@@ -93,6 +93,11 @@ Done:
 - compatibility `Vec` publication now translates dataset-pack vector payloads through the same raw vector builder used by product ingest
 - `wax-v2-runtime` now exposes a shared `publish_raw_snapshot` primitive that stages `Doc`/`Txt` and optional `Vec` publication in one generation
 - the new `raw_compat_publish_semantics_contract` proves compatibility import and raw full-snapshot publish now converge on the same one-generation report and semantic segment descriptor set for equivalent inputs
+- post-completion review hardening now makes `publish_raw_documents` incremental only against active store `Doc` segments, while `publish_raw_snapshot` remains the explicit full-replacement primitive
+- raw document and vector publication now reuses the validated store generation or document-segment identity as the final publish precondition
+- long-lived runtime and broker sessions refresh read state when another handle advances `store.wax`, and structured-memory plus multimodal bootstrap sessions refresh sidecar-backed reads before returning data
+- MCP raw ingest now preserves unknown flattened top-level document fields and constrains session roots to a configured allowed root
+- explicit HNSW lane loading now falls back to exact-flat if declared sidecar files are missing
 
 Next verification target:
 
@@ -122,6 +127,9 @@ Notes:
 - the first raw product-ingest surface now covers `Doc`, `Txt`, and caller-provided `Vec` publication, but vector ingest is still manifest-sized and does not yet claim sparse partial updates
 - the first equivalence proof remains runtime-first for read behavior, and the stricter publish-semantics proof now exists separately via the shared full-snapshot publish primitive
 - the first product raw-ingest surface is family-explicit (`docs` and `vectors`) rather than a generic multi-family envelope
+- product `publish_raw_documents` treats active store `Doc` segments as the only incremental carry-forward source; compatibility pack sidecars are not implicitly merged into product raw ingest
+- raw publication preconditions must be bound to the exact generation or document-segment identity used for merge or validation
+- MCP session roots should stay fail-closed to an allowed root until a broader authorization model exists
 - fresh targeted raw-ingest verification and fresh `cargo test --workspace --quiet` verification are both green when the run uses a workspace-local `TMPDIR` instead of the exhausted system temp volume
 - post-completion review hardening now keeps mounted-pack versus store-segment consistency checks for `Doc`, `Txt`, and `Vec` at the benchmark harness boundary; runtime keeps `store.wax` authoritative so raw-ingested stores can legitimately diverge from leftover benchmark sidecars
 - the first broker/session slice is intentionally local and in-process; it does not yet define transport, concurrency, or pooling policy beyond single-process ownership

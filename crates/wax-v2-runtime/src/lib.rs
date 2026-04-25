@@ -166,6 +166,7 @@ pub struct RuntimeStore {
     docstore: Docstore,
     text_lane: Option<TextLane>,
     vector_lane: Option<VectorLane>,
+    store_generation: Option<u64>,
     closed: bool,
 }
 
@@ -250,10 +251,16 @@ impl RuntimeStore {
         manifest: DatasetPackManifest,
     ) -> Result<Self, RuntimeError> {
         let store_path = root.join("store.wax");
-        if store_path.exists() {
-            wax_v2_core::open_store(&store_path)
-                .map_err(|error| RuntimeError::Storage(error.to_string()))?;
-        }
+        let store_generation = if store_path.exists() {
+            Some(
+                wax_v2_core::open_store(&store_path)
+                    .map_err(runtime_core_error)?
+                    .manifest
+                    .generation,
+            )
+        } else {
+            None
+        };
         let docstore = Docstore::open(root, &manifest)
             .map_err(|error| RuntimeError::Storage(docstore_error(error)))?;
 
@@ -263,6 +270,7 @@ impl RuntimeStore {
             docstore,
             text_lane: None,
             vector_lane: None,
+            store_generation,
             closed: false,
         })
     }
@@ -293,6 +301,7 @@ impl RuntimeStore {
         if request.top_k == 0 {
             return Ok(RuntimeSearchResponse { hits: Vec::new() });
         }
+        self.refresh_read_state_if_store_generation_changed()?;
 
         let doc_ids = match request.mode {
             RuntimeSearchMode::Text => {
@@ -359,10 +368,28 @@ impl RuntimeStore {
     }
 
     fn refresh_read_state(&mut self) -> Result<(), RuntimeError> {
+        let store_path = self.store_path();
+        self.store_generation = if store_path.exists() {
+            Some(store_manifest_generation_from_store(&store_path)?)
+        } else {
+            None
+        };
         self.docstore = Docstore::open(&self.root, &self.manifest)
             .map_err(|error| RuntimeError::Storage(docstore_error(error)))?;
         self.text_lane = None;
         self.vector_lane = None;
+        Ok(())
+    }
+
+    fn refresh_read_state_if_store_generation_changed(&mut self) -> Result<(), RuntimeError> {
+        let store_path = self.store_path();
+        if !store_path.exists() {
+            return Ok(());
+        }
+        let current_generation = store_manifest_generation_from_store(&store_path)?;
+        if self.store_generation != Some(current_generation) {
+            self.refresh_read_state()?;
+        }
         Ok(())
     }
 
@@ -436,10 +463,28 @@ impl RuntimeStore {
 
 impl RuntimeStoreWriter<'_> {
     pub fn publish_raw_documents(
-        self,
+        mut self,
         documents: Vec<NewDocument>,
     ) -> Result<RuntimePublishReport, RuntimeError> {
-        self.publish_raw_snapshot(documents, None)
+        let store_path = self.require_existing_store()?;
+        if documents.is_empty() {
+            return Err(RuntimeError::InvalidRequest(
+                "publish_raw_documents requires at least one document".to_owned(),
+            ));
+        }
+        reject_duplicate_doc_ids(
+            documents.iter().map(|document| document.doc_id.as_str()),
+            "publish_raw_documents",
+        )?;
+
+        let expected_generation = store_manifest_generation_from_store(&store_path)?;
+        let documents = self.merged_raw_documents(&store_path, expected_generation, documents)?;
+        self.publish_raw_snapshot_with_expected_generation(
+            store_path,
+            expected_generation,
+            documents,
+            None,
+        )
     }
 
     pub fn publish_raw_snapshot(
@@ -448,6 +493,22 @@ impl RuntimeStoreWriter<'_> {
         vectors: Option<Vec<NewDocumentVector>>,
     ) -> Result<RuntimePublishReport, RuntimeError> {
         let store_path = self.require_existing_store()?;
+        let expected_generation = store_manifest_generation_from_store(&store_path)?;
+        self.publish_raw_snapshot_with_expected_generation(
+            store_path,
+            expected_generation,
+            documents,
+            vectors,
+        )
+    }
+
+    fn publish_raw_snapshot_with_expected_generation(
+        self,
+        store_path: PathBuf,
+        expected_generation: u64,
+        documents: Vec<NewDocument>,
+        vectors: Option<Vec<NewDocumentVector>>,
+    ) -> Result<RuntimePublishReport, RuntimeError> {
         if documents.is_empty() {
             return Err(RuntimeError::InvalidRequest(
                 "publish_raw_snapshot requires at least one document".to_owned(),
@@ -458,6 +519,7 @@ impl RuntimeStoreWriter<'_> {
             "publish_raw_snapshot documents",
         )?;
         self.store.refresh_read_state()?;
+        ensure_store_generation_unchanged_from_store(&store_path, expected_generation)?;
 
         let ordered_documents = raw_ordered_documents(&documents);
         let text_inputs = raw_text_inputs(&documents);
@@ -529,14 +591,69 @@ impl RuntimeStoreWriter<'_> {
             published_families.push(RuntimePublishFamily::Vector);
         }
 
-        let opened = wax_v2_core::publish_segments(&store_path, pending_segments)
-            .map_err(|error| RuntimeError::Storage(error.to_string()))?;
+        let opened = wax_v2_core::publish_segments_with_precondition(
+            &store_path,
+            pending_segments,
+            |manifest| ensure_store_generation_unchanged(manifest, expected_generation),
+        )
+        .map_err(runtime_core_error)?;
 
         self.store.refresh_read_state()?;
         Ok(RuntimePublishReport {
             generation: opened.manifest.generation,
             published_families,
         })
+    }
+
+    fn merged_raw_documents(
+        &mut self,
+        store_path: &Path,
+        expected_generation: u64,
+        documents: Vec<NewDocument>,
+    ) -> Result<Vec<NewDocument>, RuntimeError> {
+        let mut incoming_order = Vec::with_capacity(documents.len());
+        let mut incoming_by_doc_id = std::collections::HashMap::with_capacity(documents.len());
+        for document in documents {
+            incoming_order.push(document.doc_id.clone());
+            incoming_by_doc_id.insert(document.doc_id.clone(), document);
+        }
+        let opened = wax_v2_core::open_store(store_path).map_err(runtime_core_error)?;
+        ensure_store_generation_unchanged(&opened.manifest, expected_generation)
+            .map_err(runtime_core_error)?;
+        if latest_doc_segment_identity(&opened.manifest).is_none() {
+            return Ok(incoming_order
+                .into_iter()
+                .filter_map(|doc_id| incoming_by_doc_id.remove(&doc_id))
+                .collect());
+        }
+
+        self.store.refresh_read_state()?;
+        ensure_store_generation_unchanged_from_store(store_path, expected_generation)?;
+        let current_doc_ids = self
+            .store
+            .docstore
+            .load_document_ids()
+            .map_err(|error| RuntimeError::Storage(docstore_error(error)))?;
+        let current_documents = self
+            .store
+            .docstore
+            .load_documents_by_id(&current_doc_ids)
+            .map_err(|error| RuntimeError::Storage(docstore_error(error)))?;
+
+        let mut merged = Vec::with_capacity(current_doc_ids.len() + incoming_by_doc_id.len());
+        for doc_id in current_doc_ids {
+            if let Some(document) = incoming_by_doc_id.remove(&doc_id) {
+                merged.push(document);
+            } else if let Some(value) = current_documents.get(&doc_id) {
+                merged.push(new_document_from_value(value)?);
+            }
+        }
+        for doc_id in incoming_order {
+            if let Some(document) = incoming_by_doc_id.remove(&doc_id) {
+                merged.push(document);
+            }
+        }
+        Ok(merged)
     }
 
     pub fn publish_staged_compatibility_snapshot(
@@ -570,8 +687,9 @@ impl RuntimeStoreWriter<'_> {
             vectors.iter().map(|vector| vector.doc_id.as_str()),
             "publish_raw_vectors",
         )?;
-        self.store.refresh_read_state()?;
         let validated_doc_segment = latest_doc_segment_identity_from_store(&store_path)?;
+        self.store.refresh_read_state()?;
+        ensure_doc_segment_unchanged_from_store(&store_path, validated_doc_segment.as_ref())?;
 
         let doc_ids = vectors
             .iter()
@@ -670,6 +788,43 @@ fn raw_ordered_documents(documents: &[NewDocument]) -> Vec<(String, serde_json::
         .collect()
 }
 
+fn new_document_from_value(value: &serde_json::Value) -> Result<NewDocument, RuntimeError> {
+    let object = value.as_object().ok_or_else(|| {
+        RuntimeError::Storage("stored document payload must be a json object".to_owned())
+    })?;
+    let doc_id = object
+        .get("doc_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            RuntimeError::Storage("stored document payload missing doc_id".to_owned())
+        })?;
+    let text = object
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| RuntimeError::Storage("stored document payload missing text".to_owned()))?;
+    let mut document = NewDocument::new(doc_id, text).with_metadata(
+        object
+            .get("metadata")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({})),
+    );
+    if let Some(timestamp_ms) = object
+        .get("timestamp_ms")
+        .and_then(serde_json::Value::as_u64)
+    {
+        document = document.with_timestamp_ms(timestamp_ms);
+    }
+    for (key, value) in object {
+        if !matches!(
+            key.as_str(),
+            "doc_id" | "text" | "metadata" | "timestamp_ms"
+        ) {
+            document = document.with_extra_field(key.clone(), value.clone());
+        }
+    }
+    Ok(document)
+}
+
 fn vector_inputs_sorted_by_wax_doc_id(
     vectors: Vec<NewDocumentVector>,
     doc_id_map: &DocIdMap,
@@ -729,6 +884,11 @@ fn latest_doc_segment_identity_from_store(
     Ok(latest_doc_segment_identity(&opened.manifest))
 }
 
+fn store_manifest_generation_from_store(store_path: &Path) -> Result<u64, RuntimeError> {
+    let opened = wax_v2_core::open_store(store_path).map_err(runtime_core_error)?;
+    Ok(opened.manifest.generation)
+}
+
 fn latest_doc_segment_identity(
     manifest: &wax_v2_core::ActiveManifest,
 ) -> Option<DocSegmentIdentity> {
@@ -751,6 +911,36 @@ fn ensure_doc_segment_unchanged(
 
     Err(wax_v2_core::CoreError::PublishPreconditionFailed(
         "publish_raw_vectors document generation changed before vector publish; retry with latest documents"
+            .to_owned(),
+    ))
+}
+
+fn ensure_doc_segment_unchanged_from_store(
+    store_path: &Path,
+    expected: Option<&DocSegmentIdentity>,
+) -> Result<(), RuntimeError> {
+    let opened = wax_v2_core::open_store(store_path).map_err(runtime_core_error)?;
+    ensure_doc_segment_unchanged(&opened.manifest, expected).map_err(runtime_core_error)
+}
+
+fn ensure_store_generation_unchanged_from_store(
+    store_path: &Path,
+    expected: u64,
+) -> Result<(), RuntimeError> {
+    let opened = wax_v2_core::open_store(store_path).map_err(runtime_core_error)?;
+    ensure_store_generation_unchanged(&opened.manifest, expected).map_err(runtime_core_error)
+}
+
+fn ensure_store_generation_unchanged(
+    manifest: &wax_v2_core::ActiveManifest,
+    expected: u64,
+) -> Result<(), wax_v2_core::CoreError> {
+    if manifest.generation == expected {
+        return Ok(());
+    }
+
+    Err(wax_v2_core::CoreError::PublishPreconditionFailed(
+        "publish_raw_snapshot store generation changed before publish; retry with latest documents"
             .to_owned(),
     ))
 }
@@ -1443,7 +1633,7 @@ mod tests {
         runtime
             .writer()
             .unwrap()
-            .publish_raw_documents(vec![NewDocument::new("doc-001", "alpha only")])
+            .publish_raw_snapshot(vec![NewDocument::new("doc-001", "alpha only")], None)
             .unwrap();
 
         let report = runtime
@@ -1458,6 +1648,128 @@ mod tests {
         assert_eq!(
             report.published_families,
             vec![RuntimePublishFamily::Vector]
+        );
+    }
+
+    #[test]
+    fn publish_raw_documents_merges_with_existing_active_documents() {
+        let dataset_dir = tempdir().unwrap();
+        let source_dir = tempdir().unwrap();
+        let docs_path = source_dir.path().join("docs.ndjson");
+        fs::write(
+            &docs_path,
+            concat!(
+                "{\"doc_id\":\"doc-001\",\"text\":\"alpha\",\"metadata\":{\"workspace\":\"old\"},\"priority\":\"keep\"}\n",
+                "{\"doc_id\":\"doc-002\",\"text\":\"beta\",\"metadata\":{\"workspace\":\"old\"}}\n",
+            ),
+        )
+        .unwrap();
+        pack_adhoc_dataset(&AdhocPackRequest::new(
+            &docs_path,
+            dataset_dir.path(),
+            "small",
+        ))
+        .unwrap();
+
+        let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
+        runtime
+            .writer()
+            .unwrap()
+            .publish_raw_documents(vec![
+                NewDocument::new("doc-001", "alpha")
+                    .with_metadata(serde_json::json!({"workspace":"old"}))
+                    .with_extra_field("priority", serde_json::json!("keep")),
+                NewDocument::new("doc-002", "beta")
+                    .with_metadata(serde_json::json!({"workspace":"old"})),
+            ])
+            .unwrap();
+        runtime
+            .writer()
+            .unwrap()
+            .publish_raw_documents(vec![NewDocument::new("doc-003", "gamma")])
+            .unwrap();
+
+        let reopened = RuntimeStore::open(dataset_dir.path()).unwrap();
+        let doc_ids = reopened.docstore.load_document_ids().unwrap();
+        let documents = reopened.docstore.load_documents_by_id(&doc_ids).unwrap();
+
+        assert_eq!(
+            doc_ids,
+            vec![
+                "doc-001".to_owned(),
+                "doc-002".to_owned(),
+                "doc-003".to_owned()
+            ]
+        );
+        assert_eq!(
+            documents
+                .get("doc-001")
+                .and_then(|document| document.get("priority"))
+                .and_then(serde_json::Value::as_str),
+            Some("keep")
+        );
+        assert_eq!(
+            documents
+                .get("doc-003")
+                .and_then(|document| document.get("text"))
+                .and_then(serde_json::Value::as_str),
+            Some("gamma")
+        );
+    }
+
+    #[test]
+    fn runtime_search_refreshes_when_another_handle_publishes_documents() {
+        let dataset_dir = tempdir().unwrap();
+        let source_dir = tempdir().unwrap();
+        let docs_path = source_dir.path().join("docs.ndjson");
+        fs::write(
+            &docs_path,
+            concat!(
+                "{\"doc_id\":\"doc-001\",\"text\":\"alpha original\"}\n",
+                "{\"doc_id\":\"doc-002\",\"text\":\"beta original\"}\n",
+            ),
+        )
+        .unwrap();
+        pack_adhoc_dataset(&AdhocPackRequest::new(
+            &docs_path,
+            dataset_dir.path(),
+            "small",
+        ))
+        .unwrap();
+
+        let mut reader = RuntimeStore::create(dataset_dir.path()).unwrap();
+        let mut writer = RuntimeStore::open(dataset_dir.path()).unwrap();
+        let first = reader
+            .search(RuntimeSearchRequest {
+                mode: RuntimeSearchMode::Text,
+                text_query: Some("alpha".to_owned()),
+                vector_query: None,
+                top_k: 1,
+                include_preview: false,
+            })
+            .unwrap();
+        assert_eq!(first.hits[0].doc_id, "doc-001");
+
+        writer
+            .writer()
+            .unwrap()
+            .publish_raw_documents(vec![NewDocument::new("doc-003", "fresh remote token")])
+            .unwrap();
+
+        let refreshed = reader
+            .search(RuntimeSearchRequest {
+                mode: RuntimeSearchMode::Text,
+                text_query: Some("fresh remote token".to_owned()),
+                vector_query: None,
+                top_k: 1,
+                include_preview: true,
+            })
+            .unwrap();
+
+        assert_eq!(refreshed.hits[0].doc_id, "doc-003");
+        assert_eq!(
+            refreshed.hits[0].preview.as_deref(),
+            Some("fresh remote token")
         );
     }
 
@@ -1486,16 +1798,19 @@ mod tests {
         writer_runtime
             .writer()
             .unwrap()
-            .publish_raw_documents(vec![NewDocument::new("doc-001", "alpha refreshed")])
+            .publish_raw_documents(vec![
+                NewDocument::new("doc-001", "alpha refreshed"),
+                NewDocument::new("doc-002", "beta"),
+            ])
             .unwrap();
 
         let report = stale_runtime
             .writer()
             .unwrap()
-            .publish_raw_vectors(vec![NewDocumentVector::new(
-                "doc-001",
-                embed_text("alpha refreshed", 384),
-            )])
+            .publish_raw_vectors(vec![
+                NewDocumentVector::new("doc-001", embed_text("alpha refreshed", 384)),
+                NewDocumentVector::new("doc-002", embed_text("beta", 384)),
+            ])
             .unwrap();
 
         assert_eq!(

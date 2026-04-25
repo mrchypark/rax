@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use tempfile::tempdir;
 use wax_bench_model::embed_text;
 use wax_bench_packer::{pack_dataset, PackRequest};
+use wax_v2_docstore::Docstore;
 use wax_v2_runtime::RuntimeStore;
 
 use wax_v2_mcp::{McpRequest, McpResponse, WaxMcpSurface};
@@ -24,7 +25,7 @@ fn mcp_surface_ingests_documents_and_vectors_through_explicit_raw_requests() {
     let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
     runtime.close().unwrap();
 
-    let mut mcp = WaxMcpSurface::default();
+    let mut mcp = WaxMcpSurface::with_allowed_root(dataset_dir.path()).unwrap();
     let open = mcp
         .handle(McpRequest::OpenSession {
             root: dataset_dir.path().display().to_string(),
@@ -44,18 +45,23 @@ fn mcp_surface_ingests_documents_and_vectors_through_explicit_raw_requests() {
                     text: "rust benchmark guide".to_owned(),
                     metadata: serde_json::json!({"kind":"guide","workspace":"prod"}),
                     timestamp_ms: None,
+                    extra_fields: [("priority".to_owned(), serde_json::json!("p0"))]
+                        .into_iter()
+                        .collect(),
                 },
                 wax_v2_mcp::McpNewDocument {
                     doc_id: "doc-002".to_owned(),
                     text: "semantic latency checklist".to_owned(),
                     metadata: serde_json::json!({"kind":"checklist","workspace":"prod"}),
                     timestamp_ms: None,
+                    extra_fields: Default::default(),
                 },
                 wax_v2_mcp::McpNewDocument {
                     doc_id: "doc-003".to_owned(),
                     text: "hybrid search tuning notes".to_owned(),
                     metadata: serde_json::json!({"kind":"notes","workspace":"prod"}),
                     timestamp_ms: None,
+                    extra_fields: Default::default(),
                 },
             ],
         })
@@ -73,6 +79,16 @@ fn mcp_surface_ingests_documents_and_vectors_through_explicit_raw_requests() {
         }
         other => panic!("unexpected doc ingest response: {other:?}"),
     }
+    let docstore = Docstore::open(dataset_dir.path(), &manifest).unwrap();
+    let documents = docstore
+        .load_documents_by_id(&["doc-001".to_owned()])
+        .unwrap();
+    assert_eq!(
+        documents
+            .get("doc-001")
+            .and_then(|document| document.get("priority")),
+        Some(&serde_json::json!("p0"))
+    );
 
     let vector_ingest = mcp
         .handle(McpRequest::IngestVectors {

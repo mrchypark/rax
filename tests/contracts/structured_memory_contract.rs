@@ -71,6 +71,36 @@ fn structured_memory_session_queries_records_after_reopen() {
 }
 
 #[test]
+fn structured_memory_session_queries_records_published_by_another_session() {
+    let dataset_dir = tempdir().unwrap();
+
+    let mut reader = StructuredMemorySession::open(dataset_dir.path()).unwrap();
+    let mut writer = StructuredMemorySession::open(dataset_dir.path()).unwrap();
+
+    assert!(reader
+        .query(StructuredMemoryQuery::subject("person:alice"))
+        .unwrap()
+        .is_empty());
+
+    writer
+        .record(NewStructuredMemoryRecord::fact(
+            "person:alice",
+            "name",
+            serde_json::json!("Alice"),
+            "bootstrap-test",
+            1_717_171_717_000,
+        ))
+        .unwrap();
+
+    let records = reader
+        .query(StructuredMemoryQuery::subject("person:alice"))
+        .unwrap();
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].value, serde_json::json!("Alice"));
+}
+
+#[test]
 fn structured_memory_session_upserts_entities_with_kind_and_aliases() {
     let dataset_dir = tempdir().unwrap();
 

@@ -442,7 +442,7 @@ impl VectorLane {
         let dimensions = metadata.dimensions;
         let should_load_hnsw = match vector_mode {
             VectorQueryMode::Auto => false,
-            VectorQueryMode::Hnsw => true,
+            VectorQueryMode::Hnsw => hnsw_available,
             VectorQueryMode::ExactFlat | VectorQueryMode::PreviewQ8 => false,
         };
         let (hnsw_index, hnsw_sidecar_load_ms) = if should_load_hnsw {
@@ -1911,6 +1911,46 @@ mod tests {
         let lane = VectorLane::load(
             temp_dir.path(),
             &test_manifest(false, false),
+            VectorQueryMode::Hnsw,
+        )
+        .unwrap();
+
+        let profile = lane.profile_first_vector_query(VectorQueryMode::Hnsw);
+
+        assert_eq!(profile.selected_mode, VectorQueryMode::ExactFlat);
+        assert_eq!(profile.hits, vec!["doc-1", "doc-2"]);
+    }
+
+    #[test]
+    fn forced_hnsw_load_falls_back_when_manifest_sidecar_files_are_missing() {
+        let temp_dir = tempdir().unwrap();
+        fs::write(
+            temp_dir.path().join("document_ids.txt"),
+            concat!(
+                "{\"doc_id\":\"doc-1\"}\n",
+                "{\"doc_id\":\"doc-2\"}\n",
+                "{\"doc_id\":\"doc-3\"}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("document_vectors.bin"),
+            bytemuck::cast_slice::<f32, u8>(&[
+                1.0f32, 0.0f32, //
+                0.9f32, 0.1f32, //
+                0.0f32, 1.0f32, //
+            ]),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("query_vectors.jsonl"),
+            "{\"query_id\":\"q-001\",\"top_k\":2,\"vector\":[1.0,0.0],\"lane_eligibility\":{\"text\":false,\"vector\":true,\"hybrid\":false}}\n",
+        )
+        .unwrap();
+
+        let lane = VectorLane::load(
+            temp_dir.path(),
+            &test_manifest(false, true),
             VectorQueryMode::Hnsw,
         )
         .unwrap();

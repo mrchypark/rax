@@ -330,6 +330,7 @@ impl StructuredMemorySession {
         query: StructuredEntityQuery,
     ) -> Result<Option<StructuredEntity>, StructuredMemoryError> {
         self.ensure_open()?;
+        self.refresh_records()?;
 
         let mut kind: Option<(String, StructuredMemoryProvenance)> = None;
         let mut aliases = Vec::new();
@@ -406,6 +407,7 @@ impl StructuredMemorySession {
         query: StructuredMemoryQuery,
     ) -> Result<Vec<StructuredMemoryRecord>, StructuredMemoryError> {
         self.ensure_open()?;
+        self.refresh_records()?;
         Ok(self
             .records
             .iter()
@@ -434,6 +436,16 @@ impl StructuredMemorySession {
                 "structured memory session is already closed".to_owned(),
             ));
         }
+        Ok(())
+    }
+
+    fn refresh_records(&mut self) -> Result<(), StructuredMemoryError> {
+        let records = load_records(&self.storage_path)?;
+        self.next_record_id = records
+            .last()
+            .map(|record| record.record_id + 1)
+            .unwrap_or(0);
+        self.records = records;
         Ok(())
     }
 }

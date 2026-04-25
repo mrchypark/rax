@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 use wax_v2_broker::{
     SessionNewDocument, SessionNewDocumentVector, SessionSearchRequest, WaxBroker,
@@ -9,6 +11,8 @@ pub struct McpNewDocument {
     pub text: String,
     pub metadata: serde_json::Value,
     pub timestamp_ms: Option<u64>,
+    #[serde(default, flatten)]
+    pub extra_fields: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -103,19 +107,42 @@ impl std::fmt::Display for McpError {
     }
 }
 
-#[derive(Default)]
 pub struct WaxMcpSurface {
     broker: WaxBroker,
+    allowed_root: Option<PathBuf>,
+}
+
+impl Default for WaxMcpSurface {
+    fn default() -> Self {
+        Self {
+            broker: WaxBroker::default(),
+            allowed_root: Some(
+                std::env::current_dir()
+                    .expect("current directory should be available")
+                    .canonicalize()
+                    .expect("current directory should canonicalize"),
+            ),
+        }
+    }
 }
 
 impl WaxMcpSurface {
+    pub fn with_allowed_root(root: &Path) -> Result<Self, McpError> {
+        let allowed_root = root.canonicalize().map_err(|error| McpError {
+            code: McpErrorCode::InvalidRequest,
+            message: error.to_string(),
+        })?;
+        Ok(Self {
+            broker: WaxBroker::default(),
+            allowed_root: Some(allowed_root),
+        })
+    }
+
     pub fn handle(&mut self, request: McpRequest) -> Result<McpResponse, McpError> {
         match request {
             McpRequest::OpenSession { root } => {
-                let session_id = self
-                    .broker
-                    .open_session(std::path::Path::new(&root))
-                    .map_err(broker_error)?;
+                let root = self.authorized_root(&root)?;
+                let session_id = self.broker.open_session(&root).map_err(broker_error)?;
                 Ok(McpResponse::SessionOpened {
                     session_id: session_id.as_u64(),
                 })
@@ -179,6 +206,7 @@ impl WaxMcpSurface {
                                 text: document.text,
                                 metadata: document.metadata,
                                 timestamp_ms: document.timestamp_ms,
+                                extra_fields: document.extra_fields,
                             })
                             .collect(),
                     )
@@ -233,6 +261,26 @@ impl WaxMcpSurface {
                 Ok(McpResponse::SessionClosed { session_id })
             }
         }
+    }
+
+    fn authorized_root(&self, root: &str) -> Result<PathBuf, McpError> {
+        let root = Path::new(root).canonicalize().map_err(|error| McpError {
+            code: McpErrorCode::InvalidRequest,
+            message: error.to_string(),
+        })?;
+        if let Some(allowed_root) = &self.allowed_root {
+            if !root.starts_with(allowed_root) {
+                return Err(McpError {
+                    code: McpErrorCode::InvalidRequest,
+                    message: format!(
+                        "session root {} is outside allowed root {}",
+                        root.display(),
+                        allowed_root.display()
+                    ),
+                });
+            }
+        }
+        Ok(root)
     }
 }
 

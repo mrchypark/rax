@@ -6,7 +6,7 @@ use tempfile::tempdir;
 use wax_bench_packer::{pack_dataset, PackRequest};
 use wax_v2_runtime::{NewDocument, RuntimeStore};
 
-use wax_v2_broker::{SessionSearchRequest, WaxBroker};
+use wax_v2_broker::{SessionNewDocument, SessionSearchRequest, WaxBroker};
 
 #[test]
 fn broker_session_reuses_open_store_across_multiple_text_searches() {
@@ -146,4 +146,60 @@ fn broker_session_searches_raw_prepared_store_without_sidecars() {
     );
 
     broker.close_session(session_id).unwrap();
+}
+
+#[test]
+fn broker_session_search_refreshes_documents_published_by_another_session() {
+    let dataset_dir = tempdir().unwrap();
+    let fixture_root =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/bench/source/minimal");
+    pack_dataset(&PackRequest::new(
+        &fixture_root,
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+
+    let mut broker = WaxBroker::default();
+    let reader_id = broker.open_session(dataset_dir.path()).unwrap();
+    let writer_id = broker.open_session(dataset_dir.path()).unwrap();
+
+    let first = broker
+        .search(
+            reader_id,
+            SessionSearchRequest::text("rust benchmark").with_top_k(1),
+        )
+        .unwrap();
+    assert_eq!(first.hits[0].doc_id, "doc-001");
+
+    broker
+        .ingest_documents(
+            writer_id,
+            vec![SessionNewDocument {
+                doc_id: "doc-004".to_owned(),
+                text: "fresh broker token".to_owned(),
+                metadata: serde_json::json!({"kind":"note"}),
+                timestamp_ms: None,
+                extra_fields: Default::default(),
+            }],
+        )
+        .unwrap();
+
+    let refreshed = broker
+        .search(
+            reader_id,
+            SessionSearchRequest::text("fresh broker token")
+                .with_top_k(1)
+                .with_preview(true),
+        )
+        .unwrap();
+    assert_eq!(refreshed.hits[0].doc_id, "doc-004");
+    assert_eq!(
+        refreshed.hits[0].preview.as_deref(),
+        Some("fresh broker token")
+    );
+
+    broker.close_session(reader_id).unwrap();
+    broker.close_session(writer_id).unwrap();
 }
