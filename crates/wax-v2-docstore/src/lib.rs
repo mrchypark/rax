@@ -19,6 +19,7 @@ const DOC_SEGMENT_MINOR_V0_HEADER_LENGTH: usize = 80;
 const DOC_SEGMENT_HEADER_LENGTH: usize = 88;
 const DOC_SEGMENT_VERSION_PREFIX_LENGTH: usize = 8;
 const DOC_ROW_LENGTH: usize = 56;
+const MAX_DOCUMENT_OFFSET_ENTRY_LENGTH: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DocstoreError {
@@ -1374,12 +1375,14 @@ fn load_documents_by_id_from_offsets(
     target_doc_ids: &[String],
 ) -> Result<HashMap<String, Value>, DocstoreError> {
     let mut file = File::open(path)?;
+    let file_length = file.metadata()?.len();
     let mut documents = HashMap::new();
 
     for doc_id in target_doc_ids {
         let Some(entry) = offset_index.get(doc_id.as_str()) else {
             continue;
         };
+        validate_document_offset_entry(doc_id, entry, file_length)?;
         file.seek(SeekFrom::Start(entry.offset))?;
         let mut buffer = vec![0u8; entry.length as usize];
         file.read_exact(&mut buffer)?;
@@ -1393,6 +1396,37 @@ fn load_documents_by_id_from_offsets(
     }
 
     Ok(documents)
+}
+
+fn validate_document_offset_entry(
+    doc_id: &str,
+    entry: &DocumentOffsetEntry,
+    file_length: u64,
+) -> Result<(), DocstoreError> {
+    if entry.length == 0 {
+        return Err(DocstoreError::InvalidDocument(format!(
+            "document offset entry for {doc_id} has zero length"
+        )));
+    }
+    if entry.length > MAX_DOCUMENT_OFFSET_ENTRY_LENGTH {
+        return Err(DocstoreError::InvalidDocument(format!(
+            "document offset entry for {doc_id} exceeds maximum length"
+        )));
+    }
+    let end = entry.offset.checked_add(entry.length).ok_or_else(|| {
+        DocstoreError::InvalidDocument(format!("document offset entry for {doc_id} overflows"))
+    })?;
+    if end > file_length {
+        return Err(DocstoreError::InvalidDocument(format!(
+            "document offset entry for {doc_id} extends past end of documents file"
+        )));
+    }
+    let _ = usize::try_from(entry.length).map_err(|_| {
+        DocstoreError::InvalidDocument(format!(
+            "document offset entry for {doc_id} exceeds addressable memory"
+        ))
+    })?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1600,6 +1634,7 @@ mod tests {
         parse_document_id, read_u64, sha256, BinaryDocSegment, DocIdBinding, DocIdMap, DocRow,
         DocSegmentRecord, Docstore, DocstoreError, DocstoreSource, SectionRef,
         DOC_SEGMENT_HEADER_LENGTH, DOC_SEGMENT_MAGIC, DOC_SEGMENT_MAJOR, DOC_SEGMENT_MINOR,
+        MAX_DOCUMENT_OFFSET_ENTRY_LENGTH,
     };
 
     #[test]
@@ -1686,6 +1721,33 @@ mod tests {
         );
         assert_eq!(documents.len(), 1);
         assert_eq!(documents["doc-002"]["text"], "beta");
+    }
+
+    #[test]
+    fn open_dataset_pack_rejects_implausible_offset_length_before_allocation() {
+        let temp_dir = tempdir().unwrap();
+        let docs_path = temp_dir.path().join("docs.ndjson");
+        let offsets_path = temp_dir.path().join("document-offsets.jsonl");
+        fs::write(&docs_path, "{\"doc_id\":\"doc-001\",\"text\":\"alpha\"}\n").unwrap();
+        fs::write(
+            &offsets_path,
+            format!(
+                "{{\"doc_id\":\"doc-001\",\"offset\":0,\"length\":{}}}\n",
+                MAX_DOCUMENT_OFFSET_ENTRY_LENGTH + 1
+            ),
+        )
+        .unwrap();
+
+        let manifest = test_manifest(true);
+        let docstore = Docstore::open_dataset_pack(temp_dir.path(), &manifest).unwrap();
+        let error = docstore
+            .load_documents_by_id(&["doc-001".to_owned()])
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            DocstoreError::InvalidDocument(message) if message.contains("exceeds maximum length")
+        ));
     }
 
     #[test]

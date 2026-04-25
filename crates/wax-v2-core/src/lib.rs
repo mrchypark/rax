@@ -711,8 +711,9 @@ pub fn map_segment_object(
         .checked_add(object_length)
         .ok_or_else(|| CoreError::InvalidManifest("segment object range overflow".to_owned()))?;
     // SAFETY: the mmap is read-only and callers only receive slices after descriptor bounds and
-    // payload checksums are validated. Writers append immutable objects and publish by atomically
-    // switching superblocks; they do not truncate active store files while readers hold mappings.
+    // payload checksums are validated. Store writers must append immutable objects and publish by
+    // atomically switching superblocks; external tools must also preserve that no-truncate
+    // invariant while readers may hold mappings, otherwise the OS can SIGBUS mapped readers.
     let mapped = unsafe { Mmap::map(&file)? };
     let object_bytes = mapped
         .get(object_start..object_end)
