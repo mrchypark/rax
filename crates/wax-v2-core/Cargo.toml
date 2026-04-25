@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 fs2 = "0.4.3"
+libc = "0.2.177"
 memmap2 = "0.9.9"
 sha2 = "0.10.9"
 

@@ -1220,6 +1220,7 @@ name = "wax-v2-core"
 version = "0.1.0"
 dependencies = [
  "fs2",
+ "libc",
  "memmap2",
  "sha2",
  "tempfile",

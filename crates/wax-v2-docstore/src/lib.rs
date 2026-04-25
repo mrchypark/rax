@@ -20,6 +20,7 @@ const DOC_SEGMENT_HEADER_LENGTH: usize = 88;
 const DOC_SEGMENT_VERSION_PREFIX_LENGTH: usize = 8;
 const DOC_ROW_LENGTH: usize = 56;
 const MAX_DOCUMENT_OFFSET_ENTRY_LENGTH: u64 = 16 * 1024 * 1024;
+const MAX_DOCUMENT_REF_SECTION_LENGTH: usize = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DocstoreError {
@@ -1534,6 +1535,11 @@ fn build_ref_section(
                 "{label} refs must not overlap"
             )));
         }
+        if end > MAX_DOCUMENT_REF_SECTION_LENGTH {
+            return Err(DocstoreError::InvalidDocument(format!(
+                "{label} ref section exceeds maximum length"
+            )));
+        }
         section_length = section_length.max(end);
         previous_end = end;
     }
@@ -1655,10 +1661,10 @@ mod tests {
     };
 
     use crate::{
-        parse_document_id, read_u64, sha256, BinaryDocSegment, DocIdBinding, DocIdMap, DocRow,
-        DocSegmentRecord, Docstore, DocstoreError, DocstoreSource, SectionRef,
+        build_ref_section, parse_document_id, read_u64, sha256, BinaryDocSegment, DocIdBinding,
+        DocIdMap, DocRow, DocSegmentRecord, Docstore, DocstoreError, DocstoreSource, SectionRef,
         DOC_SEGMENT_HEADER_LENGTH, DOC_SEGMENT_MAGIC, DOC_SEGMENT_MAJOR, DOC_SEGMENT_MINOR,
-        MAX_DOCUMENT_OFFSET_ENTRY_LENGTH,
+        MAX_DOCUMENT_OFFSET_ENTRY_LENGTH, MAX_DOCUMENT_REF_SECTION_LENGTH,
     };
 
     #[test]
@@ -1682,6 +1688,17 @@ mod tests {
 
         assert!(
             matches!(error, DocstoreError::InvalidDocument(message) if message.contains("row count"))
+        );
+    }
+
+    #[test]
+    fn ref_section_rejects_length_above_resource_bound_before_allocation() {
+        let reference = SectionRef::new((MAX_DOCUMENT_REF_SECTION_LENGTH - 1) as u32, 2);
+        let error = build_ref_section(&[(reference, vec![1, 2])], "metadata")
+            .expect_err("oversized ref section should fail");
+
+        assert!(
+            matches!(error, DocstoreError::InvalidDocument(message) if message.contains("maximum length"))
         );
     }
 

@@ -186,15 +186,23 @@ pub struct ActiveManifest {
 }
 
 impl ActiveManifest {
-    pub fn encode(&self) -> Vec<u8> {
-        let segment_count =
-            u32::try_from(self.segments.len()).expect("manifest segment count exceeds u32::MAX");
+    pub fn encode(&self) -> Result<Vec<u8>, CoreError> {
+        if self.segments.len() > MAX_SEGMENT_DESCRIPTOR_COUNT {
+            return Err(CoreError::InvalidManifest(format!(
+                "manifest segment count exceeds maximum {MAX_SEGMENT_DESCRIPTOR_COUNT}"
+            )));
+        }
+        let segment_count = u32::try_from(self.segments.len()).map_err(|_| {
+            CoreError::InvalidManifest("manifest segment count exceeds u32::MAX".to_owned())
+        })?;
         let encoded_length = self
             .segments
             .len()
             .checked_mul(SEGMENT_DESCRIPTOR_LENGTH)
             .and_then(|length| length.checked_add(MANIFEST_HEADER_LENGTH))
-            .expect("manifest encoded length overflow");
+            .ok_or_else(|| {
+                CoreError::InvalidManifest("manifest encoded length overflow".to_owned())
+            })?;
         let mut bytes = Vec::with_capacity(encoded_length);
         bytes.extend_from_slice(MANIFEST_MAGIC);
         bytes.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
@@ -219,7 +227,7 @@ impl ActiveManifest {
             bytes.extend_from_slice(&segment.object_checksum);
         }
 
-        bytes
+        Ok(bytes)
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, CoreError> {
@@ -494,7 +502,7 @@ pub fn create_empty_store(path: &Path) -> Result<(), CoreError> {
         generation: 0,
         segments: Vec::new(),
     };
-    let manifest_bytes = manifest.encode();
+    let manifest_bytes = manifest.encode()?;
     let manifest_object = encode_object(
         ObjectType::Manifest,
         manifest.generation,
@@ -628,7 +636,7 @@ where
         .collect::<Vec<_>>();
     for pending_segment in pending_segments {
         let object_type = object_type_for_family(pending_segment.descriptor.family);
-        let (object_offset, object_length) = append_object(
+        let appended_object = append_object(
             &mut file,
             object_type,
             new_generation,
@@ -636,10 +644,10 @@ where
             &pending_segment.object_bytes,
         )?;
         let published_segment = pending_segment.descriptor.publish(
-            object_offset,
-            object_length,
+            appended_object.offset,
+            appended_object.length,
             new_generation,
-            sha256(&pending_segment.object_bytes),
+            appended_object.payload_checksum,
         );
         segments.push(published_segment);
     }
@@ -656,8 +664,8 @@ where
         generation: new_generation,
         segments,
     };
-    let manifest_bytes = manifest.encode();
-    let (manifest_offset, manifest_length) = append_object(
+    let manifest_bytes = manifest.encode()?;
+    let appended_manifest = append_object(
         &mut file,
         ObjectType::Manifest,
         new_generation,
@@ -669,8 +677,8 @@ where
 
     let superblock = Superblock::new(
         new_generation,
-        manifest_offset,
-        manifest_length as u32,
+        appended_manifest.offset,
+        appended_manifest.length as u32,
         ActiveManifest::checksum(&manifest_bytes),
     );
     let superblock_offset = if new_generation % 2 == 0 {
@@ -720,32 +728,38 @@ pub fn map_segment_object(
         ));
     }
 
-    let object_start = usize::try_from(descriptor.object_offset).map_err(|_| {
-        CoreError::InvalidManifest("segment object offset exceeds addressable memory".to_owned())
-    })?;
     let object_length = usize::try_from(descriptor.object_length).map_err(|_| {
         CoreError::InvalidManifest("segment object length exceeds addressable memory".to_owned())
     })?;
-    let object_end = object_start
-        .checked_add(object_length)
-        .ok_or_else(|| CoreError::InvalidManifest("segment object range overflow".to_owned()))?;
-    let file_length = file.metadata()?.len();
-    if u64::try_from(object_end).map_or(true, |end| end > file_length) {
+    let map_offset = align_down(descriptor.object_offset, mmap_allocation_granularity());
+    let map_prefix = usize::try_from(descriptor.object_offset - map_offset).map_err(|_| {
+        CoreError::InvalidManifest(
+            "segment object mmap prefix exceeds addressable memory".to_owned(),
+        )
+    })?;
+    let map_length = map_prefix.checked_add(object_length).ok_or_else(|| {
+        CoreError::InvalidManifest("segment object mmap range overflow".to_owned())
+    })?;
+    let map_end = map_offset.checked_add(map_length as u64).ok_or_else(|| {
+        CoreError::InvalidManifest("segment object mmap range overflow".to_owned())
+    })?;
+    if map_end > file_length {
         return Err(CoreError::InvalidManifest(
             "segment object range extends past end of file".to_owned(),
         ));
     }
-    // SAFETY: the mmap is read-only, page-aligned by the store object alignment, and callers only
-    // receive slices after descriptor bounds and payload checksums are validated. Store writers
-    // must append immutable objects and publish by atomically switching superblocks.
+    // SAFETY: the mmap is read-only, aligned to the host allocation granularity, and callers only
+    // receive slices after descriptor bounds and payload checksums are validated. Store writers must
+    // append immutable objects and publish by atomically switching superblocks.
     let mapped = unsafe {
         MmapOptions::new()
-            .offset(descriptor.object_offset)
-            .len(object_length)
+            .offset(map_offset)
+            .len(map_length)
             .map(&file)?
     };
+    let object_end = map_prefix + object_length;
     let decoded = decode_object_payload(
-        mapped.as_ref(),
+        &mapped[map_prefix..object_end],
         object_type_for_family(descriptor.family),
         descriptor.segment_generation,
     )?;
@@ -756,7 +770,8 @@ pub fn map_segment_object(
     }
     Ok(SegmentObject {
         backing: SegmentObjectBacking::Mapped(mapped),
-        payload_range: decoded.payload_range,
+        payload_range: map_prefix + decoded.payload_range.start
+            ..map_prefix + decoded.payload_range.end,
     })
 }
 
@@ -849,6 +864,31 @@ fn align_up(value: u64, alignment: u64) -> Result<u64, CoreError> {
     }
 }
 
+fn align_down(value: u64, alignment: u64) -> u64 {
+    if alignment == 0 {
+        value
+    } else {
+        value - (value % alignment)
+    }
+}
+
+fn mmap_allocation_granularity() -> u64 {
+    #[cfg(unix)]
+    {
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if page_size > 0 {
+            return page_size as u64;
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        return 65_536;
+    }
+
+    DEFAULT_OBJECT_ALIGNMENT
+}
+
 fn write_zero_padding(file: &mut OpenOptionsFile, target_offset: u64) -> Result<(), CoreError> {
     let current_offset = file.seek(SeekFrom::End(0))?;
     if target_offset < current_offset {
@@ -870,20 +910,38 @@ fn write_zero_padding(file: &mut OpenOptionsFile, target_offset: u64) -> Result<
 
 type OpenOptionsFile = std::fs::File;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AppendedObject {
+    offset: u64,
+    length: u64,
+    payload_checksum: [u8; 32],
+}
+
 fn append_object(
     file: &mut OpenOptionsFile,
     object_type: ObjectType,
     logical_generation: u64,
     alignment: u64,
     payload: &[u8],
-) -> Result<(u64, u64), CoreError> {
+) -> Result<AppendedObject, CoreError> {
     let current_end = file.seek(SeekFrom::End(0))?;
     let object_offset = align_up(current_end, alignment.max(DEFAULT_OBJECT_ALIGNMENT))?;
     write_zero_padding(file, object_offset)?;
-    let header = encode_object_header(object_type, logical_generation, alignment, payload);
+    let payload_checksum = sha256(payload);
+    let header = encode_object_header(
+        object_type,
+        logical_generation,
+        alignment,
+        payload.len() as u64,
+        payload_checksum,
+    );
     file.write_all(&header)?;
     file.write_all(payload)?;
-    Ok((object_offset, (header.len() + payload.len()) as u64))
+    Ok(AppendedObject {
+        offset: object_offset,
+        length: (header.len() + payload.len()) as u64,
+        payload_checksum,
+    })
 }
 
 fn encode_object(
@@ -892,11 +950,13 @@ fn encode_object(
     alignment: u64,
     payload: &[u8],
 ) -> Vec<u8> {
+    let payload_checksum = sha256(payload);
     let mut bytes = Vec::from(encode_object_header(
         object_type,
         logical_generation,
         alignment,
-        payload,
+        payload.len() as u64,
+        payload_checksum,
     ));
     bytes.extend_from_slice(payload);
     bytes
@@ -906,16 +966,17 @@ fn encode_object_header(
     object_type: ObjectType,
     logical_generation: u64,
     alignment: u64,
-    payload: &[u8],
+    payload_length: u64,
+    payload_checksum: [u8; 32],
 ) -> [u8; OBJECT_HEADER_LENGTH] {
     let mut header = [0u8; OBJECT_HEADER_LENGTH];
     header[..4].copy_from_slice(OBJECT_MAGIC);
     header[4..6].copy_from_slice(&object_type.as_code().to_le_bytes());
     header[6..8].copy_from_slice(&OBJECT_VERSION.to_le_bytes());
-    header[8..16].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+    header[8..16].copy_from_slice(&payload_length.to_le_bytes());
     header[16..24].copy_from_slice(&logical_generation.to_le_bytes());
     header[24..32].copy_from_slice(&alignment.to_le_bytes());
-    header[32..64].copy_from_slice(&sha256(payload));
+    header[32..64].copy_from_slice(&payload_checksum);
     header
 }
 
@@ -1039,7 +1100,7 @@ mod tests {
                 object_checksum: [9; 32],
             }],
         };
-        let manifest_bytes = manifest.encode();
+        let manifest_bytes = manifest.encode().expect("manifest should encode");
         let manifest_checksum = ActiveManifest::checksum(&manifest_bytes);
         let superblock = Superblock::new(7, 8192, manifest_bytes.len() as u32, manifest_checksum);
 
@@ -1072,7 +1133,7 @@ mod tests {
             }],
         };
 
-        let encoded = manifest.encode();
+        let encoded = manifest.encode().expect("manifest should encode");
         let decoded = ActiveManifest::decode(&encoded).expect("manifest should decode");
 
         assert_eq!(decoded, manifest);
@@ -1102,7 +1163,7 @@ mod tests {
             }],
         };
 
-        let encoded = manifest.encode();
+        let encoded = manifest.encode().expect("manifest should encode");
         let descriptor_start = MANIFEST_HEADER_LENGTH;
 
         assert_eq!(
@@ -1142,7 +1203,7 @@ mod tests {
             }],
         };
 
-        let encoded = manifest.encode();
+        let encoded = manifest.encode().expect("manifest should encode");
 
         assert_eq!(
             encoded.len() - MANIFEST_HEADER_LENGTH,
@@ -1174,7 +1235,7 @@ mod tests {
             }],
         };
 
-        let encoded = manifest.encode();
+        let encoded = manifest.encode().expect("manifest should encode");
         let error =
             ActiveManifest::decode(&encoded).expect_err("manifest should reject invalid ranges");
 
@@ -1192,6 +1253,40 @@ mod tests {
         let error = ActiveManifest::decode(&encoded).expect_err("manifest length should fail");
 
         assert!(matches!(error, CoreError::InvalidManifest(message) if message.contains("length")));
+    }
+
+    #[test]
+    fn manifest_encode_rejects_segment_count_above_decode_bound() {
+        let segment = SegmentDescriptor {
+            family: SegmentKind::Doc,
+            family_version: 1,
+            flags: 0,
+            object_offset: 4096,
+            object_length: 128,
+            segment_generation: 1,
+            doc_id_start: 0,
+            doc_id_end_exclusive: 1,
+            min_timestamp_ms: 0,
+            max_timestamp_ms: 0,
+            live_items: 1,
+            tombstoned_items: 0,
+            backend_id: 0,
+            backend_aux: 0,
+            object_checksum: [1; 32],
+        };
+        let manifest = ActiveManifest {
+            generation: 1,
+            segments: vec![segment; crate::MAX_SEGMENT_DESCRIPTOR_COUNT + 1],
+        };
+
+        let error = manifest
+            .encode()
+            .expect_err("oversized manifest should fail");
+
+        assert!(matches!(
+            error,
+            CoreError::InvalidManifest(message) if message.contains("segment count")
+        ));
     }
 
     #[test]
@@ -1739,7 +1834,8 @@ mod tests {
             ],
         };
 
-        let error = ActiveManifest::decode(&manifest.encode()).expect_err("manifest should fail");
+        let encoded = manifest.encode().expect("manifest should encode");
+        let error = ActiveManifest::decode(&encoded).expect_err("manifest should fail");
 
         assert!(matches!(
             error,

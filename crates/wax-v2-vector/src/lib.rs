@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use bytemuck::{cast_slice, try_cast_slice};
+use bytemuck::try_cast_slice;
 use hnsw_rs::prelude::{DistCosine, Hnsw, HnswIo};
 use memmap2::{Mmap, MmapOptions};
 use self_cell::self_cell;
@@ -1258,7 +1258,7 @@ impl BinaryVectorSegment {
 
         let mut seen_doc_ids = std::collections::BTreeSet::new();
         let mut doc_ids = Vec::with_capacity(vector_inputs.len());
-        let mut exact_values = Vec::with_capacity(vector_inputs.len() * expected_dimensions);
+        let mut exact_vectors = Vec::with_capacity(vector_inputs.len() * expected_dimensions * 4);
 
         for (doc_id, values) in vector_inputs {
             if values.len() != expected_dimensions {
@@ -1273,13 +1273,15 @@ impl BinaryVectorSegment {
                 ));
             }
             doc_ids.push(doc_id.clone());
-            exact_values.extend_from_slice(values);
+            for value in values {
+                exact_vectors.extend_from_slice(&value.to_le_bytes());
+            }
         }
 
         Ok(Self {
             dimensions: expected_dimensions,
             doc_ids,
-            exact_vectors: cast_slice::<f32, u8>(&exact_values).to_vec(),
+            exact_vectors,
             preview_vectors: None,
         })
     }
@@ -1611,8 +1613,11 @@ fn first_hybrid_vector_query_from_records(
 }
 
 fn dot_product_f32le(left: &[f32], right: &[u8]) -> f32 {
-    if let Ok(right_f32) = try_cast_slice::<u8, f32>(right) {
-        return dot_product_f32_slice(left, right_f32);
+    #[cfg(target_endian = "little")]
+    {
+        if let Ok(right_f32) = try_cast_slice::<u8, f32>(right) {
+            return dot_product_f32_slice(left, right_f32);
+        }
     }
 
     left.iter()
@@ -1730,6 +1735,20 @@ mod tests {
         let score = dot_product_f32le(&[1.0, 1.0, 1.0, 1.0, 1.0], bytemuck::cast_slice(&right));
 
         assert_eq!(score, 20.0);
+    }
+
+    #[test]
+    fn raw_vector_segment_encodes_exact_vectors_as_little_endian_bytes() {
+        let segment = BinaryVectorSegment::from_raw_vectors(
+            2,
+            &[("doc-1".to_owned(), vec![1.0f32, -2.5f32])],
+        )
+        .expect("raw vector segment should build");
+
+        assert_eq!(
+            segment.exact_vectors,
+            [1.0f32.to_le_bytes(), (-2.5f32).to_le_bytes()].concat()
+        );
     }
 
     #[test]
