@@ -546,6 +546,8 @@ impl RuntimeStoreWriter<'_> {
         )?;
         self.store.refresh_read_state()?;
         ensure_store_generation_unchanged_from_store(&store_path, expected_generation)?;
+        let remove_existing_vector_segment =
+            vectors.is_none() && store_has_vector_segment(&store_path, expected_generation)?;
 
         let ordered_documents = raw_ordered_documents(&documents);
         let doc_pending =
@@ -620,11 +622,20 @@ impl RuntimeStoreWriter<'_> {
             published_families.push(RuntimePublishFamily::Vector);
         }
 
-        let opened = wax_v2_core::publish_segments_with_precondition(
-            &store_path,
-            pending_segments,
-            |manifest| ensure_store_generation_unchanged(manifest, expected_generation),
-        )
+        let opened = if remove_existing_vector_segment {
+            wax_v2_core::publish_segments_replacing_families_with_precondition(
+                &store_path,
+                pending_segments,
+                &[wax_v2_core::SegmentKind::Vec],
+                |manifest| ensure_store_generation_unchanged(manifest, expected_generation),
+            )
+        } else {
+            wax_v2_core::publish_segments_with_precondition(
+                &store_path,
+                pending_segments,
+                |manifest| ensure_store_generation_unchanged(manifest, expected_generation),
+            )
+        }
         .map_err(runtime_core_error)?;
 
         self.store.refresh_read_state()?;
@@ -911,6 +922,20 @@ fn latest_doc_segment_identity_from_store(
 ) -> Result<Option<DocSegmentIdentity>, RuntimeError> {
     let opened = wax_v2_core::open_store(store_path).map_err(runtime_core_error)?;
     Ok(latest_doc_segment_identity(&opened.manifest))
+}
+
+fn store_has_vector_segment(
+    store_path: &Path,
+    expected_generation: u64,
+) -> Result<bool, RuntimeError> {
+    let opened = wax_v2_core::open_store(store_path).map_err(runtime_core_error)?;
+    ensure_store_generation_unchanged(&opened.manifest, expected_generation)
+        .map_err(runtime_core_error)?;
+    Ok(opened
+        .manifest
+        .segments
+        .iter()
+        .any(|segment| segment.family == wax_v2_core::SegmentKind::Vec))
 }
 
 fn store_manifest_generation_from_store(store_path: &Path) -> Result<u64, RuntimeError> {
@@ -2038,6 +2063,56 @@ mod tests {
             read_vector_segment_doc_ids(&bytes),
             vec!["doc-002".to_owned(), "doc-001".to_owned()]
         );
+    }
+
+    #[test]
+    fn publish_raw_snapshot_removes_vectors_for_doc_only_replace() {
+        let dataset_dir = tempdir().unwrap();
+        let source_dir = tempdir().unwrap();
+        let docs_path = source_dir.path().join("docs.ndjson");
+        fs::write(
+            &docs_path,
+            concat!(
+                "{\"doc_id\":\"doc-001\",\"text\":\"alpha\"}\n",
+                "{\"doc_id\":\"doc-002\",\"text\":\"beta\"}\n",
+            ),
+        )
+        .unwrap();
+        pack_adhoc_dataset(&AdhocPackRequest::new(
+            &docs_path,
+            dataset_dir.path(),
+            "small",
+        ))
+        .unwrap();
+
+        let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
+        runtime
+            .writer()
+            .unwrap()
+            .publish_raw_snapshot(
+                vec![
+                    NewDocument::new("doc-001", "alpha"),
+                    NewDocument::new("doc-002", "beta"),
+                ],
+                Some(vec![
+                    NewDocumentVector::new("doc-001", embed_text("alpha", 384)),
+                    NewDocumentVector::new("doc-002", embed_text("beta", 384)),
+                ]),
+            )
+            .unwrap();
+
+        runtime
+            .writer()
+            .unwrap()
+            .publish_raw_snapshot(vec![NewDocument::new("doc-003", "gamma")], None)
+            .unwrap();
+
+        let opened = open_store(&dataset_dir.path().join("store.wax")).unwrap();
+        assert!(opened
+            .manifest
+            .segments
+            .iter()
+            .all(|segment| segment.family != SegmentKind::Vec));
     }
 
     #[test]

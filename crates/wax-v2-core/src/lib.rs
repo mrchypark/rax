@@ -16,7 +16,7 @@ const SUPERBLOCK_CHECKSUM_OFFSET: usize = 64;
 const SUPERBLOCK_CHECKSUM_LENGTH: usize = 32;
 const MANIFEST_HEADER_LENGTH: usize = 24;
 const SEGMENT_DESCRIPTOR_LENGTH: usize = 128;
-const MAX_SEGMENT_DESCRIPTOR_COUNT: usize = 3;
+const MAX_SEGMENT_DESCRIPTOR_COUNT: usize = 65_536;
 const MAX_MANIFEST_PAYLOAD_LENGTH: usize =
     MANIFEST_HEADER_LENGTH + (MAX_SEGMENT_DESCRIPTOR_COUNT * SEGMENT_DESCRIPTOR_LENGTH);
 const MAX_MANIFEST_OBJECT_LENGTH: usize = OBJECT_HEADER_LENGTH + MAX_MANIFEST_PAYLOAD_LENGTH;
@@ -585,6 +585,18 @@ pub fn publish_segments_with_precondition<F>(
 where
     F: FnOnce(&ActiveManifest) -> Result<(), CoreError>,
 {
+    publish_segments_replacing_families_with_precondition(path, pending_segments, &[], precondition)
+}
+
+pub fn publish_segments_replacing_families_with_precondition<F>(
+    path: &Path,
+    pending_segments: Vec<PendingSegmentWrite>,
+    removed_families: &[SegmentKind],
+    precondition: F,
+) -> Result<OpenedStore, CoreError>
+where
+    F: FnOnce(&ActiveManifest) -> Result<(), CoreError>,
+{
     if pending_segments.is_empty() {
         return Err(CoreError::InvalidManifest(
             "publish_segments requires at least one pending segment".to_owned(),
@@ -609,7 +621,10 @@ where
         .manifest
         .segments
         .into_iter()
-        .filter(|segment| !published_families.contains(&segment.family))
+        .filter(|segment| {
+            !published_families.contains(&segment.family)
+                && !removed_families.contains(&segment.family)
+        })
         .collect::<Vec<_>>();
     for pending_segment in pending_segments {
         let object_type = object_type_for_family(pending_segment.descriptor.family);

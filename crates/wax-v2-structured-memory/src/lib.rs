@@ -619,6 +619,7 @@ mod tests {
     use super::{
         NewStructuredEntity, NewStructuredFact, NewStructuredMemoryRecord, StructuredEntityQuery,
         StructuredFactQuery, StructuredMemoryQuery, StructuredMemorySession,
+        RECORD_ID_TAIL_SCAN_CHUNK_SIZE,
     };
 
     #[test]
@@ -706,6 +707,33 @@ mod tests {
             .query(StructuredMemoryQuery::subject("person:bob"))
             .unwrap();
         assert_eq!(records.len(), 1);
+    }
+
+    #[test]
+    fn structured_memory_record_scans_tail_across_large_last_record() {
+        let root = tempdir().unwrap();
+        let mut session = StructuredMemorySession::open(root.path()).unwrap();
+        session
+            .record(NewStructuredMemoryRecord::fact(
+                "person:large",
+                "description",
+                serde_json::json!("x".repeat((RECORD_ID_TAIL_SCAN_CHUNK_SIZE as usize * 2) + 128)),
+                "bootstrap-test",
+                100,
+            ))
+            .unwrap();
+
+        let record = session
+            .record(NewStructuredMemoryRecord::fact(
+                "person:alice",
+                "name",
+                serde_json::json!("Alice"),
+                "bootstrap-test",
+                200,
+            ))
+            .unwrap();
+
+        assert_eq!(record.record_id, 1);
     }
 
     #[test]
