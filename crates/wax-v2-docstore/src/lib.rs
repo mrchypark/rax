@@ -348,32 +348,28 @@ impl BinaryDocSegment {
             ));
         }
 
-        let row_count = usize::try_from(read_u64(bytes, 8)).map_err(|_| {
-            DocstoreError::InvalidDocument(
-                "doc segment row count exceeds addressable memory".to_owned(),
-            )
-        })?;
+        let row_count = read_u64_as_usize(bytes, 8, "doc segment row count")?;
         if row_count > bytes.len() / DOC_ROW_LENGTH {
             return Err(DocstoreError::InvalidDocument(
                 "doc segment row count exceeds possible rows in slice".to_owned(),
             ));
         }
-        let payload_bytes_offset = read_u64(bytes, 16) as usize;
-        let metadata_bytes_offset = read_u64(bytes, 24) as usize;
-        let preview_bytes_offset = read_u64(bytes, 32) as usize;
+        let payload_bytes_offset = read_u64_as_usize(bytes, 16, "payload offset")?;
+        let metadata_bytes_offset = read_u64_as_usize(bytes, 24, "metadata offset")?;
+        let preview_bytes_offset = read_u64_as_usize(bytes, 32, "preview offset")?;
         let (binding_bytes_offset, row_table_offset, checksum_start, checksum_end, header_length) =
             if minor == 0 {
                 (
                     preview_bytes_offset,
-                    read_u64(bytes, 40) as usize,
+                    read_u64_as_usize(bytes, 40, "row table offset")?,
                     48,
                     80,
                     80,
                 )
             } else {
                 (
-                    read_u64(bytes, 40) as usize,
-                    read_u64(bytes, 48) as usize,
+                    read_u64_as_usize(bytes, 40, "binding offset")?,
+                    read_u64_as_usize(bytes, 48, "row table offset")?,
                     56,
                     88,
                     88,
@@ -546,23 +542,23 @@ impl StoreDocSegment {
             ));
         }
 
-        let row_count = read_u64(bytes.as_ref(), 8) as usize;
-        let payload_bytes_offset = read_u64(bytes.as_ref(), 16) as usize;
-        let metadata_bytes_offset = read_u64(bytes.as_ref(), 24) as usize;
-        let preview_bytes_offset = read_u64(bytes.as_ref(), 32) as usize;
+        let row_count = read_u64_as_usize(bytes.as_ref(), 8, "doc segment row count")?;
+        let payload_bytes_offset = read_u64_as_usize(bytes.as_ref(), 16, "payload offset")?;
+        let metadata_bytes_offset = read_u64_as_usize(bytes.as_ref(), 24, "metadata offset")?;
+        let preview_bytes_offset = read_u64_as_usize(bytes.as_ref(), 32, "preview offset")?;
         let (binding_bytes_offset, row_table_offset, checksum_start, checksum_end, header_length) =
             if minor == 0 {
                 (
                     preview_bytes_offset,
-                    read_u64(bytes.as_ref(), 40) as usize,
+                    read_u64_as_usize(bytes.as_ref(), 40, "row table offset")?,
                     48,
                     80,
                     80,
                 )
             } else {
                 (
-                    read_u64(bytes.as_ref(), 40) as usize,
-                    read_u64(bytes.as_ref(), 48) as usize,
+                    read_u64_as_usize(bytes.as_ref(), 40, "binding offset")?,
+                    read_u64_as_usize(bytes.as_ref(), 48, "row table offset")?,
                     56,
                     88,
                     88,
@@ -1502,6 +1498,11 @@ fn read_u32(bytes: &[u8], offset: usize) -> u32 {
 
 fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("u64 slice"))
+}
+
+fn read_u64_as_usize(bytes: &[u8], offset: usize, label: &str) -> Result<usize, DocstoreError> {
+    usize::try_from(read_u64(bytes, offset))
+        .map_err(|_| DocstoreError::InvalidDocument(format!("{label} exceeds addressable memory")))
 }
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {

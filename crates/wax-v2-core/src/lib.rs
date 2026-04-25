@@ -902,7 +902,9 @@ fn decode_object_payload_range(
     if version != OBJECT_VERSION {
         return Err(CoreError::InvalidVersion(version as u32));
     }
-    let object_length = read_u64(object_bytes, 8) as usize;
+    let object_length = usize::try_from(read_u64(object_bytes, 8)).map_err(|_| {
+        CoreError::InvalidManifest("object length exceeds addressable memory".to_owned())
+    })?;
     let logical_generation = read_u64(object_bytes, 16);
     if logical_generation != expected_generation {
         return Err(CoreError::InvalidManifest(
@@ -954,9 +956,9 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        align_up, create_empty_store, map_segment_object, open_store, publish_segment,
-        read_segment_object, write_zero_padding, ActiveManifest, CoreError,
-        PendingSegmentDescriptor, SegmentDescriptor, SegmentKind, Superblock,
+        align_up, create_empty_store, decode_object_payload_range, map_segment_object, open_store,
+        publish_segment, read_segment_object, write_zero_padding, ActiveManifest, CoreError,
+        ObjectType, PendingSegmentDescriptor, SegmentDescriptor, SegmentKind, Superblock,
         DEFAULT_OBJECT_ALIGNMENT, FORMAT_VERSION, MANIFEST_MAGIC, OBJECT_HEADER_LENGTH,
         OBJECT_MAGIC, SUPERBLOCK_SIZE,
     };
@@ -1063,6 +1065,26 @@ mod tests {
         let error = ActiveManifest::decode(&encoded).expect_err("manifest length should fail");
 
         assert!(matches!(error, CoreError::InvalidManifest(message) if message.contains("length")));
+    }
+
+    #[test]
+    fn object_decode_rejects_unaddressable_payload_length_before_indexing() {
+        let mut bytes = [0u8; OBJECT_HEADER_LENGTH];
+        bytes[..4].copy_from_slice(OBJECT_MAGIC);
+        bytes[4..6].copy_from_slice(&ObjectType::DocSegment.as_code().to_le_bytes());
+        bytes[6..8].copy_from_slice(&1u16.to_le_bytes());
+        bytes[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+        bytes[16..24].copy_from_slice(&1u64.to_le_bytes());
+
+        let error = decode_object_payload_range(&bytes, ObjectType::DocSegment, 1)
+            .expect_err("object length should fail");
+
+        assert!(matches!(
+            error,
+            CoreError::InvalidManifest(message)
+                if message.contains("object length")
+                    || message.contains("addressable memory")
+        ));
     }
 
     #[test]

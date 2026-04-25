@@ -1244,14 +1244,22 @@ impl BinaryVectorSegment {
             doc_ids_section.extend_from_slice(&(doc_id.len() as u32).to_le_bytes());
             doc_ids_section.extend_from_slice(doc_id.as_bytes());
         }
-        let doc_ids_offset = VECTOR_SEGMENT_HEADER_LENGTH as u64;
-        let exact_vectors_offset =
-            align_up_usize(doc_ids_offset as usize + doc_ids_section.len(), 4) as u64;
-        doc_ids_section.resize(exact_vectors_offset as usize - doc_ids_offset as usize, 0);
+        let doc_ids_offset = VECTOR_SEGMENT_HEADER_LENGTH;
+        let exact_vectors_offset = align_up_usize(
+            doc_ids_offset
+                .checked_add(doc_ids_section.len())
+                .ok_or_else(|| "vector segment doc_id section range overflow".to_owned())?,
+            4,
+        )?;
+        doc_ids_section.resize(exact_vectors_offset - doc_ids_offset, 0);
         let preview_vectors_offset = if self.preview_vectors.is_some() {
-            exact_vectors_offset + self.exact_vectors.len() as u64
+            Some(
+                (exact_vectors_offset as u64)
+                    .checked_add(self.exact_vectors.len() as u64)
+                    .ok_or_else(|| "vector segment preview offset overflow".to_owned())?,
+            )
         } else {
-            0
+            None
         };
 
         let mut bytes = Vec::new();
@@ -1261,9 +1269,9 @@ impl BinaryVectorSegment {
         bytes.extend_from_slice(&(self.dimensions as u32).to_le_bytes());
         bytes.extend_from_slice(&flags.to_le_bytes());
         bytes.extend_from_slice(&(self.doc_ids.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&doc_ids_offset.to_le_bytes());
-        bytes.extend_from_slice(&exact_vectors_offset.to_le_bytes());
-        bytes.extend_from_slice(&preview_vectors_offset.to_le_bytes());
+        bytes.extend_from_slice(&(doc_ids_offset as u64).to_le_bytes());
+        bytes.extend_from_slice(&(exact_vectors_offset as u64).to_le_bytes());
+        bytes.extend_from_slice(&preview_vectors_offset.unwrap_or(0).to_le_bytes());
         bytes.extend_from_slice(&doc_ids_section);
         bytes.extend_from_slice(&self.exact_vectors);
         if let Some(preview_vectors) = self.preview_vectors.as_ref() {
@@ -1304,12 +1312,13 @@ impl BinaryVectorSegmentLayout {
             return Err("unsupported vector segment version".to_owned());
         }
 
-        let dimensions = read_u32(bytes, 8) as usize;
+        let dimensions = usize::try_from(read_u32(bytes, 8))
+            .map_err(|_| "vector segment dimensions exceed addressable memory".to_owned())?;
         let flags = read_u32(bytes, 12);
-        let doc_count = read_u64(bytes, 16) as usize;
-        let doc_ids_offset = read_u64(bytes, 24) as usize;
-        let exact_vectors_offset = read_u64(bytes, 32) as usize;
-        let preview_vectors_offset = read_u64(bytes, 40) as usize;
+        let doc_count = read_u64_as_usize(bytes, 16, "doc_count")?;
+        let doc_ids_offset = read_u64_as_usize(bytes, 24, "doc_ids offset")?;
+        let exact_vectors_offset = read_u64_as_usize(bytes, 32, "exact vectors offset")?;
+        let preview_vectors_offset = read_u64_as_usize(bytes, 40, "preview vectors offset")?;
         if doc_ids_offset != VECTOR_SEGMENT_HEADER_LENGTH
             || doc_ids_offset > exact_vectors_offset
             || exact_vectors_offset > bytes.len()
@@ -1422,16 +1431,23 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("u64 slice"))
 }
 
-fn align_up_usize(value: usize, alignment: usize) -> usize {
+fn align_up_usize(value: usize, alignment: usize) -> Result<usize, String> {
     if alignment == 0 {
-        return value;
+        return Ok(value);
     }
     let remainder = value % alignment;
     if remainder == 0 {
-        value
+        Ok(value)
     } else {
-        value + (alignment - remainder)
+        value
+            .checked_add(alignment - remainder)
+            .ok_or_else(|| "vector segment alignment overflow".to_owned())
     }
+}
+
+fn read_u64_as_usize(bytes: &[u8], offset: usize, label: &str) -> Result<usize, String> {
+    usize::try_from(read_u64(bytes, offset))
+        .map_err(|_| format!("vector segment {label} exceeds addressable memory"))
 }
 
 fn validate_document_vectors(
@@ -1641,7 +1657,7 @@ mod tests {
     use wax_v2_docstore::prepare_raw_documents_segment;
 
     use crate::{
-        dot_product_f32le, load_compatibility_raw_vectors, load_vector_segment,
+        align_up_usize, dot_product_f32le, load_compatibility_raw_vectors, load_vector_segment,
         prepare_raw_vector_segment, publish_compatibility_vector_segment,
         read_length_prefixed_strings, read_u64, resolve_auto_vector_mode,
         validate_document_vectors, validate_preview_vectors,
@@ -1664,6 +1680,13 @@ mod tests {
             .expect_err("string count should exceed payload");
 
         assert!(error.contains("count"));
+    }
+
+    #[test]
+    fn vector_segment_alignment_rejects_usize_overflow() {
+        let error = align_up_usize(usize::MAX - 1, 4).expect_err("alignment should overflow");
+
+        assert!(error.contains("overflow"));
     }
 
     #[test]
