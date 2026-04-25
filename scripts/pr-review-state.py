@@ -106,18 +106,32 @@ def one_line(text: str, limit: int = 180) -> str:
     return collapsed if len(collapsed) <= limit else collapsed[: limit - 1] + "..."
 
 
+def first_thread_comment(thread: dict[str, Any]) -> dict[str, Any] | None:
+    comments = thread["comments"]["nodes"]
+    return comments[0] if comments else None
+
+
+def thread_comment_author(thread: dict[str, Any]) -> str:
+    first = first_thread_comment(thread)
+    if first is None:
+        return "unknown"
+    return first["author"]["login"]
+
+
+def thread_comment_body(thread: dict[str, Any], limit: int = 180) -> str:
+    first = first_thread_comment(thread)
+    if first is None:
+        return "<no comments>"
+    return one_line(first["body"], limit)
+
+
 def render_text(pr: dict[str, Any], show_all: bool) -> str:
     threads = pr["reviewThreads"]["nodes"]
     unresolved = [thread for thread in threads if not thread["isResolved"]]
     resolved = [thread for thread in threads if thread["isResolved"]]
     outdated = [thread for thread in threads if thread["isOutdated"]]
     review_states = Counter(review["state"] for review in pr["reviews"]["nodes"])
-    thread_authors = Counter(
-        thread["comments"]["nodes"][0]["author"]["login"]
-        if thread["comments"]["nodes"]
-        else "unknown"
-        for thread in threads
-    )
+    thread_authors = Counter(thread_comment_author(thread) for thread in threads)
 
     lines = [
         f"PR #{pr['number']}: {pr['title']}",
@@ -139,24 +153,22 @@ def render_text(pr: dict[str, Any], show_all: bool) -> str:
     if not unresolved:
         lines.append("- none")
     for thread in unresolved:
-        first = thread["comments"]["nodes"][0]
         lines.append(
             "- "
             f"{thread['id']} {thread['path']}:{thread.get('line') or thread.get('originalLine')} "
-            f"outdated={thread['isOutdated']} author={first['author']['login']} "
-            f"body={one_line(first['body'])}"
+            f"outdated={thread['isOutdated']} author={thread_comment_author(thread)} "
+            f"body={thread_comment_body(thread)}"
         )
 
     if show_all:
         lines.extend(["", "All review threads:"])
         for thread in threads:
-            first = thread["comments"]["nodes"][0]
             lines.append(
                 "- "
                 f"{thread['id']} resolved={thread['isResolved']} "
                 f"outdated={thread['isOutdated']} {thread['path']}:"
                 f"{thread.get('line') or thread.get('originalLine')} "
-                f"author={first['author']['login']} body={one_line(first['body'], 140)}"
+                f"author={thread_comment_author(thread)} body={thread_comment_body(thread, 140)}"
             )
 
     return "\n".join(lines)

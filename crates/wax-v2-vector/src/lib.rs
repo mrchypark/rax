@@ -1535,11 +1535,7 @@ fn first_hybrid_vector_query_from_records(
 
 fn dot_product_f32le(left: &[f32], right: &[u8]) -> f32 {
     if let Ok(right_f32) = try_cast_slice::<u8, f32>(right) {
-        return left
-            .iter()
-            .zip(right_f32.iter())
-            .map(|(lhs, rhs)| lhs * rhs)
-            .sum();
+        return dot_product_f32_slice(left, right_f32);
     }
 
     left.iter()
@@ -1549,6 +1545,31 @@ fn dot_product_f32le(left: &[f32], right: &[u8]) -> f32 {
             lhs * rhs
         })
         .sum()
+}
+
+fn dot_product_f32_slice(left: &[f32], right: &[f32]) -> f32 {
+    let len = left.len().min(right.len());
+    let mut sum0 = 0.0f32;
+    let mut sum1 = 0.0f32;
+    let mut sum2 = 0.0f32;
+    let mut sum3 = 0.0f32;
+    let mut index = 0usize;
+
+    while index + 4 <= len {
+        sum0 += left[index] * right[index];
+        sum1 += left[index + 1] * right[index + 1];
+        sum2 += left[index + 2] * right[index + 2];
+        sum3 += left[index + 3] * right[index + 3];
+        index += 4;
+    }
+
+    let mut tail = 0.0f32;
+    while index < len {
+        tail += left[index] * right[index];
+        index += 1;
+    }
+
+    sum0 + sum1 + sum2 + sum3 + tail
 }
 
 fn dot_product_i8_preview(left: &[f32], right: &[u8]) -> f32 {
@@ -1618,11 +1639,19 @@ mod tests {
     use wax_v2_docstore::prepare_raw_documents_segment;
 
     use crate::{
-        load_compatibility_raw_vectors, load_vector_segment, prepare_raw_vector_segment,
-        publish_compatibility_vector_segment, read_u64, resolve_auto_vector_mode,
-        BinaryVectorSegment, ByteStorage, StoreVectorSegment, VectorLane, VectorLaneMetadata,
-        VectorQueryInputs,
+        dot_product_f32le, load_compatibility_raw_vectors, load_vector_segment,
+        prepare_raw_vector_segment, publish_compatibility_vector_segment, read_u64,
+        resolve_auto_vector_mode, BinaryVectorSegment, ByteStorage, StoreVectorSegment, VectorLane,
+        VectorLaneMetadata, VectorQueryInputs,
     };
+
+    #[test]
+    fn dot_product_f32le_uses_aligned_unrolled_path_with_tail() {
+        let right = [2.0f32, 3.0, 4.0, 5.0, 6.0];
+        let score = dot_product_f32le(&[1.0, 1.0, 1.0, 1.0, 1.0], bytemuck::cast_slice(&right));
+
+        assert_eq!(score, 20.0);
+    }
 
     #[test]
     fn vector_lane_loads_exact_search_hits_from_compatibility_files() {

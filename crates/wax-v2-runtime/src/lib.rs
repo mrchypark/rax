@@ -322,8 +322,8 @@ impl RuntimeStore {
                         "vector_query is required for hybrid search".to_owned(),
                     )
                 })?;
-                let corpus_doc_count = self.manifest.corpus.doc_count as usize;
-                let text_limit = corpus_doc_count
+                let live_doc_count = self.live_doc_count()?;
+                let text_limit = live_doc_count
                     .max(1)
                     .min(request.top_k.saturating_mul(3).max(1));
                 let text_hits = self
@@ -384,6 +384,13 @@ impl RuntimeStore {
         self.vector_lane
             .as_mut()
             .ok_or_else(|| RuntimeError::Storage("vector lane not materialized".to_owned()))
+    }
+
+    fn live_doc_count(&self) -> Result<usize, RuntimeError> {
+        self.docstore
+            .load_document_ids()
+            .map(|doc_ids| doc_ids.len())
+            .map_err(|error| RuntimeError::Storage(docstore_error(error)))
     }
 
     fn hydrate_hits(
@@ -929,6 +936,48 @@ mod tests {
     }
 
     #[test]
+    fn runtime_hybrid_search_uses_live_doc_count_for_raw_publish_overfetch() {
+        let dataset_dir = tempdir().unwrap();
+        let source_dir = tempdir().unwrap();
+        let docs_path = source_dir.path().join("docs.ndjson");
+        fs::write(&docs_path, "{\"doc_id\":\"seed-001\",\"text\":\"seed\"}\n").unwrap();
+        pack_adhoc_dataset(&AdhocPackRequest::new(
+            &docs_path,
+            dataset_dir.path(),
+            "small",
+        ))
+        .unwrap();
+
+        let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
+        runtime
+            .writer()
+            .unwrap()
+            .publish_raw_snapshot(
+                vec![
+                    NewDocument::new("doc-001", "alpha"),
+                    NewDocument::new("doc-002", "alpha"),
+                ],
+                Some(vec![
+                    NewDocumentVector::new("doc-001", test_vector(0.0)),
+                    NewDocumentVector::new("doc-002", test_vector(1.0)),
+                ]),
+            )
+            .unwrap();
+
+        let response = runtime
+            .search(RuntimeSearchRequest {
+                mode: RuntimeSearchMode::Hybrid,
+                text_query: Some("alpha".to_owned()),
+                vector_query: Some(test_vector(1.0)),
+                top_k: 1,
+                include_preview: false,
+            })
+            .unwrap();
+
+        assert_eq!(response.hits[0].doc_id, "doc-002");
+    }
+
+    #[test]
     fn runtime_store_creates_and_publishes_compatibility_segments_for_reopen_search() {
         let dataset_dir = tempdir().unwrap();
         let fixture_root =
@@ -1262,5 +1311,11 @@ mod tests {
             RuntimeExecutionBackend::RustDefault
         );
         assert!(selection.fallback_reason.as_deref().unwrap_or("").len() > 0);
+    }
+
+    fn test_vector(first_value: f32) -> Vec<f32> {
+        let mut vector = vec![0.0; 384];
+        vector[0] = first_value;
+        vector
     }
 }
