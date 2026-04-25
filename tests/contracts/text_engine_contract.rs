@@ -493,3 +493,33 @@ fn query_batch_filtered_text_uses_active_store_doc_count_for_overfetch() {
 
     assert_eq!(results[0].hits[0].doc_id, "doc-004");
 }
+
+#[test]
+fn query_batch_returns_empty_hits_when_query_has_no_eligible_lanes() {
+    let dataset_dir = tempdir().unwrap();
+    pack_dataset(&PackRequest::new(
+        "fixtures/bench/source/minimal",
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+
+    let query_set_path = dataset_dir.path().join("no-lane-query.jsonl");
+    fs::write(
+        &query_set_path,
+        "{\"query_id\":\"q-no-lane\",\"query_class\":\"keyword\",\"difficulty\":\"easy\",\"query_text\":\"ignored\",\"top_k\":10,\"filter_spec\":{},\"preview_expected\":false,\"embedding_available\":false,\"lane_eligibility\":{\"text\":false,\"vector\":false,\"hybrid\":false}}\n",
+    )
+    .unwrap();
+
+    let results = query_batch_ranked_results(
+        dataset_dir.path(),
+        &query_set_path,
+        wax_bench_model::VectorQueryMode::ExactFlat,
+    )
+    .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].query_id, "q-no-lane");
+    assert!(results[0].hits.is_empty());
+}

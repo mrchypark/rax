@@ -386,8 +386,10 @@ pub fn query_batch_ranked_results(
                         vector_mode,
                         force_exact,
                     )?
-            } else {
+            } else if query.lane_eligibility.text {
                 pop_text_hits(&mut text_hits_by_query, &query.query_id)?
+            } else {
+                Vec::new()
             };
             let hits: Vec<String> = if query.filter_spec.is_empty() {
                 hits.into_iter().take(limit).collect()

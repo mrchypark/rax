@@ -116,12 +116,7 @@ impl Default for WaxMcpSurface {
     fn default() -> Self {
         Self {
             broker: WaxBroker::default(),
-            allowed_root: Some(
-                std::env::current_dir()
-                    .expect("current directory should be available")
-                    .canonicalize()
-                    .expect("current directory should canonicalize"),
-            ),
+            allowed_root: default_allowed_root(),
         }
     }
 }
@@ -268,20 +263,30 @@ impl WaxMcpSurface {
             code: McpErrorCode::InvalidRequest,
             message: error.to_string(),
         })?;
-        if let Some(allowed_root) = &self.allowed_root {
-            if !root.starts_with(allowed_root) {
-                return Err(McpError {
-                    code: McpErrorCode::InvalidRequest,
-                    message: format!(
-                        "session root {} is outside allowed root {}",
-                        root.display(),
-                        allowed_root.display()
-                    ),
-                });
-            }
+        let Some(allowed_root) = &self.allowed_root else {
+            return Err(McpError {
+                code: McpErrorCode::InvalidRequest,
+                message: "MCP surface has no allowed root".to_owned(),
+            });
+        };
+        if !root.starts_with(allowed_root) {
+            return Err(McpError {
+                code: McpErrorCode::InvalidRequest,
+                message: format!(
+                    "session root {} is outside allowed root {}",
+                    root.display(),
+                    allowed_root.display()
+                ),
+            });
         }
         Ok(root)
     }
+}
+
+fn default_allowed_root() -> Option<PathBuf> {
+    std::env::current_dir()
+        .ok()
+        .and_then(|path| path.canonicalize().ok())
 }
 
 fn broker_error(error: wax_v2_broker::BrokerError) -> McpError {
@@ -307,7 +312,8 @@ fn broker_error(error: wax_v2_broker::BrokerError) -> McpError {
 
 #[cfg(test)]
 mod tests {
-    use super::{McpError, McpErrorCode, McpRequest, McpResponse};
+    use super::{McpError, McpErrorCode, McpRequest, McpResponse, WaxMcpSurface};
+    use wax_v2_broker::WaxBroker;
 
     #[test]
     fn mcp_request_round_trips_as_transport_ready_json() {
@@ -348,5 +354,25 @@ mod tests {
         let decoded: McpError = serde_json::from_str(&encoded).unwrap();
 
         assert_eq!(decoded, error);
+    }
+
+    #[test]
+    fn mcp_surface_without_allowed_root_rejects_open_session() {
+        let mut surface = WaxMcpSurface {
+            broker: WaxBroker::default(),
+            allowed_root: None,
+        };
+
+        let error = surface
+            .handle(McpRequest::OpenSession {
+                root: std::env::current_dir()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            })
+            .unwrap_err();
+
+        assert_eq!(error.code(), &McpErrorCode::InvalidRequest);
+        assert_eq!(error.message(), "MCP surface has no allowed root");
     }
 }
