@@ -12,7 +12,7 @@ fn runtime_reports_apple_acceleration_capability_explicitly() {
         .find(|capability| capability.family == RuntimePlatformAccelerationFamily::Apple)
         .unwrap();
 
-    if cfg!(target_os = "macos") {
+    if cfg!(target_os = "macos") || cfg!(target_os = "ios") {
         assert_eq!(
             apple.availability,
             RuntimeAccelerationAvailability::BackendNotCompiled

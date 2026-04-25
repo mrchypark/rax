@@ -115,7 +115,10 @@ def thread_comment_author(thread: dict[str, Any]) -> str:
     first = first_thread_comment(thread)
     if first is None:
         return "unknown"
-    return first["author"]["login"]
+    author = first.get("author")
+    if author is None:
+        return "ghost"
+    return author.get("login") or "ghost"
 
 
 def thread_comment_body(thread: dict[str, Any], limit: int = 180) -> str:

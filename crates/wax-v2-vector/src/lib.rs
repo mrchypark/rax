@@ -989,22 +989,12 @@ fn load_vector_segment(
         object: bytes.clone(),
         range: layout.exact_vectors_range.clone(),
     };
-    validate_document_vectors(
-        doc_vectors.as_slice(),
-        metadata.dimensions,
-        metadata.doc_count,
-    )?;
     let preview_vectors = layout
         .preview_vectors_range
-        .map(|range| -> Result<ByteStorage, String> {
-            let storage = ByteStorage::SegmentSlice {
-                object: bytes.clone(),
-                range,
-            };
-            validate_preview_vectors(storage.as_slice(), metadata.dimensions, metadata.doc_count)?;
-            Ok(storage)
-        })
-        .transpose()?;
+        .map(|range| ByteStorage::SegmentSlice {
+            object: bytes.clone(),
+            range,
+        });
 
     Ok(LoadedVectorPayloads {
         doc_ids,
