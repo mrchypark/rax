@@ -161,11 +161,10 @@ impl VectorLaneMetadata {
         let doc_count = vector_segment
             .as_ref()
             .map(|segment| {
-                segment
-                    .descriptor
-                    .doc_id_end_exclusive
-                    .saturating_sub(segment.descriptor.doc_id_start) as usize
+                usize::try_from(segment.descriptor.live_items)
+                    .map_err(|_| "vector segment live_items exceeds addressable memory".to_owned())
             })
+            .transpose()?
             .unwrap_or(manifest.corpus.vector_count as usize);
 
         Ok(Self {
@@ -1168,7 +1167,7 @@ pub fn validate_store_segment_against_dataset_pack(
     }
 
     let bytes =
-        wax_v2_core::read_segment_object(&store_segment.store_path, &store_segment.descriptor)
+        wax_v2_core::map_segment_object(&store_segment.store_path, &store_segment.descriptor)
             .map_err(|error| error.to_string())?;
     let persisted_segment = BinaryVectorSegment::decode(&bytes)?;
     if persisted_segment != expected_without_preview && persisted_segment != expected_with_preview {
@@ -1742,6 +1741,33 @@ mod tests {
             query_inputs.query_vector_paths,
             vec![mount_root.join("query_vectors.jsonl")]
         );
+    }
+
+    #[test]
+    fn vector_lane_metadata_counts_store_rows_from_live_items_for_sparse_doc_id_ranges() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("store.wax");
+        create_empty_store(&store_path).unwrap();
+        let mut pending = prepare_raw_vector_segment(
+            2,
+            &[
+                ("doc-1".to_owned(), vec![1.0f32, 0.0f32]),
+                ("doc-9".to_owned(), vec![0.0f32, 1.0f32]),
+            ],
+        )
+        .unwrap();
+        pending.descriptor.doc_id_start = 1;
+        pending.descriptor.doc_id_end_exclusive = 10;
+        pending.descriptor.live_items = 2;
+        publish_segments(&store_path, vec![pending]).unwrap();
+
+        let metadata = VectorLaneMetadata::resolve(
+            temp_dir.path(),
+            &test_manifest_with_count(9, false, false),
+        )
+        .unwrap();
+
+        assert_eq!(metadata.doc_count, 2);
     }
 
     #[test]

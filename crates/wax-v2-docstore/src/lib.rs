@@ -113,7 +113,7 @@ impl DocIdMap {
     }
 
     pub fn encode_json(&self) -> Result<Vec<u8>, DocstoreError> {
-        serde_json::to_vec_pretty(&self.bindings).map_err(Into::into)
+        serde_json::to_vec(&self.bindings).map_err(Into::into)
     }
 
     pub fn decode_json(bytes: &[u8]) -> Result<Self, DocstoreError> {
@@ -1152,9 +1152,10 @@ fn validate_store_docstore_against_dataset_pack(
         ));
     }
 
-    let dataset_documents = dataset_docstore.load_documents_by_id(&dataset_doc_ids)?;
-    let store_documents = store_docstore.load_documents_by_id(&dataset_doc_ids)?;
     for doc_id in &dataset_doc_ids {
+        let dataset_documents =
+            dataset_docstore.load_documents_by_id(std::slice::from_ref(doc_id))?;
+        let store_documents = store_docstore.load_documents_by_id(std::slice::from_ref(doc_id))?;
         if dataset_documents.get(doc_id) != store_documents.get(doc_id) {
             return Err(DocstoreError::InvalidDocument(format!(
                 "store doc segment does not match mounted dataset payload for {doc_id}"

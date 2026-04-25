@@ -1,8 +1,9 @@
 use std::fmt;
-use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -255,8 +256,15 @@ impl MultimodalIngestSession {
         self.ensure_open()?;
         validate_import_request(&new_asset)?;
 
-        if self
-            .assets
+        let mut metadata_file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&self.metadata_path)
+            .map_err(io_error)?;
+        metadata_file.lock_exclusive().map_err(io_error)?;
+
+        let mut assets = load_assets_from_file(&mut metadata_file)?;
+        if assets
             .iter()
             .any(|asset| asset.asset_id == new_asset.asset_id)
         {
@@ -306,8 +314,10 @@ impl MultimodalIngestSession {
             provenance: new_asset.provenance,
         };
 
-        append_asset(&self.metadata_path, &asset)?;
-        self.assets.push(asset.clone());
+        append_asset_to_file(&mut metadata_file, &asset)?;
+        metadata_file.unlock().map_err(io_error)?;
+        assets.push(asset.clone());
+        self.assets = assets;
         Ok(asset)
     }
 
@@ -392,7 +402,13 @@ impl MultimodalIngestSession {
 }
 
 fn load_assets(path: &Path) -> Result<Vec<MultimodalAsset>, MultimodalError> {
-    BufReader::new(OpenOptions::new().read(true).open(path).map_err(io_error)?)
+    let mut file = OpenOptions::new().read(true).open(path).map_err(io_error)?;
+    load_assets_from_file(&mut file)
+}
+
+fn load_assets_from_file(file: &mut File) -> Result<Vec<MultimodalAsset>, MultimodalError> {
+    file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+    BufReader::new(file)
         .lines()
         .filter_map(|line| match line {
             Ok(line) if line.trim().is_empty() => None,
@@ -405,12 +421,8 @@ fn load_assets(path: &Path) -> Result<Vec<MultimodalAsset>, MultimodalError> {
         .collect()
 }
 
-fn append_asset(path: &Path, asset: &MultimodalAsset) -> Result<(), MultimodalError> {
+fn append_asset_to_file(file: &mut File, asset: &MultimodalAsset) -> Result<(), MultimodalError> {
     let encoded = serde_json::to_string(asset).map_err(json_error)?;
-    let mut file = OpenOptions::new()
-        .append(true)
-        .open(path)
-        .map_err(io_error)?;
     writeln!(file, "{encoded}").map_err(io_error)?;
     file.flush().map_err(io_error)?;
     Ok(())

@@ -1250,6 +1250,7 @@ dependencies = [
 name = "wax-v2-multimodal"
 version = "0.1.0"
 dependencies = [
+ "fs2",
  "serde",
  "serde_json",
  "sha2",
@@ -1285,6 +1286,7 @@ dependencies = [
 name = "wax-v2-structured-memory"
 version = "0.1.0"
 dependencies = [
+ "fs2",
  "serde",
  "serde_json",
  "tempfile",

@@ -3,6 +3,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 const STRUCTURED_MEMORY_FILE_NAME: &str = "structured-memory.ndjson";
@@ -246,6 +247,18 @@ impl StructuredMemorySession {
         self.ensure_open()?;
         validate_record_inputs(&new_record)?;
 
+        let mut file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&self.storage_path)
+            .map_err(io_error)?;
+        file.lock_exclusive().map_err(io_error)?;
+
+        let mut records = load_records(&self.storage_path)?;
+        self.next_record_id = records
+            .last()
+            .map(|record| record.record_id + 1)
+            .unwrap_or(0);
         let record = StructuredMemoryRecord {
             record_id: self.next_record_id,
             subject: new_record.subject,
@@ -256,15 +269,13 @@ impl StructuredMemorySession {
         };
 
         let encoded = serde_json::to_string(&record).map_err(json_error)?;
-        let mut file = OpenOptions::new()
-            .append(true)
-            .open(&self.storage_path)
-            .map_err(io_error)?;
         writeln!(file, "{encoded}").map_err(io_error)?;
         file.flush().map_err(io_error)?;
+        file.unlock().map_err(io_error)?;
 
-        self.records.push(record.clone());
         self.next_record_id += 1;
+        records.push(record.clone());
+        self.records = records;
         Ok(record)
     }
 
