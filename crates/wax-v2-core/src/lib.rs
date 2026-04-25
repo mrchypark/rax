@@ -5,7 +5,7 @@ use std::ops::Range;
 use std::path::Path;
 
 use fs2::FileExt;
-use memmap2::Mmap;
+use memmap2::{Mmap, MmapOptions};
 use sha2::{Digest, Sha256};
 
 const FILE_MAGIC: &[u8; 8] = b"RAXWAXV2";
@@ -729,16 +729,23 @@ pub fn map_segment_object(
     let object_end = object_start
         .checked_add(object_length)
         .ok_or_else(|| CoreError::InvalidManifest("segment object range overflow".to_owned()))?;
-    // SAFETY: the mmap is read-only and callers only receive slices after descriptor bounds and
-    // payload checksums are validated. Store writers must append immutable objects and publish by
-    // atomically switching superblocks; external tools must also preserve that no-truncate
-    // invariant while readers may hold mappings, otherwise the OS can SIGBUS mapped readers.
-    let mapped = unsafe { Mmap::map(&file)? };
-    let object_bytes = mapped
-        .get(object_start..object_end)
-        .ok_or_else(|| CoreError::InvalidManifest("segment object range is invalid".to_owned()))?;
+    let file_length = file.metadata()?.len();
+    if u64::try_from(object_end).map_or(true, |end| end > file_length) {
+        return Err(CoreError::InvalidManifest(
+            "segment object range extends past end of file".to_owned(),
+        ));
+    }
+    // SAFETY: the mmap is read-only, page-aligned by the store object alignment, and callers only
+    // receive slices after descriptor bounds and payload checksums are validated. Store writers
+    // must append immutable objects and publish by atomically switching superblocks.
+    let mapped = unsafe {
+        MmapOptions::new()
+            .offset(descriptor.object_offset)
+            .len(object_length)
+            .map(&file)?
+    };
     let decoded = decode_object_payload(
-        object_bytes,
+        mapped.as_ref(),
         object_type_for_family(descriptor.family),
         descriptor.segment_generation,
     )?;
@@ -747,11 +754,9 @@ pub fn map_segment_object(
             context: "segment object",
         });
     }
-    let payload_range =
-        object_start + decoded.payload_range.start..object_start + decoded.payload_range.end;
     Ok(SegmentObject {
         backing: SegmentObjectBacking::Mapped(mapped),
-        payload_range,
+        payload_range: decoded.payload_range,
     })
 }
 
