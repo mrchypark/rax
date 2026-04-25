@@ -277,7 +277,6 @@ pub fn query_batch_ranked_results(
         },
     )?;
     let text_lane = TextLane::load(dataset_path, &manifest)?;
-    let filter_candidate_limit = manifest.corpus.doc_count as usize;
     let mut vector_lane = if uses_vector_lane {
         Some(VectorLane::load(dataset_path, &manifest, vector_mode)?)
     } else {
@@ -288,11 +287,21 @@ pub fn query_batch_ranked_results(
     } else {
         None
     };
-    let docstore = if queries.iter().any(|query| !query.filter_spec.is_empty()) {
-        Some(open_docstore(dataset_path, &manifest)?)
+    let has_metadata_filters = queries.iter().any(|query| !query.filter_spec.is_empty());
+    let docstore = if has_metadata_filters {
+        let docstore = open_docstore(dataset_path, &manifest)?;
+        let active_doc_count = docstore
+            .load_document_ids()
+            .map_err(crate::documents::docstore_error)?
+            .len();
+        Some((docstore, active_doc_count))
     } else {
         None
     };
+    let filter_candidate_limit = docstore
+        .as_ref()
+        .map(|(_, active_doc_count)| *active_doc_count)
+        .unwrap_or(manifest.corpus.doc_count as usize);
     let mut text_hits_by_query = text_lane
         .search_batch(
             &queries
@@ -383,7 +392,7 @@ pub fn query_batch_ranked_results(
             let hits: Vec<String> = if query.filter_spec.is_empty() {
                 hits.into_iter().take(limit).collect()
             } else {
-                let docstore = docstore
+                let (docstore, _) = docstore
                     .as_ref()
                     .ok_or_else(|| "docstore not available for metadata filtering".to_owned())?;
                 let documents = load_documents_by_id(docstore, &hits)?;

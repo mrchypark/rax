@@ -50,7 +50,7 @@ pub(crate) fn load_documents_by_id(
         .map_err(docstore_error)
 }
 
-fn docstore_error(error: wax_v2_docstore::DocstoreError) -> String {
+pub(crate) fn docstore_error(error: wax_v2_docstore::DocstoreError) -> String {
     match error {
         wax_v2_docstore::DocstoreError::Io(message)
         | wax_v2_docstore::DocstoreError::Json(message)

@@ -5,6 +5,7 @@ use std::ops::Range;
 use std::path::Path;
 
 use fs2::FileExt;
+use memmap2::Mmap;
 use sha2::{Digest, Sha256};
 
 const FILE_MAGIC: &[u8; 8] = b"RAXWAXV2";
@@ -456,13 +457,13 @@ pub struct SegmentObject {
 
 #[derive(Debug)]
 enum SegmentObjectBacking {
-    Owned(Vec<u8>),
+    Mapped(Mmap),
 }
 
 impl SegmentObject {
     pub fn as_slice(&self) -> &[u8] {
         let bytes = match &self.backing {
-            SegmentObjectBacking::Owned(bytes) => bytes.as_slice(),
+            SegmentObjectBacking::Mapped(bytes) => bytes.as_ref(),
         };
         &bytes[self.payload_range.clone()]
     }
@@ -700,15 +701,21 @@ pub fn map_segment_object(
         ));
     }
 
+    let object_start = usize::try_from(descriptor.object_offset).map_err(|_| {
+        CoreError::InvalidManifest("segment object offset exceeds addressable memory".to_owned())
+    })?;
     let object_length = usize::try_from(descriptor.object_length).map_err(|_| {
         CoreError::InvalidManifest("segment object length exceeds addressable memory".to_owned())
     })?;
-    let mut object_bytes = vec![0u8; object_length];
-    let mut file = file;
-    file.seek(SeekFrom::Start(descriptor.object_offset))?;
-    file.read_exact(&mut object_bytes)?;
+    let object_end = object_start
+        .checked_add(object_length)
+        .ok_or_else(|| CoreError::InvalidManifest("segment object range overflow".to_owned()))?;
+    let mapped = unsafe { Mmap::map(&file)? };
+    let object_bytes = mapped
+        .get(object_start..object_end)
+        .ok_or_else(|| CoreError::InvalidManifest("segment object range is invalid".to_owned()))?;
     let decoded = decode_object_payload(
-        &object_bytes,
+        object_bytes,
         object_type_for_family(descriptor.family),
         descriptor.segment_generation,
     )?;
@@ -717,9 +724,11 @@ pub fn map_segment_object(
             context: "segment object",
         });
     }
+    let payload_range =
+        object_start + decoded.payload_range.start..object_start + decoded.payload_range.end;
     Ok(SegmentObject {
-        backing: SegmentObjectBacking::Owned(object_bytes),
-        payload_range: decoded.payload_range,
+        backing: SegmentObjectBacking::Mapped(mapped),
+        payload_range,
     })
 }
 
@@ -969,8 +978,9 @@ mod tests {
         align_up, create_empty_store, decode_object_payload, map_segment_object, open_store,
         publish_segment, publish_segments_with_precondition, read_segment_object,
         write_zero_padding, ActiveManifest, CoreError, ObjectType, PendingSegmentDescriptor,
-        PendingSegmentWrite, SegmentDescriptor, SegmentKind, Superblock, DEFAULT_OBJECT_ALIGNMENT,
-        FORMAT_VERSION, MANIFEST_MAGIC, OBJECT_HEADER_LENGTH, OBJECT_MAGIC, SUPERBLOCK_SIZE,
+        PendingSegmentWrite, SegmentDescriptor, SegmentKind, SegmentObjectBacking, Superblock,
+        DEFAULT_OBJECT_ALIGNMENT, FORMAT_VERSION, MANIFEST_MAGIC, OBJECT_HEADER_LENGTH,
+        OBJECT_MAGIC, SUPERBLOCK_SIZE,
     };
 
     #[test]
@@ -1227,6 +1237,38 @@ mod tests {
                 ..reopened.superblock.active_manifest_offset as usize + 4],
             OBJECT_MAGIC
         );
+    }
+
+    #[test]
+    fn map_segment_object_returns_mapped_payload_view() {
+        let temp_dir = tempdir().expect("tempdir");
+        let path = temp_dir.path().join("mapped.wax");
+
+        create_empty_store(&path).expect("store should be created");
+        let opened = publish_segment(
+            &path,
+            PendingSegmentDescriptor {
+                family: SegmentKind::Doc,
+                family_version: 1,
+                flags: 0,
+                doc_id_start: 0,
+                doc_id_end_exclusive: 1,
+                min_timestamp_ms: 0,
+                max_timestamp_ms: 0,
+                live_items: 1,
+                tombstoned_items: 0,
+                backend_id: 0,
+                backend_aux: 0,
+            },
+            b"mapped-payload",
+        )
+        .expect("segment should publish");
+
+        let object =
+            map_segment_object(&path, &opened.manifest.segments[0]).expect("mapped object");
+
+        assert!(matches!(&object.backing, SegmentObjectBacking::Mapped(_)));
+        assert_eq!(object.as_slice(), b"mapped-payload");
     }
 
     #[test]

@@ -524,7 +524,6 @@ struct StoreDocSegment {
     payload_range: Range<usize>,
     rows_by_wax_doc_id: Vec<StoreDocEntry>,
     ordered_doc_ids: Vec<String>,
-    entries_by_external_doc_id: HashMap<String, StoreDocEntry>,
     doc_id_map: Option<DocIdMap>,
 }
 
@@ -628,7 +627,6 @@ impl StoreDocSegment {
         };
         let mut rows_by_wax_doc_id = Vec::with_capacity(row_count);
         let mut ordered_doc_ids = Vec::with_capacity(row_count);
-        let mut entries_by_external_doc_id = HashMap::with_capacity(row_count);
 
         for row_bytes in row_table.chunks_exact(DOC_ROW_LENGTH) {
             let row = DocRow {
@@ -658,14 +656,6 @@ impl StoreDocSegment {
                             row.doc_id
                         ))
                     })?;
-                if entries_by_external_doc_id
-                    .insert(external_doc_id.clone(), StoreDocEntry { row: row.clone() })
-                    .is_some()
-                {
-                    return Err(DocstoreError::InvalidDocument(
-                        "duplicate external doc_id in store segment".to_owned(),
-                    ));
-                }
                 ordered_doc_ids.push(external_doc_id);
             }
 
@@ -678,7 +668,6 @@ impl StoreDocSegment {
             payload_range: payload_bytes_offset..metadata_bytes_offset,
             rows_by_wax_doc_id,
             ordered_doc_ids,
-            entries_by_external_doc_id,
             doc_id_map,
         })
     }
@@ -692,10 +681,20 @@ impl StoreDocSegment {
         }
 
         let mut documents = HashMap::new();
+        let doc_id_map = self.doc_id_map.as_ref().ok_or_else(|| {
+            DocstoreError::InvalidDocument("store doc segment missing doc_id map".to_owned())
+        })?;
         for doc_id in target_doc_ids {
-            let Some(entry) = self.entries_by_external_doc_id.get(doc_id) else {
+            let Some(wax_doc_id) = doc_id_map.wax_doc_id(doc_id) else {
                 continue;
             };
+            let Ok(index) = self
+                .rows_by_wax_doc_id
+                .binary_search_by_key(&wax_doc_id, |entry| entry.row.doc_id)
+            else {
+                continue;
+            };
+            let entry = &self.rows_by_wax_doc_id[index];
             let (_, value) = self.parse_payload_document(entry)?;
             documents.insert(doc_id.clone(), value);
         }
@@ -1008,6 +1007,8 @@ impl Docstore {
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
             let preview_length = preview.as_ref().map(|value| value.len()).unwrap_or(0);
+            let metadata_length = checked_section_u32(metadata_bytes.len(), "metadata length")?;
+            let preview_length = checked_section_u32(preview_length, "preview length")?;
 
             records.push(DocSegmentRecord {
                 row: DocRow {
@@ -1019,8 +1020,8 @@ impl Docstore {
                     flags: 0,
                     payload_offset,
                     payload_length: payload.len() as u64,
-                    metadata_ref: SectionRef::new(metadata_offset, metadata_bytes.len() as u32),
-                    preview_ref: SectionRef::new(preview_offset, preview_length as u32),
+                    metadata_ref: SectionRef::new(metadata_offset, metadata_length),
+                    preview_ref: SectionRef::new(preview_offset, preview_length),
                 },
                 payload,
                 metadata,
@@ -1029,15 +1030,13 @@ impl Docstore {
 
             payload_offset += records.last().expect("record").payload.len() as u64;
             metadata_offset = metadata_offset
-                .checked_add(metadata_bytes.len() as u32)
+                .checked_add(metadata_length)
                 .ok_or_else(|| {
                     DocstoreError::InvalidDocument("metadata offset overflow".to_owned())
                 })?;
-            preview_offset = preview_offset
-                .checked_add(preview_length as u32)
-                .ok_or_else(|| {
-                    DocstoreError::InvalidDocument("preview offset overflow".to_owned())
-                })?;
+            preview_offset = preview_offset.checked_add(preview_length).ok_or_else(|| {
+                DocstoreError::InvalidDocument("preview offset overflow".to_owned())
+            })?;
         }
 
         Ok(BinaryDocSegment {
@@ -1239,6 +1238,8 @@ fn build_binary_doc_segment_from_documents(
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
         let preview_length = preview.as_ref().map(|value| value.len()).unwrap_or(0);
+        let metadata_length = checked_section_u32(metadata_bytes.len(), "metadata length")?;
+        let preview_length = checked_section_u32(preview_length, "preview length")?;
 
         records.push(DocSegmentRecord {
             row: DocRow {
@@ -1250,8 +1251,8 @@ fn build_binary_doc_segment_from_documents(
                 flags: 0,
                 payload_offset,
                 payload_length: payload.len() as u64,
-                metadata_ref: SectionRef::new(metadata_offset, metadata_bytes.len() as u32),
-                preview_ref: SectionRef::new(preview_offset, preview_length as u32),
+                metadata_ref: SectionRef::new(metadata_offset, metadata_length),
+                preview_ref: SectionRef::new(preview_offset, preview_length),
             },
             payload,
             metadata,
@@ -1260,10 +1261,10 @@ fn build_binary_doc_segment_from_documents(
 
         payload_offset += records.last().expect("record").payload.len() as u64;
         metadata_offset = metadata_offset
-            .checked_add(metadata_bytes.len() as u32)
+            .checked_add(metadata_length)
             .ok_or_else(|| DocstoreError::InvalidDocument("metadata offset overflow".to_owned()))?;
         preview_offset = preview_offset
-            .checked_add(preview_length as u32)
+            .checked_add(preview_length)
             .ok_or_else(|| DocstoreError::InvalidDocument("preview offset overflow".to_owned()))?;
     }
 
@@ -1527,6 +1528,11 @@ fn read_u64_as_usize(bytes: &[u8], offset: usize, label: &str) -> Result<usize, 
         .map_err(|_| DocstoreError::InvalidDocument(format!("{label} exceeds addressable memory")))
 }
 
+fn checked_section_u32(value: usize, label: &str) -> Result<u32, DocstoreError> {
+    u32::try_from(value)
+        .map_err(|_| DocstoreError::InvalidDocument(format!("{label} exceeds u32::MAX")))
+}
+
 fn sha256(bytes: &[u8]) -> [u8; 32] {
     let digest = Sha256::digest(bytes);
     let mut checksum = [0u8; 32];
@@ -1618,6 +1624,18 @@ mod tests {
         assert!(
             matches!(error, DocstoreError::InvalidDocument(message) if message.contains("row count"))
         );
+    }
+
+    #[test]
+    fn checked_section_u32_rejects_unencodable_ref_lengths() {
+        let error =
+            super::checked_section_u32(u32::MAX as usize + 1, "metadata length").unwrap_err();
+
+        assert!(matches!(
+            error,
+            DocstoreError::InvalidDocument(message)
+                if message.contains("metadata length") && message.contains("u32::MAX")
+        ));
     }
 
     #[test]
