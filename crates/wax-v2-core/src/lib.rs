@@ -982,8 +982,8 @@ mod tests {
         publish_segment, publish_segments_with_precondition, read_segment_object,
         write_zero_padding, ActiveManifest, CoreError, ObjectType, PendingSegmentDescriptor,
         PendingSegmentWrite, SegmentDescriptor, SegmentKind, SegmentObjectBacking, Superblock,
-        DEFAULT_OBJECT_ALIGNMENT, FORMAT_VERSION, MANIFEST_MAGIC, OBJECT_HEADER_LENGTH,
-        OBJECT_MAGIC, SUPERBLOCK_SIZE,
+        DEFAULT_OBJECT_ALIGNMENT, FORMAT_VERSION, MANIFEST_HEADER_LENGTH, MANIFEST_MAGIC,
+        OBJECT_HEADER_LENGTH, OBJECT_MAGIC, SEGMENT_DESCRIPTOR_LENGTH, SUPERBLOCK_SIZE,
     };
 
     #[test]
@@ -1045,6 +1045,47 @@ mod tests {
         let decoded = ActiveManifest::decode(&encoded).expect("manifest should decode");
 
         assert_eq!(decoded, manifest);
+    }
+
+    #[test]
+    fn manifest_encodes_descriptor_checksum_at_offset_96() {
+        let checksum = [0xab; 32];
+        let manifest = ActiveManifest {
+            generation: 3,
+            segments: vec![SegmentDescriptor {
+                family: SegmentKind::Doc,
+                family_version: 1,
+                flags: 0x10,
+                object_offset: 16384,
+                object_length: 512,
+                segment_generation: 9,
+                doc_id_start: 100,
+                doc_id_end_exclusive: 140,
+                min_timestamp_ms: 1_000,
+                max_timestamp_ms: 9_000,
+                live_items: 37,
+                tombstoned_items: 2,
+                backend_id: 11,
+                backend_aux: 99,
+                object_checksum: checksum,
+            }],
+        };
+
+        let encoded = manifest.encode();
+        let descriptor_start = MANIFEST_HEADER_LENGTH;
+
+        assert_eq!(
+            encoded.len(),
+            MANIFEST_HEADER_LENGTH + SEGMENT_DESCRIPTOR_LENGTH
+        );
+        assert_eq!(
+            &encoded[descriptor_start + 88..descriptor_start + 96],
+            &99_u64.to_le_bytes()
+        );
+        assert_eq!(
+            &encoded[descriptor_start + 96..descriptor_start + 128],
+            checksum.as_slice()
+        );
     }
 
     #[test]
