@@ -27,6 +27,10 @@ use crate::documents::{
 };
 use crate::query_support::load_query_vector_records;
 
+const METADATA_FILTER_MIN_CANDIDATES: usize = 64;
+const METADATA_FILTER_CANDIDATE_MULTIPLIER: usize = 64;
+const METADATA_FILTER_MAX_CANDIDATES: usize = 4096;
+
 pub struct PackedTextEngine {
     mounted_path: Option<PathBuf>,
     phase: EnginePhase,
@@ -427,7 +431,11 @@ fn metadata_filter_candidate_limit(top_k: usize, active_doc_count: usize) -> usi
     if top_k == 0 {
         return 0;
     }
-    active_doc_count
+    top_k
+        .saturating_mul(METADATA_FILTER_CANDIDATE_MULTIPLIER)
+        .max(METADATA_FILTER_MIN_CANDIDATES)
+        .min(METADATA_FILTER_MAX_CANDIDATES)
+        .min(active_doc_count)
 }
 
 fn pop_text_hits(
@@ -625,7 +633,10 @@ mod tests {
     use wax_v2_search::{filter_hits_by_metadata, MetadataFilter};
     use wax_v2_vector::resolve_auto_vector_mode;
 
-    use crate::{metadata_filter_candidate_limit, pop_text_hits, JsonDocumentMetadata};
+    use crate::{
+        metadata_filter_candidate_limit, pop_text_hits, JsonDocumentMetadata,
+        METADATA_FILTER_MAX_CANDIDATES, METADATA_FILTER_MIN_CANDIDATES,
+    };
 
     #[test]
     fn auto_mode_prefers_exact_flat_for_small_corpora() {
@@ -676,9 +687,16 @@ mod tests {
     }
 
     #[test]
-    fn metadata_filter_candidate_limit_scans_all_active_docs_for_correctness() {
+    fn metadata_filter_candidate_limit_bounds_large_filtered_queries() {
         assert_eq!(metadata_filter_candidate_limit(0, 100_000), 0);
-        assert_eq!(metadata_filter_candidate_limit(1, 100_000), 100_000);
+        assert_eq!(
+            metadata_filter_candidate_limit(1, 100_000),
+            METADATA_FILTER_MIN_CANDIDATES
+        );
+        assert_eq!(
+            metadata_filter_candidate_limit(1_000, 100_000),
+            METADATA_FILTER_MAX_CANDIDATES
+        );
         assert_eq!(metadata_filter_candidate_limit(100, 4), 4);
     }
 

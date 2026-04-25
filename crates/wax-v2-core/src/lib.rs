@@ -749,8 +749,8 @@ pub fn map_segment_object(
         ));
     }
     // SAFETY: the mmap is read-only, aligned to the host allocation granularity, and callers only
-    // receive slices after descriptor bounds and payload checksums are validated. Store writers must
-    // append immutable objects and publish by atomically switching superblocks.
+    // receive slices after descriptor bounds and the header checksum contract are validated. Store
+    // writers must append immutable objects and publish by atomically switching superblocks.
     let mapped = unsafe {
         MmapOptions::new()
             .offset(map_offset)
@@ -758,7 +758,7 @@ pub fn map_segment_object(
             .map(&file)?
     };
     let object_end = map_prefix + object_length;
-    let decoded = decode_object_payload(
+    let decoded = decode_object_payload_header(
         &mapped[map_prefix..object_end],
         object_type_for_family(descriptor.family),
         descriptor.segment_generation,
@@ -991,6 +991,19 @@ fn decode_object_payload(
     expected_type: ObjectType,
     expected_generation: u64,
 ) -> Result<DecodedObject, CoreError> {
+    let decoded = decode_object_payload_header(object_bytes, expected_type, expected_generation)?;
+    let payload_checksum = sha256(&object_bytes[decoded.payload_range.clone()]);
+    if payload_checksum != decoded.payload_checksum {
+        return Err(CoreError::ChecksumMismatch { context: "object" });
+    }
+    Ok(decoded)
+}
+
+fn decode_object_payload_header(
+    object_bytes: &[u8],
+    expected_type: ObjectType,
+    expected_generation: u64,
+) -> Result<DecodedObject, CoreError> {
     if object_bytes.len() < OBJECT_HEADER_LENGTH {
         return Err(CoreError::UnexpectedLength {
             context: "object",
@@ -1031,13 +1044,9 @@ fn decode_object_payload(
     let payload_range = OBJECT_HEADER_LENGTH..payload_end;
     let mut expected_checksum = [0u8; 32];
     expected_checksum.copy_from_slice(&object_bytes[32..64]);
-    let payload_checksum = sha256(&object_bytes[payload_range.clone()]);
-    if payload_checksum != expected_checksum {
-        return Err(CoreError::ChecksumMismatch { context: "object" });
-    }
     Ok(DecodedObject {
         payload_range,
-        payload_checksum,
+        payload_checksum: expected_checksum,
     })
 }
 
