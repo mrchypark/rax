@@ -569,6 +569,7 @@ impl RuntimeStoreWriter<'_> {
             vectors.iter().map(|vector| vector.doc_id.as_str()),
             "publish_raw_vectors",
         )?;
+        self.store.refresh_read_state()?;
 
         let doc_ids = vectors
             .iter()
@@ -1380,6 +1381,49 @@ mod tests {
             .publish_raw_vectors(vec![NewDocumentVector::new(
                 "doc-001",
                 embed_text("alpha only", 384),
+            )])
+            .unwrap();
+
+        assert_eq!(
+            report.published_families,
+            vec![RuntimePublishFamily::Vector]
+        );
+    }
+
+    #[test]
+    fn publish_raw_vectors_refreshes_documents_published_by_another_handle() {
+        let dataset_dir = tempdir().unwrap();
+        let source_dir = tempdir().unwrap();
+        let docs_path = source_dir.path().join("docs.ndjson");
+        fs::write(
+            &docs_path,
+            concat!(
+                "{\"doc_id\":\"doc-001\",\"text\":\"alpha\"}\n",
+                "{\"doc_id\":\"doc-002\",\"text\":\"beta\"}\n",
+            ),
+        )
+        .unwrap();
+        pack_adhoc_dataset(&AdhocPackRequest::new(
+            &docs_path,
+            dataset_dir.path(),
+            "small",
+        ))
+        .unwrap();
+
+        let mut stale_runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
+        let mut writer_runtime = RuntimeStore::open(dataset_dir.path()).unwrap();
+        writer_runtime
+            .writer()
+            .unwrap()
+            .publish_raw_documents(vec![NewDocument::new("doc-001", "alpha refreshed")])
+            .unwrap();
+
+        let report = stale_runtime
+            .writer()
+            .unwrap()
+            .publish_raw_vectors(vec![NewDocumentVector::new(
+                "doc-001",
+                embed_text("alpha refreshed", 384),
             )])
             .unwrap();
 
