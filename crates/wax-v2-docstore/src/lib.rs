@@ -1381,13 +1381,21 @@ fn load_document_offset_index(
             continue;
         }
         let record: DocumentOffsetRecord = serde_json::from_str(&line)?;
-        index.insert(
-            record.doc_id,
-            DocumentOffsetEntry {
-                offset: record.offset,
-                length: record.length,
-            },
-        );
+        if index
+            .insert(
+                record.doc_id.clone(),
+                DocumentOffsetEntry {
+                    offset: record.offset,
+                    length: record.length,
+                },
+            )
+            .is_some()
+        {
+            return Err(DocstoreError::InvalidDocument(format!(
+                "duplicate document offset entry for doc_id {}",
+                record.doc_id,
+            )));
+        }
     }
 
     Ok(index)
@@ -1416,6 +1424,19 @@ fn load_documents_by_id_from_offsets(
         let object = value.as_object().ok_or_else(|| {
             DocstoreError::InvalidDocument("document line must be a json object".to_owned())
         })?;
+        let payload_doc_id = object
+            .get("doc_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                DocstoreError::InvalidDocument(
+                    "document offset payload is missing string doc_id".to_owned(),
+                )
+            })?;
+        if payload_doc_id != doc_id {
+            return Err(DocstoreError::InvalidDocument(format!(
+                "document offset payload doc_id mismatch: expected {doc_id}, found {payload_doc_id}"
+            )));
+        }
         documents.insert(doc_id.clone(), Value::Object(object.clone()));
     }
 
@@ -1814,6 +1835,57 @@ mod tests {
             error,
             DocstoreError::InvalidDocument(message) if message.contains("exceeds maximum length")
         ));
+    }
+
+    #[test]
+    fn open_dataset_pack_rejects_duplicate_document_offset_doc_ids() {
+        let temp_dir = tempdir().unwrap();
+        let docs_path = temp_dir.path().join("docs.ndjson");
+        let offsets_path = temp_dir.path().join("document-offsets.jsonl");
+        fs::write(
+            &docs_path,
+            "{\"doc_id\":\"doc-001\",\"text\":\"alpha\"}\n{\"doc_id\":\"doc-001\",\"text\":\"beta\"}\n",
+        )
+        .unwrap();
+        fs::write(
+            &offsets_path,
+            "{\"doc_id\":\"doc-001\",\"offset\":0,\"length\":36}\n{\"doc_id\":\"doc-001\",\"offset\":36,\"length\":35}\n",
+        )
+        .unwrap();
+
+        let manifest = test_manifest(true);
+        let error = Docstore::open_dataset_pack(temp_dir.path(), &manifest).unwrap_err();
+
+        assert!(
+            matches!(error, DocstoreError::InvalidDocument(message) if message.contains("duplicate document offset"))
+        );
+    }
+
+    #[test]
+    fn open_dataset_pack_rejects_offset_payload_doc_id_mismatch() {
+        let temp_dir = tempdir().unwrap();
+        let docs_path = temp_dir.path().join("docs.ndjson");
+        let offsets_path = temp_dir.path().join("document-offsets.jsonl");
+        let line = "{\"doc_id\":\"doc-actual\",\"text\":\"alpha\"}\n";
+        fs::write(&docs_path, line).unwrap();
+        fs::write(
+            &offsets_path,
+            format!(
+                "{{\"doc_id\":\"doc-requested\",\"offset\":0,\"length\":{}}}\n",
+                line.len()
+            ),
+        )
+        .unwrap();
+
+        let manifest = test_manifest(true);
+        let docstore = Docstore::open_dataset_pack(temp_dir.path(), &manifest).unwrap();
+        let error = docstore
+            .load_documents_by_id(&["doc-requested".to_owned()])
+            .unwrap_err();
+
+        assert!(
+            matches!(error, DocstoreError::InvalidDocument(message) if message.contains("doc_id mismatch"))
+        );
     }
 
     #[test]

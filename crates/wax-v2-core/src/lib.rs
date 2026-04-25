@@ -881,12 +881,22 @@ fn mmap_allocation_granularity() -> u64 {
         }
     }
 
+    default_mmap_allocation_granularity()
+}
+
+fn default_mmap_allocation_granularity() -> u64 {
     #[cfg(windows)]
     {
-        return 65_536;
+        65_536
     }
-
-    DEFAULT_OBJECT_ALIGNMENT
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        16_384
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
+    {
+        DEFAULT_OBJECT_ALIGNMENT
+    }
 }
 
 fn write_zero_padding(file: &mut OpenOptionsFile, target_offset: u64) -> Result<(), CoreError> {
@@ -1078,13 +1088,13 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        align_up, create_empty_store, decode_object_payload, map_segment_object, open_store,
-        publish_segment, publish_segments_with_precondition, read_segment_object,
-        write_zero_padding, ActiveManifest, CoreError, ObjectType, PendingSegmentDescriptor,
-        PendingSegmentWrite, SegmentDescriptor, SegmentKind, SegmentObjectBacking, Superblock,
-        DEFAULT_OBJECT_ALIGNMENT, FORMAT_VERSION, MANIFEST_HEADER_LENGTH, MANIFEST_MAGIC,
-        MAX_MANIFEST_OBJECT_LENGTH, OBJECT_HEADER_LENGTH, OBJECT_MAGIC, SEGMENT_DESCRIPTOR_LENGTH,
-        SUPERBLOCK_SIZE,
+        align_up, create_empty_store, decode_object_payload, default_mmap_allocation_granularity,
+        map_segment_object, open_store, publish_segment, publish_segments_with_precondition,
+        read_segment_object, write_zero_padding, ActiveManifest, CoreError, ObjectType,
+        PendingSegmentDescriptor, PendingSegmentWrite, SegmentDescriptor, SegmentKind,
+        SegmentObjectBacking, Superblock, DEFAULT_OBJECT_ALIGNMENT, FORMAT_VERSION,
+        MANIFEST_HEADER_LENGTH, MANIFEST_MAGIC, MAX_MANIFEST_OBJECT_LENGTH, OBJECT_HEADER_LENGTH,
+        OBJECT_MAGIC, SEGMENT_DESCRIPTOR_LENGTH, SUPERBLOCK_SIZE,
     };
 
     #[test]
@@ -1316,6 +1326,14 @@ mod tests {
                 if message.contains("object length")
                     || message.contains("addressable memory")
         ));
+    }
+
+    #[test]
+    fn mmap_allocation_granularity_fallback_is_safe_for_target() {
+        let fallback = default_mmap_allocation_granularity();
+
+        assert!(fallback >= DEFAULT_OBJECT_ALIGNMENT);
+        assert_eq!(fallback % DEFAULT_OBJECT_ALIGNMENT, 0);
     }
 
     #[test]
