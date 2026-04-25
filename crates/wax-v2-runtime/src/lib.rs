@@ -548,12 +548,15 @@ impl RuntimeStoreWriter<'_> {
         ensure_store_generation_unchanged_from_store(&store_path, expected_generation)?;
 
         let ordered_documents = raw_ordered_documents(&documents);
-        let text_inputs = raw_text_inputs(&documents);
         let doc_pending =
             wax_v2_docstore::prepare_raw_documents_segment(&store_path, ordered_documents)
                 .map_err(|error| RuntimeError::Storage(docstore_error(error)))?;
-        let mut text_pending = wax_v2_text::prepare_text_segment_from_documents(&text_inputs)
-            .map_err(RuntimeError::Storage)?;
+        let mut text_pending = wax_v2_text::prepare_text_segment_from_document_refs(
+            documents
+                .iter()
+                .map(|document| (document.doc_id.as_str(), document.text.as_str())),
+        )
+        .map_err(RuntimeError::Storage)?;
         text_pending.descriptor.doc_id_start = doc_pending.descriptor.doc_id_start;
         text_pending.descriptor.doc_id_end_exclusive = doc_pending.descriptor.doc_id_end_exclusive;
         let active_doc_id_range =
@@ -985,13 +988,6 @@ fn hybrid_text_candidate_limit(top_k: usize, live_doc_count: usize) -> usize {
         return 0;
     }
     live_doc_count.min(top_k.saturating_mul(10).max(100))
-}
-
-fn raw_text_inputs(documents: &[NewDocument]) -> Vec<(String, String)> {
-    documents
-        .iter()
-        .map(|document| (document.doc_id.clone(), document.text.clone()))
-        .collect()
 }
 
 fn reject_duplicate_doc_ids<'a>(

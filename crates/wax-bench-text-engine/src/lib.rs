@@ -27,10 +27,6 @@ use crate::documents::{
 };
 use crate::query_support::load_query_vector_records;
 
-const MAX_FILTER_CANDIDATES_PER_QUERY: usize = 4096;
-const MIN_FILTER_CANDIDATES_PER_QUERY: usize = 256;
-const FILTER_CANDIDATE_MULTIPLIER: usize = 64;
-
 pub struct PackedTextEngine {
     mounted_path: Option<PathBuf>,
     phase: EnginePhase,
@@ -314,7 +310,8 @@ pub fn query_batch_ranked_results(
                 .cloned()
                 .map(|mut query| {
                     if !query.filter_spec.is_empty() {
-                        query.top_k = bounded_filter_candidate_limit(query.top_k, active_doc_count);
+                        query.top_k =
+                            metadata_filter_candidate_limit(query.top_k, active_doc_count);
                     }
                     query
                 })
@@ -344,7 +341,7 @@ pub fn query_batch_ranked_results(
             let search_limit = if query.filter_spec.is_empty() {
                 limit
             } else {
-                bounded_filter_candidate_limit(limit, active_doc_count)
+                metadata_filter_candidate_limit(limit, active_doc_count)
             };
             let uses_vector_lane = query.lane_eligibility.hybrid
                 || (query.lane_eligibility.vector && !query.lane_eligibility.text);
@@ -426,17 +423,11 @@ pub fn query_batch_ranked_results(
         .collect()
 }
 
-fn bounded_filter_candidate_limit(top_k: usize, active_doc_count: usize) -> usize {
-    if active_doc_count == 0 {
+fn metadata_filter_candidate_limit(top_k: usize, active_doc_count: usize) -> usize {
+    if top_k == 0 {
         return 0;
     }
-    let expanded = top_k
-        .saturating_mul(FILTER_CANDIDATE_MULTIPLIER)
-        .max(MIN_FILTER_CANDIDATES_PER_QUERY);
-    expanded
-        .min(MAX_FILTER_CANDIDATES_PER_QUERY)
-        .max(top_k.min(active_doc_count))
-        .min(active_doc_count)
+    active_doc_count
 }
 
 fn pop_text_hits(
@@ -634,7 +625,7 @@ mod tests {
     use wax_v2_search::{filter_hits_by_metadata, MetadataFilter};
     use wax_v2_vector::resolve_auto_vector_mode;
 
-    use crate::{bounded_filter_candidate_limit, pop_text_hits, JsonDocumentMetadata};
+    use crate::{metadata_filter_candidate_limit, pop_text_hits, JsonDocumentMetadata};
 
     #[test]
     fn auto_mode_prefers_exact_flat_for_small_corpora() {
@@ -685,11 +676,10 @@ mod tests {
     }
 
     #[test]
-    fn bounded_filter_candidate_limit_caps_large_filtered_queries() {
-        assert_eq!(bounded_filter_candidate_limit(1, 100_000), 256);
-        assert_eq!(bounded_filter_candidate_limit(100, 100_000), 4096);
-        assert_eq!(bounded_filter_candidate_limit(10_000, 100_000), 10_000);
-        assert_eq!(bounded_filter_candidate_limit(100, 4), 4);
+    fn metadata_filter_candidate_limit_scans_all_active_docs_for_correctness() {
+        assert_eq!(metadata_filter_candidate_limit(0, 100_000), 0);
+        assert_eq!(metadata_filter_candidate_limit(1, 100_000), 100_000);
+        assert_eq!(metadata_filter_candidate_limit(100, 4), 4);
     }
 
     #[test]

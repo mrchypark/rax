@@ -31,6 +31,11 @@ pub struct StructuredMemoryRecord {
     pub provenance: StructuredMemoryProvenance,
 }
 
+#[derive(Debug, Deserialize)]
+struct RecordIdOnly {
+    record_id: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredEntity {
     pub entity_id: String,
@@ -254,11 +259,7 @@ impl StructuredMemorySession {
             .map_err(io_error)?;
         file.lock_exclusive().map_err(io_error)?;
 
-        let mut records = load_records_from_file(&mut file)?;
-        self.next_record_id = records
-            .last()
-            .map(|record| record.record_id + 1)
-            .unwrap_or(0);
+        self.next_record_id = next_record_id_from_file(&mut file)?;
         let record = StructuredMemoryRecord {
             record_id: self.next_record_id,
             subject: new_record.subject,
@@ -274,8 +275,7 @@ impl StructuredMemorySession {
         file.unlock().map_err(io_error)?;
 
         self.next_record_id += 1;
-        records.push(record.clone());
-        self.records = records;
+        self.records.push(record.clone());
         Ok(record)
     }
 
@@ -472,6 +472,20 @@ fn load_records_from_file(
         .collect()
 }
 
+fn next_record_id_from_file(file: &mut std::fs::File) -> Result<u64, StructuredMemoryError> {
+    file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+    let mut next_record_id = 0;
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(io_error)?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: RecordIdOnly = serde_json::from_str(&line).map_err(json_error)?;
+        next_record_id = record.record_id + 1;
+    }
+    Ok(next_record_id)
+}
+
 fn validate_record_inputs(record: &NewStructuredMemoryRecord) -> Result<(), StructuredMemoryError> {
     if record.subject.is_empty() {
         return Err(StructuredMemoryError::InvalidRequest(
@@ -626,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_memory_record_reloads_latest_records_before_assigning_id() {
+    fn structured_memory_record_scans_latest_id_before_appending() {
         let root = tempdir().unwrap();
         let mut first = StructuredMemorySession::open(root.path()).unwrap();
         let mut second = StructuredMemorySession::open(root.path()).unwrap();
@@ -651,7 +665,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(record.record_id, 1);
-        assert_eq!(first.records.len(), 2);
+        let records = first
+            .query(StructuredMemoryQuery::subject("person:bob"))
+            .unwrap();
+        assert_eq!(records.len(), 1);
     }
 
     #[test]

@@ -275,7 +275,20 @@ pub fn prepare_compatibility_text_segment(
 pub fn prepare_text_segment_from_documents(
     documents: &[(String, String)],
 ) -> Result<PendingSegmentWrite, String> {
-    let segment = BinaryTextSegment::from_documents(documents);
+    prepare_text_segment_from_document_refs(
+        documents
+            .iter()
+            .map(|(doc_id, text)| (doc_id.as_str(), text.as_str())),
+    )
+}
+
+pub fn prepare_text_segment_from_document_refs<'a, I>(
+    documents: I,
+) -> Result<PendingSegmentWrite, String>
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    let (segment, doc_count) = BinaryTextSegment::from_document_refs(documents);
     let object_bytes = segment.encode()?;
     Ok(PendingSegmentWrite {
         descriptor: PendingSegmentDescriptor {
@@ -283,10 +296,10 @@ pub fn prepare_text_segment_from_documents(
             family_version: 1,
             flags: 0,
             doc_id_start: 0,
-            doc_id_end_exclusive: documents.len() as u64,
+            doc_id_end_exclusive: doc_count as u64,
             min_timestamp_ms: 0,
             max_timestamp_ms: 0,
-            live_items: documents.len() as u64,
+            live_items: doc_count as u64,
             tombstoned_items: 0,
             backend_id: 0,
             backend_aux: segment.postings.len() as u64,
@@ -455,12 +468,26 @@ struct BinaryTextSegment {
 
 impl BinaryTextSegment {
     fn from_documents(documents: &[(String, String)]) -> Self {
+        Self::from_document_refs(
+            documents
+                .iter()
+                .map(|(doc_id, text)| (doc_id.as_str(), text.as_str())),
+        )
+        .0
+    }
+
+    fn from_document_refs<'a, I>(documents: I) -> (Self, usize)
+    where
+        I: IntoIterator<Item = (&'a str, &'a str)>,
+    {
         let mut inverted: HashMap<String, Vec<String>> = HashMap::new();
+        let mut doc_count = 0;
         for (doc_id, text) in documents {
+            doc_count += 1;
             let mut seen_tokens = std::collections::HashSet::new();
             for token in tokenize(text) {
                 if seen_tokens.insert(token.clone()) {
-                    inverted.entry(token).or_default().push(doc_id.clone());
+                    inverted.entry(token).or_default().push(doc_id.to_owned());
                 }
             }
         }
@@ -472,7 +499,7 @@ impl BinaryTextSegment {
             })
             .collect::<Vec<_>>();
         postings.sort_by(|left, right| left.token.cmp(&right.token));
-        Self { postings }
+        (Self { postings }, doc_count)
     }
 
     fn encode(&self) -> Result<Vec<u8>, String> {

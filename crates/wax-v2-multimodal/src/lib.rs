@@ -38,6 +38,11 @@ pub struct MultimodalAsset {
     pub provenance: MultimodalAssetProvenance,
 }
 
+#[derive(Debug, Deserialize)]
+struct AssetIdOnly {
+    asset_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BootstrapImageMetadata {
     pub width_px: Option<u32>,
@@ -264,11 +269,7 @@ impl MultimodalIngestSession {
             .map_err(io_error)?;
         metadata_file.lock_exclusive().map_err(io_error)?;
 
-        let mut assets = load_assets_from_file(&mut metadata_file)?;
-        if assets
-            .iter()
-            .any(|asset| asset.asset_id == new_asset.asset_id)
-        {
+        if asset_id_exists_in_file(&mut metadata_file, &new_asset.asset_id)? {
             return Err(MultimodalError::InvalidRequest(format!(
                 "multimodal asset id already exists: {}",
                 new_asset.asset_id
@@ -317,8 +318,7 @@ impl MultimodalIngestSession {
 
         append_asset_to_file(&mut metadata_file, &asset)?;
         metadata_file.unlock().map_err(io_error)?;
-        assets.push(asset.clone());
-        self.assets = assets;
+        self.assets.push(asset.clone());
         Ok(asset)
     }
 
@@ -431,6 +431,21 @@ fn load_assets_from_file(file: &mut File) -> Result<Vec<MultimodalAsset>, Multim
             serde_json::from_str(&line).map_err(json_error)
         })
         .collect()
+}
+
+fn asset_id_exists_in_file(file: &mut File, asset_id: &str) -> Result<bool, MultimodalError> {
+    file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(io_error)?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let existing: AssetIdOnly = serde_json::from_str(&line).map_err(json_error)?;
+        if existing.asset_id == asset_id {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn append_asset_to_file(file: &mut File, asset: &MultimodalAsset) -> Result<(), MultimodalError> {
