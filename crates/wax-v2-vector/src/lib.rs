@@ -1353,32 +1353,7 @@ impl BinaryVectorSegmentLayout {
         };
 
         let mut cursor = 0usize;
-        let mut doc_ids = Vec::with_capacity(doc_count);
-        for _ in 0..doc_count {
-            let length_end = cursor
-                .checked_add(4)
-                .ok_or_else(|| "vector segment doc_id length overflow".to_owned())?;
-            if length_end > doc_ids_section.len() {
-                return Err("vector segment truncated while reading doc_id length".to_owned());
-            }
-            let length = u32::from_le_bytes(
-                doc_ids_section[cursor..length_end]
-                    .try_into()
-                    .expect("u32 slice"),
-            ) as usize;
-            cursor = length_end;
-            let value_end = cursor
-                .checked_add(length)
-                .ok_or_else(|| "vector segment doc_id range overflow".to_owned())?;
-            if value_end > doc_ids_section.len() {
-                return Err("vector segment truncated while reading doc_id".to_owned());
-            }
-            let doc_id = std::str::from_utf8(&doc_ids_section[cursor..value_end])
-                .map_err(|error| error.to_string())?
-                .to_owned();
-            cursor = value_end;
-            doc_ids.push(doc_id);
-        }
+        let doc_ids = read_length_prefixed_strings(doc_ids_section, doc_count, &mut cursor)?;
         if doc_ids_section[cursor..].iter().any(|byte| *byte != 0) {
             return Err("vector segment doc_id section length mismatch".to_owned());
         }
@@ -1402,6 +1377,52 @@ fn read_u16(bytes: &[u8], offset: usize) -> u16 {
 
 fn read_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("u32 slice"))
+}
+
+fn read_u32_at(bytes: &[u8], cursor: &mut usize, context: &str) -> Result<u32, String> {
+    let end = cursor
+        .checked_add(4)
+        .ok_or_else(|| format!("vector segment {context} length overflow"))?;
+    if end > bytes.len() {
+        return Err(format!(
+            "vector segment truncated while reading {context} length"
+        ));
+    }
+    let value = u32::from_le_bytes(bytes[*cursor..end].try_into().expect("u32 slice"));
+    *cursor = end;
+    Ok(value)
+}
+
+fn read_string_at(
+    bytes: &[u8],
+    cursor: &mut usize,
+    length: usize,
+    context: &str,
+) -> Result<String, String> {
+    let end = cursor
+        .checked_add(length)
+        .ok_or_else(|| format!("vector segment {context} range overflow"))?;
+    if end > bytes.len() {
+        return Err(format!("vector segment truncated while reading {context}"));
+    }
+    let value = std::str::from_utf8(&bytes[*cursor..end])
+        .map_err(|error| error.to_string())?
+        .to_owned();
+    *cursor = end;
+    Ok(value)
+}
+
+fn read_length_prefixed_strings(
+    bytes: &[u8],
+    count: usize,
+    cursor: &mut usize,
+) -> Result<Vec<String>, String> {
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        let length = read_u32_at(bytes, cursor, "doc_id")? as usize;
+        values.push(read_string_at(bytes, cursor, length, "doc_id")?);
+    }
+    Ok(values)
 }
 
 fn read_u64(bytes: &[u8], offset: usize) -> u64 {
@@ -1521,42 +1542,13 @@ fn dot_product_f32le(left: &[f32], right: &[u8]) -> f32 {
             .sum();
     }
 
-    let lane_count = left.len().min(right.len() / 4);
-    let mut sum0 = 0.0f32;
-    let mut sum1 = 0.0f32;
-    let mut sum2 = 0.0f32;
-    let mut sum3 = 0.0f32;
-    let mut index = 0usize;
-
-    while index + 4 <= lane_count {
-        let base = index * 4;
-        let r0 = decode_f32le_at(right, base);
-        let r1 = decode_f32le_at(right, base + 4);
-        let r2 = decode_f32le_at(right, base + 8);
-        let r3 = decode_f32le_at(right, base + 12);
-        sum0 += left[index] * r0;
-        sum1 += left[index + 1] * r1;
-        sum2 += left[index + 2] * r2;
-        sum3 += left[index + 3] * r3;
-        index += 4;
-    }
-
-    let mut tail = 0.0f32;
-    while index < lane_count {
-        tail += left[index] * decode_f32le_at(right, index * 4);
-        index += 1;
-    }
-
-    sum0 + sum1 + sum2 + sum3 + tail
-}
-
-#[inline]
-fn decode_f32le_at(bytes: &[u8], offset: usize) -> f32 {
-    f32::from_le_bytes(
-        bytes[offset..offset + 4]
-            .try_into()
-            .expect("validated vector length"),
-    )
+    left.iter()
+        .zip(right.chunks_exact(4))
+        .map(|(lhs, rhs)| {
+            let rhs = f32::from_le_bytes(rhs.try_into().expect("validated vector chunk"));
+            lhs * rhs
+        })
+        .sum()
 }
 
 fn dot_product_i8_preview(left: &[f32], right: &[u8]) -> f32 {

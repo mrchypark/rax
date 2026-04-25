@@ -183,16 +183,10 @@ impl TextQueryInputs {
 impl TextLane {
     pub fn load(mount_root: &Path, manifest: &DatasetPackManifest) -> Result<Self, String> {
         let metadata = TextLaneMetadata::resolve(mount_root, manifest)?;
-        let query_inputs = TextQueryInputs::resolve(mount_root, manifest).ok();
-        let (first_text_query, first_text_top_k, first_hybrid_query) =
-            if let Some(query_inputs) = query_inputs.as_ref() {
-                let (first_text_query, first_text_top_k) =
-                    load_first_text_query(&query_inputs.query_paths)?;
-                let first_hybrid_query = load_first_hybrid_text_query(&query_inputs.query_paths)?;
-                (first_text_query, first_text_top_k, first_hybrid_query)
-            } else {
-                (String::new(), 0, None)
-            };
+        let query_inputs = TextQueryInputs::resolve(mount_root, manifest)?;
+        let (first_text_query, first_text_top_k) =
+            load_first_text_query(&query_inputs.query_paths)?;
+        let first_hybrid_query = load_first_hybrid_text_query(&query_inputs.query_paths)?;
         let inverted = load_text_postings(&metadata)?;
 
         Ok(Self {
@@ -338,6 +332,9 @@ fn load_first_text_query(paths: &[PathBuf]) -> Result<(String, usize), String> {
     for path in paths {
         for line in BufReader::new(File::open(path).map_err(|error| error.to_string())?).lines() {
             let line = line.map_err(|error| error.to_string())?;
+            if line.trim().is_empty() {
+                continue;
+            }
             let query: QueryRecord =
                 serde_json::from_str(&line).map_err(|error| error.to_string())?;
             if query.lane_eligibility.text {
@@ -352,6 +349,9 @@ fn load_first_hybrid_text_query(paths: &[PathBuf]) -> Result<Option<FirstTextQue
     for path in paths {
         for line in BufReader::new(File::open(path).map_err(|error| error.to_string())?).lines() {
             let line = line.map_err(|error| error.to_string())?;
+            if line.trim().is_empty() {
+                continue;
+            }
             let query: QueryRecord =
                 serde_json::from_str(&line).map_err(|error| error.to_string())?;
             if query.lane_eligibility.hybrid {
@@ -665,6 +665,52 @@ mod tests {
             query_inputs.query_paths,
             vec![mount_root.join("queries.jsonl")]
         );
+    }
+
+    #[test]
+    fn text_lane_load_rejects_missing_query_set_metadata() {
+        let temp_dir = tempdir().unwrap();
+        fs::write(
+            temp_dir.path().join("postings.jsonl"),
+            "{\"token\":\"alpha\",\"doc_ids\":[\"doc-1\"]}\n",
+        )
+        .unwrap();
+        let mut manifest = test_manifest();
+        manifest.query_sets.clear();
+
+        let error = TextLane::load(temp_dir.path(), &manifest).unwrap_err();
+
+        assert!(error.contains("query_set"));
+    }
+
+    #[test]
+    fn text_lane_load_skips_empty_query_lines() {
+        let temp_dir = tempdir().unwrap();
+        fs::write(
+            temp_dir.path().join("postings.jsonl"),
+            concat!(
+                "{\"token\":\"alpha\",\"doc_ids\":[\"doc-1\"]}\n",
+                "{\"token\":\"beta\",\"doc_ids\":[\"doc-2\"]}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("queries.jsonl"),
+            concat!(
+                "\n",
+                "   \n",
+                "{\"query_id\":\"q-001\",\"query_class\":\"keyword\",\"difficulty\":\"easy\",\"query_text\":\"alpha\",\"top_k\":1,\"filter_spec\":{},\"preview_expected\":true,\"embedding_available\":false,\"lane_eligibility\":{\"text\":true,\"vector\":false,\"hybrid\":false}}\n",
+                "\n",
+                "{\"query_id\":\"q-002\",\"query_class\":\"hybrid\",\"difficulty\":\"easy\",\"query_text\":\"beta\",\"top_k\":2,\"filter_spec\":{},\"preview_expected\":true,\"embedding_available\":true,\"lane_eligibility\":{\"text\":true,\"vector\":true,\"hybrid\":true}}\n",
+            ),
+        )
+        .unwrap();
+
+        let lane = TextLane::load(temp_dir.path(), &test_manifest()).unwrap();
+
+        assert_eq!(lane.search_first_text_query(), vec!["doc-1"]);
+        assert_eq!(lane.first_hybrid_query(), Some("beta"));
+        assert_eq!(lane.first_hybrid_top_k(), 2);
     }
 
     #[test]
