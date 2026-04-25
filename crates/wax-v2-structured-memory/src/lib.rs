@@ -10,6 +10,7 @@ const STRUCTURED_MEMORY_FILE_NAME: &str = "structured-memory.ndjson";
 const ENTITY_KIND_PREDICATE: &str = "__entity_kind";
 const ENTITY_ALIAS_PREDICATE: &str = "__entity_alias";
 const RECORD_ID_TAIL_SCAN_CHUNK_SIZE: u64 = 8192;
+const MAX_RECORD_ID_TAIL_LINE_LENGTH: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StructuredMemoryStatus {
@@ -491,8 +492,18 @@ fn next_record_id_from_file(file: &mut std::fs::File) -> Result<u64, StructuredM
                     if line.is_empty() {
                         return Ok(0);
                     }
+                    if line.len() > MAX_RECORD_ID_TAIL_LINE_LENGTH {
+                        return Err(StructuredMemoryError::InvalidRequest(
+                            "structured memory tail record exceeds maximum scan length".to_owned(),
+                        ));
+                    }
                     let record: RecordIdOnly = serde_json::from_slice(line).map_err(json_error)?;
                     return Ok(record.record_id + 1);
+                }
+                if bytes.len() > MAX_RECORD_ID_TAIL_LINE_LENGTH {
+                    return Err(StructuredMemoryError::InvalidRequest(
+                        "structured memory tail record exceeds maximum scan length".to_owned(),
+                    ));
                 }
                 suffix = bytes;
                 end = start;
@@ -501,6 +512,11 @@ fn next_record_id_from_file(file: &mut std::fs::File) -> Result<u64, StructuredM
 
             let line = trim_ascii_whitespace(&bytes[line_start + 1..scan_end]);
             if !line.is_empty() {
+                if line.len() > MAX_RECORD_ID_TAIL_LINE_LENGTH {
+                    return Err(StructuredMemoryError::InvalidRequest(
+                        "structured memory tail record exceeds maximum scan length".to_owned(),
+                    ));
+                }
                 let record: RecordIdOnly = serde_json::from_slice(line).map_err(json_error)?;
                 return Ok(record.record_id + 1);
             }
@@ -618,8 +634,9 @@ mod tests {
 
     use super::{
         NewStructuredEntity, NewStructuredFact, NewStructuredMemoryRecord, StructuredEntityQuery,
-        StructuredFactQuery, StructuredMemoryQuery, StructuredMemorySession,
-        RECORD_ID_TAIL_SCAN_CHUNK_SIZE,
+        StructuredFactQuery, StructuredMemoryError, StructuredMemoryQuery, StructuredMemorySession,
+        MAX_RECORD_ID_TAIL_LINE_LENGTH, RECORD_ID_TAIL_SCAN_CHUNK_SIZE,
+        STRUCTURED_MEMORY_FILE_NAME,
     };
 
     #[test]
@@ -734,6 +751,31 @@ mod tests {
             .unwrap();
 
         assert_eq!(record.record_id, 1);
+    }
+
+    #[test]
+    fn structured_memory_record_rejects_oversized_trailing_record_before_tail_scan_growth() {
+        let root = tempdir().unwrap();
+        let mut session = StructuredMemorySession::open(root.path()).unwrap();
+        let path = root.path().join(STRUCTURED_MEMORY_FILE_NAME);
+        std::fs::write(&path, "x".repeat(MAX_RECORD_ID_TAIL_LINE_LENGTH + 1)).unwrap();
+
+        let error = match session.record(NewStructuredMemoryRecord::fact(
+            "person:alice",
+            "name",
+            serde_json::json!("Alice"),
+            "bootstrap-test",
+            100,
+        )) {
+            Ok(_) => panic!("oversized tail should fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            StructuredMemoryError::InvalidRequest(message)
+                if message.contains("maximum scan length")
+        ));
     }
 
     #[test]

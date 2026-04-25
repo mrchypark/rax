@@ -674,17 +674,19 @@ impl RuntimeStoreWriter<'_> {
             .docstore
             .load_document_ids()
             .map_err(|error| RuntimeError::Storage(docstore_error(error)))?;
-        let current_documents = self
-            .store
-            .docstore
-            .load_documents_by_id(&current_doc_ids)
-            .map_err(|error| RuntimeError::Storage(docstore_error(error)))?;
-
         let mut merged = Vec::with_capacity(current_doc_ids.len() + incoming_by_doc_id.len());
         for doc_id in current_doc_ids {
             if let Some(document) = incoming_by_doc_id.remove(&doc_id) {
                 merged.push(document);
-            } else if let Some(value) = current_documents.get(&doc_id) {
+            } else {
+                let current_document = self
+                    .store
+                    .docstore
+                    .load_documents_by_id(std::slice::from_ref(&doc_id))
+                    .map_err(|error| RuntimeError::Storage(docstore_error(error)))?;
+                let Some(value) = current_document.get(&doc_id) else {
+                    continue;
+                };
                 merged.push(new_document_from_value(value)?);
             }
         }

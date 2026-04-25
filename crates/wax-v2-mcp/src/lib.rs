@@ -9,6 +9,7 @@ use wax_v2_broker::{
 pub struct McpNewDocument {
     pub doc_id: String,
     pub text: String,
+    #[serde(default = "empty_metadata_object")]
     pub metadata: serde_json::Value,
     pub timestamp_ms: Option<u64>,
     #[serde(default, flatten)]
@@ -19,6 +20,10 @@ pub struct McpNewDocument {
 pub struct McpNewDocumentVector {
     pub doc_id: String,
     pub values: Vec<f32>,
+}
+
+fn empty_metadata_object() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -312,7 +317,7 @@ fn broker_error(error: wax_v2_broker::BrokerError) -> McpError {
 
 #[cfg(test)]
 mod tests {
-    use super::{McpError, McpErrorCode, McpRequest, McpResponse, WaxMcpSurface};
+    use super::{McpError, McpErrorCode, McpNewDocument, McpRequest, McpResponse, WaxMcpSurface};
     use wax_v2_broker::WaxBroker;
 
     #[test]
@@ -354,6 +359,15 @@ mod tests {
         let decoded: McpError = serde_json::from_str(&encoded).unwrap();
 
         assert_eq!(decoded, error);
+    }
+
+    #[test]
+    fn mcp_new_document_defaults_missing_metadata_to_empty_object() {
+        let document: McpNewDocument =
+            serde_json::from_str(r#"{"doc_id":"doc-001","text":"hello"}"#).unwrap();
+
+        assert_eq!(document.metadata, serde_json::json!({}));
+        assert!(document.extra_fields.is_empty());
     }
 
     #[test]
