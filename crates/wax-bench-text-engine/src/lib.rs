@@ -45,7 +45,13 @@ struct JsonDocumentMetadata<'a> {
 
 impl MetadataSource for JsonDocumentMetadata<'_> {
     fn field_value(&self, doc_id: &str, field: &str) -> Option<&str> {
-        self.documents.get(doc_id)?.get(field)?.as_str()
+        let document = self.documents.get(doc_id)?;
+        document.get(field).and_then(Value::as_str).or_else(|| {
+            field
+                .split('.')
+                .try_fold(document, |value, segment| value.get(segment))
+                .and_then(Value::as_str)
+        })
     }
 }
 
@@ -597,9 +603,10 @@ mod tests {
 
     use wax_bench_model::VectorQueryMode;
     use wax_v2_docstore::parse_document_id;
+    use wax_v2_search::{filter_hits_by_metadata, MetadataFilter};
     use wax_v2_vector::resolve_auto_vector_mode;
 
-    use crate::pop_text_hits;
+    use crate::{pop_text_hits, JsonDocumentMetadata};
 
     #[test]
     fn auto_mode_prefers_exact_flat_for_small_corpora() {
@@ -681,6 +688,44 @@ mod tests {
             vec!["doc-002".to_owned()]
         );
         assert!(pop_text_hits(&mut hits_by_query, "q-duplicate").is_err());
+    }
+
+    #[test]
+    fn metadata_filter_matches_nested_document_metadata_paths() {
+        let documents = HashMap::from([
+            (
+                "doc-001".to_owned(),
+                serde_json::json!({
+                    "doc_id": "doc-001",
+                    "metadata": {
+                        "workspace": "prod",
+                        "kind": "guide"
+                    }
+                }),
+            ),
+            (
+                "doc-002".to_owned(),
+                serde_json::json!({
+                    "doc_id": "doc-002",
+                    "metadata": {
+                        "workspace": "dev",
+                        "kind": "guide"
+                    }
+                }),
+            ),
+        ]);
+        let source = JsonDocumentMetadata {
+            documents: &documents,
+        };
+        let filter = MetadataFilter::from_pairs([("metadata.workspace", "prod")]);
+
+        let filtered = filter_hits_by_metadata(
+            &["doc-002".to_owned(), "doc-001".to_owned()],
+            &source,
+            &filter,
+        );
+
+        assert_eq!(filtered, vec!["doc-001"]);
     }
 
     #[test]

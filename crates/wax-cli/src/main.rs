@@ -66,6 +66,8 @@ struct CliNewDocument {
     metadata: serde_json::Value,
     #[serde(default)]
     timestamp_ms: Option<u64>,
+    #[serde(flatten)]
+    extra_fields: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,6 +95,9 @@ fn main() -> Result<(), String> {
                             .with_metadata(document.metadata);
                         if let Some(timestamp_ms) = document.timestamp_ms {
                             runtime_document = runtime_document.with_timestamp_ms(timestamp_ms);
+                        }
+                        for (key, value) in document.extra_fields {
+                            runtime_document = runtime_document.with_extra_field(key, value);
                         }
                         runtime_document
                     })

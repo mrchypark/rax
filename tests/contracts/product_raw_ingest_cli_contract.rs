@@ -5,6 +5,7 @@ use std::process::Command;
 use tempfile::tempdir;
 use wax_bench_model::embed_text;
 use wax_bench_packer::{pack_dataset, PackRequest};
+use wax_v2_docstore::Docstore;
 
 #[test]
 fn product_cli_ingests_documents_and_vectors_through_explicit_raw_commands() {
@@ -110,6 +111,52 @@ fn product_cli_ingests_documents_and_vectors_through_explicit_raw_commands() {
     let stdout = String::from_utf8(search.stdout).unwrap();
     assert!(stdout.contains("\"doc_id\": \"doc-001\""));
     assert!(stdout.contains("\"preview\": \"rust benchmark guide\""));
+}
+
+#[test]
+fn product_cli_docs_ingest_preserves_unknown_top_level_document_fields() {
+    let dataset_dir = tempdir().unwrap();
+    let fixture_root =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/bench/source/minimal");
+    let manifest = pack_dataset(&PackRequest::new(
+        &fixture_root,
+        dataset_dir.path(),
+        "small",
+        "clean",
+    ))
+    .unwrap();
+
+    let docs_jsonl = dataset_dir.path().join("raw-docs-extra.jsonl");
+    fs::write(
+        &docs_jsonl,
+        concat!(
+            "{\"doc_id\":\"doc-001\",\"text\":\"rust benchmark guide\",",
+            "\"metadata\":{\"kind\":\"guide\"},\"priority\":\"high\"}\n",
+        ),
+    )
+    .unwrap();
+
+    run_wax(&["create", "--root", dataset_dir.path().to_str().unwrap()]);
+    run_wax(&[
+        "ingest",
+        "docs",
+        "--root",
+        dataset_dir.path().to_str().unwrap(),
+        "--input",
+        docs_jsonl.to_str().unwrap(),
+    ]);
+
+    let docstore = Docstore::open(dataset_dir.path(), &manifest).unwrap();
+    let documents = docstore
+        .load_documents_by_id(&["doc-001".to_owned()])
+        .unwrap();
+
+    assert_eq!(
+        documents
+            .get("doc-001")
+            .and_then(|document| document.get("priority")),
+        Some(&serde_json::json!("high"))
+    );
 }
 
 fn run_wax(args: &[&str]) {
