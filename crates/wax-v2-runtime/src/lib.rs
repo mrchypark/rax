@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use wax_bench_model::DatasetPackManifest;
+use wax_v2_docstore::DocIdMap;
 use wax_v2_docstore::Docstore;
 use wax_v2_search::hybrid_search_with_diagnostics;
 use wax_v2_text::TextLane;
@@ -56,6 +57,7 @@ pub struct NewDocument {
     pub text: String,
     pub metadata: serde_json::Value,
     pub timestamp_ms: Option<u64>,
+    pub extra_fields: serde_json::Map<String, serde_json::Value>,
 }
 
 impl NewDocument {
@@ -65,6 +67,7 @@ impl NewDocument {
             text: text.into(),
             metadata: serde_json::json!({}),
             timestamp_ms: None,
+            extra_fields: serde_json::Map::new(),
         }
     }
 
@@ -75,6 +78,11 @@ impl NewDocument {
 
     pub fn with_timestamp_ms(mut self, timestamp_ms: u64) -> Self {
         self.timestamp_ms = Some(timestamp_ms);
+        self
+    }
+
+    pub fn with_extra_field(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
+        self.extra_fields.insert(key.into(), value);
         self
     }
 }
@@ -323,9 +331,7 @@ impl RuntimeStore {
                     )
                 })?;
                 let live_doc_count = self.live_doc_count()?;
-                let text_limit = live_doc_count
-                    .max(1)
-                    .min(request.top_k.saturating_mul(3).max(1));
+                let text_limit = hybrid_text_candidate_limit(request.top_k, live_doc_count);
                 let text_hits = self
                     .ensure_text_lane()?
                     .search_with_limit(text_query, text_limit);
@@ -485,11 +491,15 @@ impl RuntimeStoreWriter<'_> {
 
             let document_ids = documents
                 .iter()
-                .map(|document| document.doc_id.as_str())
+                .map(|document| document.doc_id.clone())
+                .collect::<Vec<_>>();
+            let document_id_set = document_ids
+                .iter()
+                .map(String::as_str)
                 .collect::<std::collections::HashSet<_>>();
             let missing = vectors
                 .iter()
-                .filter(|vector| !document_ids.contains(vector.doc_id.as_str()))
+                .filter(|vector| !document_id_set.contains(vector.doc_id.as_str()))
                 .map(|vector| vector.doc_id.clone())
                 .collect::<Vec<_>>();
             if !missing.is_empty() {
@@ -499,10 +509,14 @@ impl RuntimeStoreWriter<'_> {
                 )));
             }
 
-            let vector_inputs = vectors
-                .into_iter()
-                .map(|vector| (vector.doc_id, vector.values))
-                .collect::<Vec<_>>();
+            let doc_id_map = self
+                .store
+                .docstore
+                .build_doc_id_map()
+                .map_err(|error| RuntimeError::Storage(docstore_error(error)))?
+                .extend_to_cover_document_order(&document_ids)
+                .map_err(|error| RuntimeError::Storage(docstore_error(error)))?;
+            let (_, _, vector_inputs) = vector_inputs_sorted_by_wax_doc_id(vectors, &doc_id_map)?;
             let mut vector_pending = wax_v2_vector::prepare_raw_vector_segment(
                 self.store.manifest.vector_profile.embedding_dimensions as usize,
                 &vector_inputs,
@@ -588,29 +602,13 @@ impl RuntimeStoreWriter<'_> {
             )));
         }
 
-        let vector_inputs = vectors
-            .into_iter()
-            .map(|vector| (vector.doc_id, vector.values))
-            .collect::<Vec<_>>();
         let doc_id_map = self
             .store
             .docstore
             .build_doc_id_map()
             .map_err(|error| RuntimeError::Storage(docstore_error(error)))?;
-        let mut active_wax_doc_ids = vector_inputs
-            .iter()
-            .map(|(doc_id, _)| {
-                doc_id_map.wax_doc_id(doc_id).ok_or_else(|| {
-                    RuntimeError::Storage(format!("missing wax doc id binding for {doc_id}"))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        active_wax_doc_ids.sort_unstable();
-        let doc_id_start = active_wax_doc_ids.first().copied().unwrap_or(0);
-        let doc_id_end_exclusive = active_wax_doc_ids
-            .last()
-            .map(|doc_id| doc_id + 1)
-            .unwrap_or(doc_id_start);
+        let (doc_id_start, doc_id_end_exclusive, vector_inputs) =
+            vector_inputs_sorted_by_wax_doc_id(vectors, &doc_id_map)?;
 
         let mut pending_segment = wax_v2_vector::prepare_raw_vector_segment(
             self.store.manifest.vector_profile.embedding_dimensions as usize,
@@ -644,7 +642,7 @@ fn raw_ordered_documents(documents: &[NewDocument]) -> Vec<(String, serde_json::
     documents
         .iter()
         .map(|document| {
-            let mut object = serde_json::Map::new();
+            let mut object = document.extra_fields.clone();
             object.insert(
                 "doc_id".to_owned(),
                 serde_json::Value::String(document.doc_id.clone()),
@@ -663,6 +661,42 @@ fn raw_ordered_documents(documents: &[NewDocument]) -> Vec<(String, serde_json::
             (document.doc_id.clone(), serde_json::Value::Object(object))
         })
         .collect()
+}
+
+fn vector_inputs_sorted_by_wax_doc_id(
+    vectors: Vec<NewDocumentVector>,
+    doc_id_map: &DocIdMap,
+) -> Result<(u64, u64, Vec<(String, Vec<f32>)>), RuntimeError> {
+    let mut vector_inputs = vectors
+        .into_iter()
+        .map(|vector| {
+            let wax_doc_id = doc_id_map.wax_doc_id(&vector.doc_id).ok_or_else(|| {
+                RuntimeError::Storage(format!("missing wax doc id binding for {}", vector.doc_id))
+            })?;
+            Ok((wax_doc_id, vector.doc_id, vector.values))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    vector_inputs.sort_by_key(|(wax_doc_id, _, _)| *wax_doc_id);
+    let doc_id_start = vector_inputs
+        .first()
+        .map(|(wax_doc_id, _, _)| *wax_doc_id)
+        .unwrap_or(0);
+    let doc_id_end_exclusive = vector_inputs
+        .last()
+        .map(|(wax_doc_id, _, _)| wax_doc_id + 1)
+        .unwrap_or(doc_id_start);
+    let vector_inputs = vector_inputs
+        .into_iter()
+        .map(|(_, doc_id, values)| (doc_id, values))
+        .collect();
+    Ok((doc_id_start, doc_id_end_exclusive, vector_inputs))
+}
+
+fn hybrid_text_candidate_limit(top_k: usize, live_doc_count: usize) -> usize {
+    if top_k == 0 || live_doc_count == 0 {
+        return 0;
+    }
+    live_doc_count.min(top_k.saturating_mul(10).max(100))
 }
 
 fn raw_text_inputs(documents: &[NewDocument]) -> Vec<(String, String)> {
@@ -757,6 +791,14 @@ fn load_compatibility_raw_documents(
         {
             document = document.with_timestamp_ms(timestamp_ms);
         }
+        for (key, value) in object {
+            if !matches!(
+                key.as_str(),
+                "doc_id" | "text" | "metadata" | "timestamp_ms"
+            ) {
+                document = document.with_extra_field(key.clone(), value.clone());
+            }
+        }
         Ok(document)
     })
     .collect()
@@ -804,10 +846,11 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    use serde_json::json;
     use tempfile::tempdir;
     use wax_bench_model::embed_text;
     use wax_bench_packer::{pack_adhoc_dataset, pack_dataset, AdhocPackRequest, PackRequest};
-    use wax_v2_core::{create_empty_store, open_store, SegmentKind};
+    use wax_v2_core::{create_empty_store, map_segment_object, open_store, SegmentKind};
     use wax_v2_docstore::Docstore;
     use wax_v2_text::publish_compatibility_text_segment;
     use wax_v2_vector::publish_compatibility_vector_segment;
@@ -1002,6 +1045,55 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.hits[0].doc_id, "doc-002");
+    }
+
+    #[test]
+    fn compatibility_import_preserves_extra_document_payload_fields() {
+        let dataset_dir = tempdir().unwrap();
+        let source_dir = tempdir().unwrap();
+        let docs_path = source_dir.path().join("docs.ndjson");
+        fs::write(
+            &docs_path,
+            concat!(
+                "{\"doc_id\":\"doc-001\",\"text\":\"alpha\",\"metadata\":{\"kind\":\"note\"},",
+                "\"workspace_id\":\"workspace-a\",\"tags\":[\"one\",\"two\"]}\n",
+            ),
+        )
+        .unwrap();
+        pack_adhoc_dataset(&AdhocPackRequest::new(
+            &docs_path,
+            dataset_dir.path(),
+            "small",
+        ))
+        .unwrap();
+
+        let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
+        runtime
+            .writer()
+            .unwrap()
+            .import_compatibility_snapshot()
+            .unwrap();
+
+        let loaded = runtime
+            .docstore
+            .load_documents_by_id(&["doc-001".to_owned()])
+            .unwrap();
+        assert_eq!(
+            loaded.get("doc-001").unwrap().get("workspace_id"),
+            Some(&json!("workspace-a"))
+        );
+        assert_eq!(
+            loaded.get("doc-001").unwrap().get("tags"),
+            Some(&json!(["one", "two"]))
+        );
+        assert_eq!(
+            loaded
+                .get("doc-001")
+                .unwrap()
+                .get("metadata")
+                .and_then(|metadata| metadata.get("kind")),
+            Some(&json!("note"))
+        );
     }
 
     #[test]
@@ -1298,6 +1390,74 @@ mod tests {
     }
 
     #[test]
+    fn publish_raw_vectors_persists_rows_in_wax_doc_id_order() {
+        let dataset_dir = tempdir().unwrap();
+        let source_dir = tempdir().unwrap();
+        let docs_path = source_dir.path().join("docs.ndjson");
+        fs::write(
+            &docs_path,
+            concat!(
+                "{\"doc_id\":\"doc-001\",\"text\":\"alpha\"}\n",
+                "{\"doc_id\":\"doc-002\",\"text\":\"beta\"}\n",
+                "{\"doc_id\":\"doc-003\",\"text\":\"gamma\"}\n",
+            ),
+        )
+        .unwrap();
+        pack_adhoc_dataset(&AdhocPackRequest::new(
+            &docs_path,
+            dataset_dir.path(),
+            "small",
+        ))
+        .unwrap();
+
+        let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
+        runtime
+            .writer()
+            .unwrap()
+            .publish_raw_snapshot(
+                vec![
+                    NewDocument::new("doc-001", "alpha"),
+                    NewDocument::new("doc-002", "beta"),
+                    NewDocument::new("doc-003", "gamma"),
+                ],
+                Some(vec![
+                    NewDocumentVector::new("doc-001", embed_text("alpha", 384)),
+                    NewDocumentVector::new("doc-002", embed_text("beta", 384)),
+                    NewDocumentVector::new("doc-003", embed_text("gamma", 384)),
+                ]),
+            )
+            .unwrap();
+        runtime
+            .writer()
+            .unwrap()
+            .publish_raw_vectors(vec![
+                NewDocumentVector::new("doc-003", embed_text("gamma updated", 384)),
+                NewDocumentVector::new("doc-001", embed_text("alpha updated", 384)),
+                NewDocumentVector::new("doc-002", embed_text("beta updated", 384)),
+            ])
+            .unwrap();
+
+        let opened = open_store(&dataset_dir.path().join("store.wax")).unwrap();
+        let vector_segment = opened
+            .manifest
+            .segments
+            .iter()
+            .filter(|segment| segment.family == SegmentKind::Vec)
+            .last()
+            .unwrap();
+        let bytes =
+            map_segment_object(&dataset_dir.path().join("store.wax"), vector_segment).unwrap();
+        assert_eq!(
+            read_vector_segment_doc_ids(&bytes),
+            vec![
+                "doc-001".to_owned(),
+                "doc-002".to_owned(),
+                "doc-003".to_owned()
+            ]
+        );
+    }
+
+    #[test]
     fn publish_raw_snapshot_replaces_family_segments_and_preserves_doc_id_ranges() {
         let dataset_dir = tempdir().unwrap();
         let source_dir = tempdir().unwrap();
@@ -1423,5 +1583,27 @@ mod tests {
         let mut vector = vec![0.0; 384];
         vector[0] = first_value;
         vector
+    }
+
+    fn read_vector_segment_doc_ids(bytes: &[u8]) -> Vec<String> {
+        let doc_count = read_u64_at(bytes, 16) as usize;
+        let doc_ids_offset = read_u64_at(bytes, 24) as usize;
+        let exact_vectors_offset = read_u64_at(bytes, 32) as usize;
+        let mut cursor = doc_ids_offset;
+        let mut doc_ids = Vec::new();
+        for _ in 0..doc_count {
+            let length = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
+            cursor += 4;
+            doc_ids.push(String::from_utf8(bytes[cursor..cursor + length].to_vec()).unwrap());
+            cursor += length;
+        }
+        assert!(bytes[cursor..exact_vectors_offset]
+            .iter()
+            .all(|byte| *byte == 0));
+        doc_ids
+    }
+
+    fn read_u64_at(bytes: &[u8], offset: usize) -> u64 {
+        u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
     }
 }

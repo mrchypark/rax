@@ -1442,10 +1442,16 @@ fn validate_document_vectors(
     if dimensions == 0 {
         return Ok(());
     }
-    if !bytes.len().is_multiple_of(dimensions * 4) {
+    let bytes_per_row = dimensions
+        .checked_mul(4)
+        .ok_or_else(|| "document vector payload shape overflows addressable memory".to_owned())?;
+    let expected_values = doc_count
+        .checked_mul(dimensions)
+        .ok_or_else(|| "document vector payload shape overflows addressable memory".to_owned())?;
+    if !bytes.len().is_multiple_of(bytes_per_row) {
         return Err("document vector payload has invalid length".to_owned());
     }
-    if bytes.len() / 4 != doc_count * dimensions {
+    if bytes.len() / 4 != expected_values {
         return Err("document vector payload row count does not match manifest".to_owned());
     }
     Ok(())
@@ -1459,7 +1465,10 @@ fn validate_preview_vectors(
     if dimensions == 0 {
         return Ok(());
     }
-    if bytes.len() != doc_count * dimensions {
+    let expected_bytes = doc_count
+        .checked_mul(dimensions)
+        .ok_or_else(|| "preview vector payload shape overflows addressable memory".to_owned())?;
+    if bytes.len() != expected_bytes {
         return Err("preview vector payload row count does not match manifest".to_owned());
     }
     Ok(())
@@ -1635,6 +1644,7 @@ mod tests {
         dot_product_f32le, load_compatibility_raw_vectors, load_vector_segment,
         prepare_raw_vector_segment, publish_compatibility_vector_segment,
         read_length_prefixed_strings, read_u64, resolve_auto_vector_mode,
+        validate_document_vectors, validate_preview_vectors,
         validate_store_segment_against_dataset_pack, BinaryVectorSegment, ByteStorage,
         StoreVectorSegment, VectorLane, VectorLaneMetadata, VectorQueryInputs,
     };
@@ -1654,6 +1664,22 @@ mod tests {
             .expect_err("string count should exceed payload");
 
         assert!(error.contains("count"));
+    }
+
+    #[test]
+    fn validate_document_vectors_rejects_overflowing_shape_before_multiplication() {
+        let error =
+            validate_document_vectors(&[], usize::MAX / 2 + 1, 3).expect_err("shape overflows");
+
+        assert!(error.contains("overflows"));
+    }
+
+    #[test]
+    fn validate_preview_vectors_rejects_overflowing_shape_before_multiplication() {
+        let error =
+            validate_preview_vectors(&[], usize::MAX / 2 + 1, 3).expect_err("shape overflows");
+
+        assert!(error.contains("overflows"));
     }
 
     #[test]
