@@ -7,6 +7,8 @@ use wax_v2_runtime::{
     RuntimeSearchRequest, RuntimeSearchResponse, RuntimeStore,
 };
 
+const DEFAULT_MAX_SESSIONS: usize = 64;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionId(u64);
 
@@ -79,6 +81,7 @@ pub enum BrokerError {
     InvalidRequest(String),
     Storage(String),
     SessionNotFound(SessionId),
+    SessionLimitExceeded { max_sessions: usize },
 }
 
 impl fmt::Display for BrokerError {
@@ -88,18 +91,45 @@ impl fmt::Display for BrokerError {
             Self::SessionNotFound(session_id) => {
                 write!(f, "session {} is not open", session_id.as_u64())
             }
+            Self::SessionLimitExceeded { max_sessions } => {
+                write!(f, "broker session limit exceeded: {max_sessions}")
+            }
         }
     }
 }
 
-#[derive(Default)]
 pub struct WaxBroker {
     next_session_id: u64,
+    max_sessions: usize,
     sessions: HashMap<SessionId, RuntimeStore>,
 }
 
+impl Default for WaxBroker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WaxBroker {
+    pub fn new() -> Self {
+        Self::with_max_sessions(DEFAULT_MAX_SESSIONS)
+    }
+
+    pub fn with_max_sessions(max_sessions: usize) -> Self {
+        Self {
+            next_session_id: 0,
+            max_sessions,
+            sessions: HashMap::new(),
+        }
+    }
+
     pub fn open_session(&mut self, root: &Path) -> Result<SessionId, BrokerError> {
+        if self.sessions.len() >= self.max_sessions {
+            return Err(BrokerError::SessionLimitExceeded {
+                max_sessions: self.max_sessions,
+            });
+        }
+
         let runtime = if root.join("store.wax").exists() {
             RuntimeStore::open(root).map_err(runtime_error)?
         } else {
@@ -231,5 +261,24 @@ fn map_publish_report(report: RuntimePublishReport) -> SessionImportReport {
                 RuntimePublishFamily::Vector => BrokerPublishFamily::Vector,
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use crate::{BrokerError, WaxBroker};
+
+    #[test]
+    fn broker_rejects_new_sessions_after_configured_capacity() {
+        let mut broker = WaxBroker::with_max_sessions(0);
+
+        let error = broker.open_session(Path::new("/unused")).unwrap_err();
+
+        assert!(matches!(
+            error,
+            BrokerError::SessionLimitExceeded { max_sessions: 0 }
+        ));
     }
 }

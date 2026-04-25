@@ -182,13 +182,19 @@ pub struct ActiveManifest {
 
 impl ActiveManifest {
     pub fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(
-            MANIFEST_HEADER_LENGTH + self.segments.len() * SEGMENT_DESCRIPTOR_LENGTH,
-        );
+        let segment_count =
+            u32::try_from(self.segments.len()).expect("manifest segment count exceeds u32::MAX");
+        let encoded_length = self
+            .segments
+            .len()
+            .checked_mul(SEGMENT_DESCRIPTOR_LENGTH)
+            .and_then(|length| length.checked_add(MANIFEST_HEADER_LENGTH))
+            .expect("manifest encoded length overflow");
+        let mut bytes = Vec::with_capacity(encoded_length);
         bytes.extend_from_slice(MANIFEST_MAGIC);
         bytes.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
         bytes.extend_from_slice(&self.generation.to_le_bytes());
-        bytes.extend_from_slice(&(self.segments.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&segment_count.to_le_bytes());
 
         for segment in &self.segments {
             bytes.extend_from_slice(&segment.family.as_code().to_le_bytes());
@@ -676,6 +682,11 @@ pub fn map_segment_object(
             "segment object range extends past end of file".to_owned(),
         ));
     }
+    if descriptor.object_offset % DEFAULT_OBJECT_ALIGNMENT != 0 {
+        return Err(CoreError::InvalidManifest(
+            "segment object offset must be page-aligned".to_owned(),
+        ));
+    }
 
     let object_length = usize::try_from(descriptor.object_length).map_err(|_| {
         CoreError::InvalidManifest("segment object length exceeds addressable memory".to_owned())
@@ -943,10 +954,11 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        align_up, create_empty_store, open_store, publish_segment, read_segment_object,
-        write_zero_padding, ActiveManifest, CoreError, PendingSegmentDescriptor, SegmentDescriptor,
-        SegmentKind, Superblock, DEFAULT_OBJECT_ALIGNMENT, FORMAT_VERSION, MANIFEST_MAGIC,
-        OBJECT_HEADER_LENGTH, OBJECT_MAGIC, SUPERBLOCK_SIZE,
+        align_up, create_empty_store, map_segment_object, open_store, publish_segment,
+        read_segment_object, write_zero_padding, ActiveManifest, CoreError,
+        PendingSegmentDescriptor, SegmentDescriptor, SegmentKind, Superblock,
+        DEFAULT_OBJECT_ALIGNMENT, FORMAT_VERSION, MANIFEST_MAGIC, OBJECT_HEADER_LENGTH,
+        OBJECT_MAGIC, SUPERBLOCK_SIZE,
     };
 
     #[test]
@@ -1051,6 +1063,37 @@ mod tests {
         let error = ActiveManifest::decode(&encoded).expect_err("manifest length should fail");
 
         assert!(matches!(error, CoreError::InvalidManifest(message) if message.contains("length")));
+    }
+
+    #[test]
+    fn map_segment_object_rejects_unaligned_descriptor_offsets() {
+        let temp_dir = tempdir().expect("tempdir");
+        let path = temp_dir.path().join("unaligned.wax");
+        std::fs::write(&path, vec![0u8; 128]).expect("seed file");
+
+        let descriptor = SegmentDescriptor {
+            family: SegmentKind::Doc,
+            family_version: 1,
+            flags: 0,
+            object_offset: 1,
+            object_length: 64,
+            segment_generation: 1,
+            doc_id_start: 0,
+            doc_id_end_exclusive: 1,
+            min_timestamp_ms: 0,
+            max_timestamp_ms: 0,
+            live_items: 1,
+            tombstoned_items: 0,
+            backend_id: 0,
+            backend_aux: 0,
+            object_checksum: [0; 32],
+        };
+
+        let error = map_segment_object(&path, &descriptor).expect_err("offset should be rejected");
+
+        assert!(
+            matches!(error, CoreError::InvalidManifest(message) if message.contains("aligned"))
+        );
     }
 
     #[test]

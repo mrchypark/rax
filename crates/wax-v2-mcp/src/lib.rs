@@ -250,6 +250,10 @@ fn broker_error(error: wax_v2_broker::BrokerError) -> McpError {
             code: McpErrorCode::SessionNotFound,
             message: format!("session {} is not open", session_id.as_u64()),
         },
+        wax_v2_broker::BrokerError::SessionLimitExceeded { max_sessions } => McpError {
+            code: McpErrorCode::InvalidRequest,
+            message: format!("broker session limit exceeded: {max_sessions}"),
+        },
     }
 }
 

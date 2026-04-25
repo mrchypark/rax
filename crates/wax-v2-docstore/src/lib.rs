@@ -348,7 +348,16 @@ impl BinaryDocSegment {
             ));
         }
 
-        let row_count = read_u64(bytes, 8) as usize;
+        let row_count = usize::try_from(read_u64(bytes, 8)).map_err(|_| {
+            DocstoreError::InvalidDocument(
+                "doc segment row count exceeds addressable memory".to_owned(),
+            )
+        })?;
+        if row_count > bytes.len() / DOC_ROW_LENGTH {
+            return Err(DocstoreError::InvalidDocument(
+                "doc segment row count exceeds possible rows in slice".to_owned(),
+            ));
+        }
         let payload_bytes_offset = read_u64(bytes, 16) as usize;
         let metadata_bytes_offset = read_u64(bytes, 24) as usize;
         let preview_bytes_offset = read_u64(bytes, 32) as usize;
@@ -403,12 +412,16 @@ impl BinaryDocSegment {
                 "doc segment row table length mismatch".to_owned(),
             ));
         }
-
         let payload_section = &bytes[payload_bytes_offset..metadata_bytes_offset];
         let metadata_section = &bytes[metadata_bytes_offset..preview_bytes_offset];
         let preview_section = &bytes[preview_bytes_offset..binding_bytes_offset];
         let binding_section = &bytes[binding_bytes_offset..row_table_offset];
         let row_table = &bytes[row_table_offset..row_table_end];
+        if row_count > row_table.len() / DOC_ROW_LENGTH {
+            return Err(DocstoreError::InvalidDocument(
+                "doc segment row count exceeds possible rows in slice".to_owned(),
+            ));
+        }
 
         let mut records = Vec::with_capacity(row_count);
         let mut previous_doc_id = None;
@@ -1557,7 +1570,7 @@ mod tests {
     use crate::{
         parse_document_id, read_u64, sha256, BinaryDocSegment, DocIdBinding, DocIdMap, DocRow,
         DocSegmentRecord, Docstore, DocstoreError, DocstoreSource, SectionRef,
-        DOC_SEGMENT_HEADER_LENGTH, DOC_SEGMENT_MAGIC, DOC_SEGMENT_MAJOR,
+        DOC_SEGMENT_HEADER_LENGTH, DOC_SEGMENT_MAGIC, DOC_SEGMENT_MAJOR, DOC_SEGMENT_MINOR,
     };
 
     #[test]
@@ -1566,6 +1579,22 @@ mod tests {
         let doc_id = parse_document_id(line, "document line").unwrap();
 
         assert_eq!(doc_id.as_ref(), "doc-\"001");
+    }
+
+    #[test]
+    fn binary_doc_segment_decode_rejects_unaddressable_row_count_before_allocation() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(DOC_SEGMENT_MAGIC);
+        bytes.extend_from_slice(&DOC_SEGMENT_MAJOR.to_le_bytes());
+        bytes.extend_from_slice(&DOC_SEGMENT_MINOR.to_le_bytes());
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+        bytes.resize(DOC_SEGMENT_HEADER_LENGTH, 0);
+
+        let error = BinaryDocSegment::decode(&bytes).expect_err("row count should fail");
+
+        assert!(
+            matches!(error, DocstoreError::InvalidDocument(message) if message.contains("row count"))
+        );
     }
 
     #[test]
