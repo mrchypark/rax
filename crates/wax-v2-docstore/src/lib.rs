@@ -372,9 +372,10 @@ impl BinaryDocSegment {
         let preview_bytes_offset = read_u64_as_usize(bytes, 32, "preview offset")?;
         let (binding_bytes_offset, row_table_offset, checksum_start, checksum_end, header_length) =
             if minor == 0 {
+                let row_table_offset = read_u64_as_usize(bytes, 40, "row table offset")?;
                 (
-                    preview_bytes_offset,
-                    read_u64_as_usize(bytes, 40, "row table offset")?,
+                    row_table_offset,
+                    row_table_offset,
                     48,
                     80,
                     DOC_SEGMENT_MINOR_V0_HEADER_LENGTH,
@@ -525,7 +526,6 @@ struct StoreDocSegment {
     payload_range: Range<usize>,
     row_table_range: Range<usize>,
     row_count: usize,
-    ordered_doc_ids: Vec<String>,
     doc_id_map: Option<DocIdMap>,
 }
 
@@ -566,9 +566,10 @@ impl StoreDocSegment {
         let preview_bytes_offset = read_u64_as_usize(bytes.as_ref(), 32, "preview offset")?;
         let (binding_bytes_offset, row_table_offset, checksum_start, checksum_end, header_length) =
             if minor == 0 {
+                let row_table_offset = read_u64_as_usize(bytes.as_ref(), 40, "row table offset")?;
                 (
-                    preview_bytes_offset,
-                    read_u64_as_usize(bytes.as_ref(), 40, "row table offset")?,
+                    row_table_offset,
+                    row_table_offset,
                     48,
                     80,
                     DOC_SEGMENT_MINOR_V0_HEADER_LENGTH,
@@ -621,7 +622,6 @@ impl StoreDocSegment {
         } else {
             Some(DocIdMap::decode_json(binding_section)?)
         };
-        let mut ordered_doc_ids = Vec::with_capacity(row_count);
 
         for row_index in 0..row_count {
             let row = read_doc_row(
@@ -636,16 +636,12 @@ impl StoreDocSegment {
             previous_doc_id = Some(row.doc_id);
 
             if let Some(doc_id_map) = doc_id_map.as_ref() {
-                let external_doc_id = doc_id_map
-                    .external_doc_id(row.doc_id)
-                    .map(str::to_owned)
-                    .ok_or_else(|| {
-                        DocstoreError::InvalidDocument(format!(
-                            "missing external doc_id binding for wax_doc_id {}",
-                            row.doc_id
-                        ))
-                    })?;
-                ordered_doc_ids.push(external_doc_id);
+                if doc_id_map.external_doc_id(row.doc_id).is_none() {
+                    return Err(DocstoreError::InvalidDocument(format!(
+                        "missing external doc_id binding for wax_doc_id {}",
+                        row.doc_id
+                    )));
+                }
             }
         }
 
@@ -655,7 +651,6 @@ impl StoreDocSegment {
             payload_range: payload_bytes_offset..metadata_bytes_offset,
             row_table_range: row_table_offset..row_table_end,
             row_count,
-            ordered_doc_ids,
             doc_id_map,
         })
     }
@@ -693,8 +688,9 @@ impl StoreDocSegment {
                 .collect();
         }
 
-        let documents = self.load_documents_by_id(&self.ordered_doc_ids)?;
-        self.ordered_doc_ids
+        let ordered_doc_ids = self.load_document_ids()?;
+        let documents = self.load_documents_by_id(&ordered_doc_ids)?;
+        ordered_doc_ids
             .iter()
             .map(|doc_id| {
                 let document = documents.get(doc_id).cloned().ok_or_else(|| {
@@ -715,7 +711,22 @@ impl StoreDocSegment {
                 .collect();
         }
 
-        Ok(self.ordered_doc_ids.clone())
+        let doc_id_map = self.doc_id_map.as_ref().ok_or_else(|| {
+            DocstoreError::InvalidDocument("store doc segment missing doc_id map".to_owned())
+        })?;
+        self.rows()
+            .map(|row| {
+                doc_id_map
+                    .external_doc_id(row.doc_id)
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        DocstoreError::InvalidDocument(format!(
+                            "missing external doc_id binding for wax_doc_id {}",
+                            row.doc_id
+                        ))
+                    })
+            })
+            .collect()
     }
 
     fn build_doc_id_map(&self) -> Result<DocIdMap, DocstoreError> {
@@ -1701,6 +1712,32 @@ mod tests {
     }
 
     #[test]
+    fn binary_doc_segment_minor_v0_preview_extends_to_row_table() {
+        let segment = BinaryDocSegment {
+            doc_id_map: test_doc_id_map(&[(0, "doc-001")]),
+            records: vec![DocSegmentRecord {
+                row: DocRow {
+                    doc_id: 0,
+                    timestamp_ms: 0,
+                    flags: 0,
+                    payload_offset: 0,
+                    payload_length: 35,
+                    metadata_ref: SectionRef::new(0, 2),
+                    preview_ref: SectionRef::new(0, 13),
+                },
+                payload: br#"{"doc_id":"doc-001","text":"alpha"}"#.to_vec(),
+                metadata: json!({}),
+                preview: Some("alpha preview".to_owned()),
+            }],
+        };
+        let bytes = encode_minor_v0_segment(&segment).unwrap();
+
+        let decoded = BinaryDocSegment::decode(&bytes).unwrap();
+
+        assert_eq!(decoded.records[0].preview.as_deref(), Some("alpha preview"));
+    }
+
+    #[test]
     fn open_dataset_pack_loads_documents_by_id_from_offsets() {
         let temp_dir = tempdir().unwrap();
         let docs_path = temp_dir.path().join("docs.ndjson");
@@ -1945,11 +1982,11 @@ mod tests {
 
         let reopened = Docstore::open(temp_dir.path(), &manifest).unwrap();
 
-        assert!(matches!(
-            &reopened.source,
-            DocstoreSource::Store { segment }
-                if segment.ordered_doc_ids == vec!["doc-900".to_owned(), "doc-010".to_owned()]
-        ));
+        assert!(matches!(&reopened.source, DocstoreSource::Store { .. }));
+        assert_eq!(
+            reopened.load_document_ids().unwrap(),
+            vec!["doc-900".to_owned(), "doc-010".to_owned()]
+        );
     }
 
     #[test]
