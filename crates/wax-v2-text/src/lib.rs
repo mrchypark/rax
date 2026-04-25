@@ -172,10 +172,6 @@ impl TextQueryInputs {
             .map(|query_set| mount_root.join(&query_set.path))
             .collect::<Vec<_>>();
 
-        if query_paths.is_empty() {
-            return Err("query_set file missing from manifest".to_owned());
-        }
-
         Ok(Self { query_paths })
     }
 }
@@ -688,7 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn text_lane_load_rejects_missing_query_set_metadata() {
+    fn text_lane_loads_postings_without_query_set_metadata() {
         let temp_dir = tempdir().unwrap();
         fs::write(
             temp_dir.path().join("postings.jsonl"),
@@ -698,9 +694,12 @@ mod tests {
         let mut manifest = test_manifest();
         manifest.query_sets.clear();
 
-        let error = TextLane::load(temp_dir.path(), &manifest).unwrap_err();
+        let lane = TextLane::load(temp_dir.path(), &manifest).unwrap();
 
-        assert!(error.contains("query_set"));
+        assert_eq!(lane.search("alpha"), vec!["doc-1"]);
+        assert!(lane.search_first_text_query().is_empty());
+        assert_eq!(lane.first_hybrid_query(), None);
+        assert_eq!(lane.first_hybrid_top_k(), 0);
     }
 
     #[test]

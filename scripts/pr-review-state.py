@@ -140,7 +140,11 @@ def fetch_pr(owner: str, repo: str, number: int) -> dict[str, Any]:
         current = require_pr(payload, owner, repo, number)
         if pull_request is None:
             pull_request = current
-        threads.extend(current["reviewThreads"]["nodes"])
+        threads.extend(
+            thread
+            for thread in current["reviewThreads"]["nodes"]
+            if thread is not None
+        )
         page_info = current["reviewThreads"]["pageInfo"]
         if not page_info["hasNextPage"]:
             break

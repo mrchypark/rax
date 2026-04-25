@@ -684,24 +684,27 @@ pub fn map_segment_object(
     }
     if descriptor.object_offset % DEFAULT_OBJECT_ALIGNMENT != 0 {
         return Err(CoreError::InvalidManifest(
-            "segment object offset must be page-aligned".to_owned(),
+            "segment object offset must use store object alignment".to_owned(),
         ));
     }
 
     let object_length = usize::try_from(descriptor.object_length).map_err(|_| {
         CoreError::InvalidManifest("segment object length exceeds addressable memory".to_owned())
     })?;
-    let mapped = unsafe {
-        MmapOptions::new()
-            .offset(descriptor.object_offset)
-            .len(object_length)
-            .map(&file)?
-    };
-    let payload_range = decode_object_payload_range(
-        &mapped,
+    let object_offset = usize::try_from(descriptor.object_offset).map_err(|_| {
+        CoreError::InvalidManifest("segment object offset exceeds addressable memory".to_owned())
+    })?;
+    let mapped = unsafe { MmapOptions::new().map(&file)? };
+    let object_end = object_offset
+        .checked_add(object_length)
+        .ok_or_else(|| CoreError::InvalidManifest("segment object range overflow".to_owned()))?;
+    let local_payload_range = decode_object_payload_range(
+        &mapped[object_offset..object_end],
         object_type_for_family(descriptor.family),
         descriptor.segment_generation,
     )?;
+    let payload_range =
+        object_offset + local_payload_range.start..object_offset + local_payload_range.end;
     if sha256(&mapped[payload_range.clone()]) != descriptor.object_checksum {
         return Err(CoreError::ChecksumMismatch {
             context: "segment object",
@@ -1113,9 +1116,10 @@ mod tests {
 
         let error = map_segment_object(&path, &descriptor).expect_err("offset should be rejected");
 
-        assert!(
-            matches!(error, CoreError::InvalidManifest(message) if message.contains("aligned"))
-        );
+        assert!(matches!(
+            error,
+            CoreError::InvalidManifest(message) if message.contains("object alignment")
+        ));
     }
 
     #[test]
