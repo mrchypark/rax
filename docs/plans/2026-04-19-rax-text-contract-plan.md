@@ -18,7 +18,6 @@
 - Modify: `crates/wax-v2-text/src/lib.rs`
 - Modify: `docs/specs/2026-04-19-rax-to-wax-roadmap.md`
 
-- [ ] Step 1: Add failing tests for the first owned text metadata/contract boundary.
 - [x] Step 1: Add failing tests for the first owned text metadata/contract boundary.
 - [x] Step 2: Stop relying on raw `text_postings` and query-sidecar scans as the only text-lane identity source.
 - [x] Step 3: Keep current compatibility inputs readable while introducing the owned boundary.

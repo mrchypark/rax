@@ -32,9 +32,6 @@
 - Modify: `crates/wax-bench-text-engine/src/lib.rs`
 - Modify: `crates/wax-bench-text-engine/src/query_support.rs`
 
-- [ ] Step 1: Remove direct ANN and exact-search lane ownership from `wax-bench-text-engine`.
-- [ ] Step 2: Keep runner and CLI call sites unchanged.
-- [ ] Step 3: Run `cargo test -p wax-bench-text-engine`.
 - [x] Step 1: Remove direct ANN and exact-search lane ownership from `wax-bench-text-engine`.
 - [x] Step 2: Keep runner and CLI call sites unchanged.
 - [x] Step 3: Run `cargo test -p wax-bench-text-engine`.

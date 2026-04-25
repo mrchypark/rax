@@ -37,6 +37,7 @@ pub enum CoreError {
         context: &'static str,
     },
     InvalidManifest(String),
+    PublishPreconditionFailed(String),
     UnknownSegmentKind(u16),
     NoValidSuperblock,
 }
@@ -568,6 +569,17 @@ pub fn publish_segments(
     path: &Path,
     pending_segments: Vec<PendingSegmentWrite>,
 ) -> Result<OpenedStore, CoreError> {
+    publish_segments_with_precondition(path, pending_segments, |_| Ok(()))
+}
+
+pub fn publish_segments_with_precondition<F>(
+    path: &Path,
+    pending_segments: Vec<PendingSegmentWrite>,
+    precondition: F,
+) -> Result<OpenedStore, CoreError>
+where
+    F: FnOnce(&ActiveManifest) -> Result<(), CoreError>,
+{
     if pending_segments.is_empty() {
         return Err(CoreError::InvalidManifest(
             "publish_segments requires at least one pending segment".to_owned(),
@@ -578,6 +590,7 @@ pub fn publish_segments(
     file.try_lock_exclusive()?;
 
     let opened = open_store_from_file(&mut file)?;
+    precondition(&opened.manifest)?;
     let new_generation = opened
         .manifest
         .generation
@@ -954,10 +967,10 @@ mod tests {
 
     use crate::{
         align_up, create_empty_store, decode_object_payload, map_segment_object, open_store,
-        publish_segment, read_segment_object, write_zero_padding, ActiveManifest, CoreError,
-        ObjectType, PendingSegmentDescriptor, SegmentDescriptor, SegmentKind, Superblock,
-        DEFAULT_OBJECT_ALIGNMENT, FORMAT_VERSION, MANIFEST_MAGIC, OBJECT_HEADER_LENGTH,
-        OBJECT_MAGIC, SUPERBLOCK_SIZE,
+        publish_segment, publish_segments_with_precondition, read_segment_object,
+        write_zero_padding, ActiveManifest, CoreError, ObjectType, PendingSegmentDescriptor,
+        PendingSegmentWrite, SegmentDescriptor, SegmentKind, Superblock, DEFAULT_OBJECT_ALIGNMENT,
+        FORMAT_VERSION, MANIFEST_MAGIC, OBJECT_HEADER_LENGTH, OBJECT_MAGIC, SUPERBLOCK_SIZE,
     };
 
     #[test]
@@ -1274,6 +1287,49 @@ mod tests {
                 .expect("latest object"),
             b"segment-two"
         );
+    }
+
+    #[test]
+    fn publish_segments_with_precondition_rejects_before_generation_advance() {
+        let temp_dir = tempdir().expect("tempdir");
+        let path = temp_dir.path().join("precondition.wax");
+
+        create_empty_store(&path).expect("store should be created");
+        let error = publish_segments_with_precondition(
+            &path,
+            vec![PendingSegmentWrite {
+                descriptor: PendingSegmentDescriptor {
+                    family: SegmentKind::Doc,
+                    family_version: 1,
+                    flags: 0,
+                    doc_id_start: 0,
+                    doc_id_end_exclusive: 1,
+                    min_timestamp_ms: 0,
+                    max_timestamp_ms: 0,
+                    live_items: 1,
+                    tombstoned_items: 0,
+                    backend_id: 0,
+                    backend_aux: 0,
+                },
+                object_bytes: b"rejected-segment".to_vec(),
+            }],
+            |manifest| {
+                assert_eq!(manifest.generation, 0);
+                Err(CoreError::PublishPreconditionFailed(
+                    "document generation changed".to_owned(),
+                ))
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CoreError::PublishPreconditionFailed(message)
+                if message.contains("document generation changed")
+        ));
+        let reopened = open_store(&path).expect("store should reopen");
+        assert_eq!(reopened.manifest.generation, 0);
+        assert!(reopened.manifest.segments.is_empty());
     }
 
     #[test]

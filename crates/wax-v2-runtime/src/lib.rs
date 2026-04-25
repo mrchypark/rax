@@ -571,6 +571,7 @@ impl RuntimeStoreWriter<'_> {
             "publish_raw_vectors",
         )?;
         self.store.refresh_read_state()?;
+        let validated_doc_segment = latest_doc_segment_identity_from_store(&store_path)?;
 
         let doc_ids = vectors
             .iter()
@@ -619,8 +620,12 @@ impl RuntimeStoreWriter<'_> {
         .map_err(RuntimeError::Storage)?;
         pending_segment.descriptor.doc_id_start = doc_id_start;
         pending_segment.descriptor.doc_id_end_exclusive = doc_id_end_exclusive;
-        let opened = wax_v2_core::publish_segments(&store_path, vec![pending_segment])
-            .map_err(|error| RuntimeError::Storage(error.to_string()))?;
+        let opened = wax_v2_core::publish_segments_with_precondition(
+            &store_path,
+            vec![pending_segment],
+            |manifest| ensure_doc_segment_unchanged(manifest, validated_doc_segment.as_ref()),
+        )
+        .map_err(runtime_core_error)?;
 
         self.store.refresh_read_state()?;
         Ok(RuntimePublishReport {
@@ -692,6 +697,71 @@ fn vector_inputs_sorted_by_wax_doc_id(
         .map(|(_, doc_id, values)| (doc_id, values))
         .collect();
     Ok((doc_id_start, doc_id_end_exclusive, vector_inputs))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DocSegmentIdentity {
+    segment_generation: u64,
+    object_offset: u64,
+    object_length: u64,
+    object_checksum: [u8; 32],
+    doc_id_start: u64,
+    doc_id_end_exclusive: u64,
+}
+
+impl From<&wax_v2_core::SegmentDescriptor> for DocSegmentIdentity {
+    fn from(segment: &wax_v2_core::SegmentDescriptor) -> Self {
+        Self {
+            segment_generation: segment.segment_generation,
+            object_offset: segment.object_offset,
+            object_length: segment.object_length,
+            object_checksum: segment.object_checksum,
+            doc_id_start: segment.doc_id_start,
+            doc_id_end_exclusive: segment.doc_id_end_exclusive,
+        }
+    }
+}
+
+fn latest_doc_segment_identity_from_store(
+    store_path: &Path,
+) -> Result<Option<DocSegmentIdentity>, RuntimeError> {
+    let opened = wax_v2_core::open_store(store_path).map_err(runtime_core_error)?;
+    Ok(latest_doc_segment_identity(&opened.manifest))
+}
+
+fn latest_doc_segment_identity(
+    manifest: &wax_v2_core::ActiveManifest,
+) -> Option<DocSegmentIdentity> {
+    manifest
+        .segments
+        .iter()
+        .filter(|segment| segment.family == wax_v2_core::SegmentKind::Doc)
+        .max_by_key(|segment| (segment.segment_generation, segment.object_offset))
+        .map(DocSegmentIdentity::from)
+}
+
+fn ensure_doc_segment_unchanged(
+    manifest: &wax_v2_core::ActiveManifest,
+    expected: Option<&DocSegmentIdentity>,
+) -> Result<(), wax_v2_core::CoreError> {
+    let current = latest_doc_segment_identity(manifest);
+    if current.as_ref() == expected {
+        return Ok(());
+    }
+
+    Err(wax_v2_core::CoreError::PublishPreconditionFailed(
+        "publish_raw_vectors document generation changed before vector publish; retry with latest documents"
+            .to_owned(),
+    ))
+}
+
+fn runtime_core_error(error: wax_v2_core::CoreError) -> RuntimeError {
+    match error {
+        wax_v2_core::CoreError::PublishPreconditionFailed(message) => {
+            RuntimeError::InvalidRequest(message)
+        }
+        other => RuntimeError::Storage(other.to_string()),
+    }
 }
 
 fn hybrid_text_candidate_limit(top_k: usize, live_doc_count: usize) -> usize {
@@ -1432,6 +1502,57 @@ mod tests {
             report.published_families,
             vec![RuntimePublishFamily::Vector]
         );
+    }
+
+    #[test]
+    fn doc_generation_revalidation_rejects_changed_manifest_before_vector_publish() {
+        let dataset_dir = tempdir().unwrap();
+        let source_dir = tempdir().unwrap();
+        let docs_path = source_dir.path().join("docs.ndjson");
+        fs::write(
+            &docs_path,
+            concat!(
+                "{\"doc_id\":\"doc-001\",\"text\":\"alpha\"}\n",
+                "{\"doc_id\":\"doc-002\",\"text\":\"beta\"}\n",
+            ),
+        )
+        .unwrap();
+        pack_adhoc_dataset(&AdhocPackRequest::new(
+            &docs_path,
+            dataset_dir.path(),
+            "small",
+        ))
+        .unwrap();
+
+        let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
+        runtime
+            .writer()
+            .unwrap()
+            .publish_raw_documents(vec![NewDocument::new("doc-001", "alpha")])
+            .unwrap();
+        let store_path = dataset_dir.path().join("store.wax");
+        let validated_doc_segment =
+            super::latest_doc_segment_identity_from_store(&store_path).unwrap();
+
+        runtime
+            .writer()
+            .unwrap()
+            .publish_raw_documents(vec![
+                NewDocument::new("doc-001", "alpha"),
+                NewDocument::new("doc-002", "beta"),
+            ])
+            .unwrap();
+
+        let opened = open_store(&store_path).unwrap();
+        let error =
+            super::ensure_doc_segment_unchanged(&opened.manifest, validated_doc_segment.as_ref())
+                .unwrap_err();
+
+        assert!(matches!(
+            error,
+            wax_v2_core::CoreError::PublishPreconditionFailed(message)
+                if message.contains("document generation changed")
+        ));
     }
 
     #[test]

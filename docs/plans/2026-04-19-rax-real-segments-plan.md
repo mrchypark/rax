@@ -46,9 +46,6 @@
 - Modify: runtime crates only where the fixture-layout assumption still leaks through
 - Modify: `docs/specs/2026-04-19-rax-to-wax-roadmap.md`
 
-- [ ] Step 1: Identify the remaining runtime reads that still require dataset-pack fixture layout knowledge after text/vector segment fallback exists.
-- [ ] Step 2: Move those reads behind real engine crate boundaries or compatibility fallbacks, not benchmark callers.
-- [ ] Step 3: Run `cargo test --workspace --quiet`.
 - [x] Step 1: Identify the remaining runtime reads that still require dataset-pack fixture layout knowledge after text/vector segment fallback exists.
 - [x] Step 2: Move those reads behind real engine crate boundaries or compatibility fallbacks, not benchmark callers.
 - [x] Step 3: Run `cargo test --workspace --quiet`.
