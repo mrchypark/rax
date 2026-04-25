@@ -148,6 +148,12 @@ impl TextLaneMetadata {
                     },
                 });
             }
+            if latest_doc_generation.is_some() {
+                return Err(
+                    "current store generation has manifest-visible documents but no matching text segment; publish text before runtime text search"
+                        .to_owned(),
+                );
+            }
         }
 
         Ok(Self {
@@ -866,6 +872,53 @@ mod tests {
 
         let error = TextLane::load(temp_dir.path(), &test_manifest()).unwrap_err();
         assert!(error.contains("stale"));
+    }
+
+    #[test]
+    fn text_lane_rejects_store_documents_without_matching_text_segment() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("store.wax");
+        fs::write(
+            temp_dir.path().join("docs.ndjson"),
+            concat!(
+                "{\"doc_id\":\"doc-1\",\"text\":\"alpha updated\"}\n",
+                "{\"doc_id\":\"doc-2\",\"text\":\"beta updated\"}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("postings.jsonl"),
+            concat!(
+                "{\"token\":\"alpha\",\"doc_ids\":[\"doc-1\"]}\n",
+                "{\"token\":\"beta\",\"doc_ids\":[\"doc-2\"]}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("queries.jsonl"),
+            "{\"query_id\":\"q-001\",\"query_class\":\"keyword\",\"difficulty\":\"easy\",\"query_text\":\"alpha\",\"top_k\":2,\"filter_spec\":{},\"preview_expected\":true,\"embedding_available\":false,\"lane_eligibility\":{\"text\":true,\"vector\":false,\"hybrid\":false}}\n",
+        )
+        .unwrap();
+        create_empty_store(&store_path).unwrap();
+        let doc_pending = prepare_raw_documents_segment(
+            &store_path,
+            vec![
+                (
+                    "doc-1".to_owned(),
+                    json!({"doc_id":"doc-1","text":"alpha updated"}),
+                ),
+                (
+                    "doc-2".to_owned(),
+                    json!({"doc_id":"doc-2","text":"beta updated"}),
+                ),
+            ],
+        )
+        .unwrap();
+        publish_segments(&store_path, vec![doc_pending]).unwrap();
+
+        let error = TextLane::load(temp_dir.path(), &test_manifest()).unwrap_err();
+
+        assert!(error.contains("no matching text segment"));
     }
 
     #[test]
