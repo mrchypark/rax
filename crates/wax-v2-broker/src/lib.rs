@@ -1,0 +1,288 @@
+use std::collections::HashMap;
+use std::fmt;
+use std::path::Path;
+
+use wax_v2_runtime::{
+    NewDocument, NewDocumentVector, RuntimePublishFamily, RuntimePublishReport, RuntimeSearchMode,
+    RuntimeSearchRequest, RuntimeSearchResponse, RuntimeStore,
+};
+
+const DEFAULT_MAX_SESSIONS: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SessionId(u64);
+
+impl SessionId {
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    pub fn from_u64(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrokerPublishFamily {
+    Doc,
+    Text,
+    Vector,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionImportReport {
+    pub generation: u64,
+    pub published_families: Vec<BrokerPublishFamily>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionNewDocument {
+    pub doc_id: String,
+    pub text: String,
+    pub metadata: serde_json::Value,
+    pub timestamp_ms: Option<u64>,
+    pub extra_fields: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionNewDocumentVector {
+    pub doc_id: String,
+    pub values: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSearchRequest {
+    text_query: String,
+    top_k: usize,
+    include_preview: bool,
+}
+
+impl SessionSearchRequest {
+    pub fn text(text_query: impl Into<String>) -> Self {
+        Self {
+            text_query: text_query.into(),
+            top_k: 5,
+            include_preview: false,
+        }
+    }
+
+    pub fn with_top_k(mut self, top_k: usize) -> Self {
+        self.top_k = top_k;
+        self
+    }
+
+    pub fn with_preview(mut self, include_preview: bool) -> Self {
+        self.include_preview = include_preview;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrokerError {
+    InvalidRequest(String),
+    Storage(String),
+    SessionNotFound(SessionId),
+    SessionLimitExceeded { max_sessions: usize },
+}
+
+impl fmt::Display for BrokerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidRequest(message) | Self::Storage(message) => write!(f, "{message}"),
+            Self::SessionNotFound(session_id) => {
+                write!(f, "session {} is not open", session_id.as_u64())
+            }
+            Self::SessionLimitExceeded { max_sessions } => {
+                write!(f, "broker session limit exceeded: {max_sessions}")
+            }
+        }
+    }
+}
+
+pub struct WaxBroker {
+    next_session_id: u64,
+    max_sessions: usize,
+    sessions: HashMap<SessionId, RuntimeStore>,
+}
+
+impl Default for WaxBroker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WaxBroker {
+    pub fn new() -> Self {
+        Self::with_max_sessions(DEFAULT_MAX_SESSIONS)
+    }
+
+    pub fn with_max_sessions(max_sessions: usize) -> Self {
+        Self {
+            next_session_id: 0,
+            max_sessions,
+            sessions: HashMap::new(),
+        }
+    }
+
+    pub fn open_session(&mut self, root: &Path) -> Result<SessionId, BrokerError> {
+        if self.sessions.len() >= self.max_sessions {
+            return Err(BrokerError::SessionLimitExceeded {
+                max_sessions: self.max_sessions,
+            });
+        }
+
+        let runtime = if root.join("store.wax").exists() {
+            RuntimeStore::open(root).map_err(runtime_error)?
+        } else {
+            RuntimeStore::create(root).map_err(runtime_error)?
+        };
+        let session_id = SessionId(self.next_session_id);
+        self.next_session_id = self
+            .next_session_id
+            .checked_add(1)
+            .ok_or_else(|| BrokerError::Storage("session id overflow".to_owned()))?;
+        self.sessions.insert(session_id, runtime);
+        Ok(session_id)
+    }
+
+    pub fn search(
+        &mut self,
+        session_id: SessionId,
+        request: SessionSearchRequest,
+    ) -> Result<RuntimeSearchResponse, BrokerError> {
+        let runtime = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or(BrokerError::SessionNotFound(session_id))?;
+        runtime
+            .search(RuntimeSearchRequest {
+                mode: RuntimeSearchMode::Text,
+                text_query: Some(request.text_query),
+                vector_query: None,
+                top_k: request.top_k,
+                include_preview: request.include_preview,
+            })
+            .map_err(runtime_error)
+    }
+
+    pub fn import_compatibility_snapshot(
+        &mut self,
+        session_id: SessionId,
+    ) -> Result<SessionImportReport, BrokerError> {
+        let runtime = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or(BrokerError::SessionNotFound(session_id))?;
+        let report = runtime
+            .writer()
+            .map_err(runtime_error)?
+            .import_compatibility_snapshot()
+            .map_err(runtime_error)?;
+        Ok(map_publish_report(report))
+    }
+
+    pub fn ingest_documents(
+        &mut self,
+        session_id: SessionId,
+        documents: Vec<SessionNewDocument>,
+    ) -> Result<SessionImportReport, BrokerError> {
+        let runtime = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or(BrokerError::SessionNotFound(session_id))?;
+        let report = runtime
+            .writer()
+            .map_err(runtime_error)?
+            .publish_raw_documents(
+                documents
+                    .into_iter()
+                    .map(|document| {
+                        let mut runtime_document = NewDocument::new(document.doc_id, document.text)
+                            .with_metadata(document.metadata);
+                        if let Some(timestamp_ms) = document.timestamp_ms {
+                            runtime_document = runtime_document.with_timestamp_ms(timestamp_ms);
+                        }
+                        for (key, value) in document.extra_fields {
+                            runtime_document = runtime_document.with_extra_field(key, value);
+                        }
+                        runtime_document
+                    })
+                    .collect(),
+            )
+            .map_err(runtime_error)?;
+        Ok(map_publish_report(report))
+    }
+
+    pub fn ingest_vectors(
+        &mut self,
+        session_id: SessionId,
+        vectors: Vec<SessionNewDocumentVector>,
+    ) -> Result<SessionImportReport, BrokerError> {
+        let runtime = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or(BrokerError::SessionNotFound(session_id))?;
+        let report = runtime
+            .writer()
+            .map_err(runtime_error)?
+            .publish_raw_vectors(
+                vectors
+                    .into_iter()
+                    .map(|vector| NewDocumentVector::new(vector.doc_id, vector.values))
+                    .collect(),
+            )
+            .map_err(runtime_error)?;
+        Ok(map_publish_report(report))
+    }
+
+    pub fn close_session(&mut self, session_id: SessionId) -> Result<(), BrokerError> {
+        let mut runtime = self
+            .sessions
+            .remove(&session_id)
+            .ok_or(BrokerError::SessionNotFound(session_id))?;
+        runtime.close().map_err(runtime_error)
+    }
+}
+
+fn runtime_error(error: wax_v2_runtime::RuntimeError) -> BrokerError {
+    match error {
+        wax_v2_runtime::RuntimeError::InvalidRequest(message) => {
+            BrokerError::InvalidRequest(message)
+        }
+        wax_v2_runtime::RuntimeError::Storage(message) => BrokerError::Storage(message),
+    }
+}
+
+fn map_publish_report(report: RuntimePublishReport) -> SessionImportReport {
+    SessionImportReport {
+        generation: report.generation,
+        published_families: report
+            .published_families
+            .into_iter()
+            .map(|family| match family {
+                RuntimePublishFamily::Doc => BrokerPublishFamily::Doc,
+                RuntimePublishFamily::Text => BrokerPublishFamily::Text,
+                RuntimePublishFamily::Vector => BrokerPublishFamily::Vector,
+            })
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use crate::{BrokerError, WaxBroker};
+
+    #[test]
+    fn broker_rejects_new_sessions_after_configured_capacity() {
+        let mut broker = WaxBroker::with_max_sessions(0);
+
+        let error = broker.open_session(Path::new("/unused")).unwrap_err();
+
+        assert!(matches!(
+            error,
+            BrokerError::SessionLimitExceeded { max_sessions: 0 }
+        ));
+    }
+}

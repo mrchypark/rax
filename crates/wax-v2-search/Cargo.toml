@@ -1,0 +1,10 @@
+[package]
+name = "wax-v2-search"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde_json = "1.0.145"
+wax-bench-model = { path = "../wax-bench-model" }
+wax-v2-text = { path = "../wax-v2-text" }
+wax-v2-vector = { path = "../wax-v2-vector" }

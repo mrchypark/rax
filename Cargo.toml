@@ -6,6 +6,17 @@ publish = false
 
 [workspace]
 members = [
+  "crates/wax-cli",
+  "crates/wax-v2-broker",
+  "crates/wax-v2-core",
+  "crates/wax-v2-docstore",
+  "crates/wax-v2-mcp",
+  "crates/wax-v2-multimodal",
+  "crates/wax-v2-runtime",
+  "crates/wax-v2-search",
+  "crates/wax-v2-structured-memory",
+  "crates/wax-v2-text",
+  "crates/wax-v2-vector",
   "crates/wax-bench-artifacts",
   "crates/wax-bench-cli",
   "crates/wax-bench-metrics",
@@ -30,6 +41,15 @@ wax-bench-packer = { path = "crates/wax-bench-packer" }
 wax-bench-reducer = { path = "crates/wax-bench-reducer" }
 wax-bench-runner = { path = "crates/wax-bench-runner" }
 wax-bench-text-engine = { path = "crates/wax-bench-text-engine" }
+wax-v2-core = { path = "crates/wax-v2-core" }
+wax-v2-docstore = { path = "crates/wax-v2-docstore" }
+wax-v2-broker = { path = "crates/wax-v2-broker" }
+wax-v2-runtime = { path = "crates/wax-v2-runtime" }
+wax-v2-mcp = { path = "crates/wax-v2-mcp" }
+wax-v2-multimodal = { path = "crates/wax-v2-multimodal" }
+wax-v2-structured-memory = { path = "crates/wax-v2-structured-memory" }
+wax-v2-text = { path = "crates/wax-v2-text" }
+wax-v2-vector = { path = "crates/wax-v2-vector" }
 
 [[test]]
 name = "workspace_smoke"
@@ -94,3 +114,67 @@ path = "tests/contracts/search_quality_contract.rs"
 [[test]]
 name = "benchmark_protocol_contract"
 path = "tests/contracts/benchmark_protocol_contract.rs"
+
+[[test]]
+name = "product_cli_contract"
+path = "tests/contracts/product_cli_contract.rs"
+
+[[test]]
+name = "broker_session_contract"
+path = "tests/contracts/broker_session_contract.rs"
+
+[[test]]
+name = "mcp_surface_contract"
+path = "tests/contracts/mcp_surface_contract.rs"
+
+[[test]]
+name = "structured_memory_contract"
+path = "tests/contracts/structured_memory_contract.rs"
+
+[[test]]
+name = "multimodal_ingest_contract"
+path = "tests/contracts/multimodal_ingest_contract.rs"
+
+[[test]]
+name = "photorag_parity_contract"
+path = "tests/contracts/photorag_parity_contract.rs"
+
+[[test]]
+name = "videorag_parity_contract"
+path = "tests/contracts/videorag_parity_contract.rs"
+
+[[test]]
+name = "apple_acceleration_contract"
+path = "tests/contracts/apple_acceleration_contract.rs"
+
+[[test]]
+name = "raw_doc_id_authority_contract"
+path = "tests/contracts/raw_doc_id_authority_contract.rs"
+
+[[test]]
+name = "raw_ingest_single_publish_contract"
+path = "tests/contracts/raw_ingest_single_publish_contract.rs"
+
+[[test]]
+name = "raw_document_ingest_contract"
+path = "tests/contracts/raw_document_ingest_contract.rs"
+
+[[test]]
+name = "raw_vector_ingest_contract"
+path = "tests/contracts/raw_vector_ingest_contract.rs"
+
+[[test]]
+name = "raw_compat_equivalence_contract"
+path = "tests/contracts/raw_compat_equivalence_contract.rs"
+
+[[test]]
+name = "product_raw_ingest_cli_contract"
+path = "tests/contracts/product_raw_ingest_cli_contract.rs"
+
+[[test]]
+name = "mcp_raw_ingest_contract"
+path = "tests/contracts/mcp_raw_ingest_contract.rs"
+
+[[test]]
+name = "raw_compat_publish_semantics_contract"
+path = "tests/contracts/raw_compat_publish_semantics_contract.rs"

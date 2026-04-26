@@ -340,6 +340,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -737,6 +747,15 @@ dependencies = [
  "wax-bench-reducer",
  "wax-bench-runner",
  "wax-bench-text-engine",
+ "wax-v2-broker",
+ "wax-v2-core",
+ "wax-v2-docstore",
+ "wax-v2-mcp",
+ "wax-v2-multimodal",
+ "wax-v2-runtime",
+ "wax-v2-structured-memory",
+ "wax-v2-text",
+ "wax-v2-vector",
 ]
 
 [[package]]
@@ -1167,13 +1186,139 @@ name = "wax-bench-text-engine"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "serde",
+ "serde_json",
+ "sha2",
+ "wax-bench-model",
+ "wax-v2-core",
+ "wax-v2-docstore",
+ "wax-v2-search",
+ "wax-v2-text",
+ "wax-v2-vector",
+]
+
+[[package]]
+name = "wax-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "wax-v2-runtime",
+]
+
+[[package]]
+name = "wax-v2-broker"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "wax-v2-runtime",
+]
+
+[[package]]
+name = "wax-v2-core"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+ "libc",
+ "memmap2",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "wax-v2-docstore"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "wax-bench-model",
+ "wax-v2-core",
+]
+
+[[package]]
+name = "wax-v2-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wax-v2-broker",
+]
+
+[[package]]
+name = "wax-v2-multimodal"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "wax-v2-runtime"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "wax-bench-model",
+ "wax-bench-packer",
+ "wax-v2-core",
+ "wax-v2-docstore",
+ "wax-v2-search",
+ "wax-v2-text",
+ "wax-v2-vector",
+]
+
+[[package]]
+name = "wax-v2-search"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "wax-bench-model",
+ "wax-v2-text",
+ "wax-v2-vector",
+]
+
+[[package]]
+name = "wax-v2-structured-memory"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "wax-v2-text"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "wax-bench-model",
+ "wax-v2-core",
+ "wax-v2-docstore",
+]
+
+[[package]]
+name = "wax-v2-vector"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
  "hnsw_rs",
  "memmap2",
  "self_cell",
  "serde",
  "serde_json",
- "sha2",
+ "tempfile",
  "wax-bench-model",
+ "wax-v2-core",
+ "wax-v2-docstore",
 ]
 
 [[package]]
