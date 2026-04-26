@@ -218,6 +218,7 @@ pub struct StructuredMemorySession {
     storage_path: PathBuf,
     records: Vec<StructuredMemoryRecord>,
     next_record_id: u64,
+    last_seen_file_len: u64,
     closed: bool,
 }
 
@@ -238,11 +239,13 @@ impl StructuredMemorySession {
             .last()
             .map(|record| record.record_id + 1)
             .unwrap_or(0);
+        let last_seen_file_len = fs::metadata(&storage_path).map_err(io_error)?.len();
 
         Ok(Self {
             storage_path,
             records,
             next_record_id,
+            last_seen_file_len,
             closed: false,
         })
     }
@@ -261,7 +264,11 @@ impl StructuredMemorySession {
             .map_err(io_error)?;
         file.lock_exclusive().map_err(io_error)?;
 
-        self.next_record_id = next_record_id_from_file(&mut file)?;
+        let current_file_len = file.metadata().map_err(io_error)?.len();
+        if current_file_len != self.last_seen_file_len {
+            self.next_record_id = next_record_id_from_file(&mut file)?;
+            self.last_seen_file_len = current_file_len;
+        }
         let record = StructuredMemoryRecord {
             record_id: self.next_record_id,
             subject: new_record.subject,
@@ -274,6 +281,7 @@ impl StructuredMemorySession {
         let encoded = serde_json::to_string(&record).map_err(json_error)?;
         writeln!(file, "{encoded}").map_err(io_error)?;
         file.flush().map_err(io_error)?;
+        self.last_seen_file_len = file.metadata().map_err(io_error)?.len();
         file.unlock().map_err(io_error)?;
 
         self.next_record_id += 1;
@@ -447,6 +455,7 @@ impl StructuredMemorySession {
             .last()
             .map(|record| record.record_id + 1)
             .unwrap_or(0);
+        self.last_seen_file_len = fs::metadata(&self.storage_path).map_err(io_error)?.len();
         self.records = records;
         Ok(())
     }
