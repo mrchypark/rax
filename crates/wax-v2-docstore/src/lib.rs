@@ -511,6 +511,7 @@ pub struct Docstore {
 
 #[derive(Debug)]
 enum DocstoreSource {
+    Empty,
     DatasetPack {
         documents_path: PathBuf,
         offset_index: Option<HashMap<String, DocumentOffsetEntry>>,
@@ -843,7 +844,7 @@ fn read_doc_row(row_bytes: &[u8]) -> DocRow {
 
 impl Docstore {
     pub fn open(mount_root: &Path, manifest: &DatasetPackManifest) -> Result<Self, DocstoreError> {
-        let store_path = mount_root.join("store.wax");
+        let store_path = store_path_from_manifest(mount_root, manifest);
         if store_path.exists() {
             let opened = wax_v2_core::open_store(&store_path)
                 .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))?;
@@ -856,6 +857,11 @@ impl Docstore {
             {
                 return Self::open_store_segment(&store_path, descriptor);
             }
+        }
+        if manifest.files.iter().all(|file| file.kind != "documents") {
+            return Ok(Self {
+                source: DocstoreSource::Empty,
+            });
         }
 
         Self::open_dataset_pack(mount_root, manifest)
@@ -894,6 +900,7 @@ impl Docstore {
         target_doc_ids: &[String],
     ) -> Result<HashMap<String, Value>, DocstoreError> {
         match &self.source {
+            DocstoreSource::Empty => Ok(HashMap::new()),
             DocstoreSource::DatasetPack {
                 documents_path,
                 offset_index,
@@ -942,6 +949,7 @@ impl Docstore {
 
     pub fn load_document_ids(&self) -> Result<Vec<String>, DocstoreError> {
         match &self.source {
+            DocstoreSource::Empty => Ok(Vec::new()),
             DocstoreSource::DatasetPack { documents_path, .. } => {
                 load_document_ids_from_documents(documents_path)
             }
@@ -951,6 +959,7 @@ impl Docstore {
 
     pub fn build_doc_id_map(&self) -> Result<DocIdMap, DocstoreError> {
         match &self.source {
+            DocstoreSource::Empty => DocIdMap::from_document_order(&[]),
             DocstoreSource::DatasetPack { .. } => {
                 let document_ids = self.load_document_ids()?;
                 DocIdMap::from_document_order(&document_ids)
@@ -961,6 +970,7 @@ impl Docstore {
 
     pub fn build_binary_doc_segment(&self) -> Result<BinaryDocSegment, DocstoreError> {
         let ordered_documents = match &self.source {
+            DocstoreSource::Empty => Vec::new(),
             DocstoreSource::DatasetPack { documents_path, .. } => {
                 let file = File::open(documents_path)?;
                 let reader = BufReader::new(file);
@@ -1100,6 +1110,9 @@ impl Docstore {
         doc_id_map: DocIdMap,
     ) -> Result<BinaryDocSegment, DocstoreError> {
         match &self.source {
+            DocstoreSource::Empty => {
+                build_binary_doc_segment_from_documents(Vec::new(), doc_id_map)
+            }
             DocstoreSource::DatasetPack {
                 documents_path,
                 offset_index: _,
@@ -1158,7 +1171,7 @@ pub fn validate_store_segment_against_dataset_pack(
     mount_root: &Path,
     manifest: &DatasetPackManifest,
 ) -> Result<(), DocstoreError> {
-    let store_path = mount_root.join("store.wax");
+    let store_path = store_path_from_manifest(mount_root, manifest);
     if !store_path.exists() {
         return Ok(());
     }
@@ -1177,6 +1190,21 @@ pub fn validate_store_segment_against_dataset_pack(
 
     let store_docstore = Docstore::open_store_segment(&store_path, descriptor)?;
     validate_store_docstore_against_dataset_pack(mount_root, manifest, &store_docstore)
+}
+
+fn store_path_from_manifest(mount_root: &Path, manifest: &DatasetPackManifest) -> PathBuf {
+    manifest
+        .files
+        .iter()
+        .find(|file| file.kind == "store")
+        .or_else(|| {
+            manifest
+                .files
+                .iter()
+                .find(|file| file.kind == "prebuilt_store")
+        })
+        .map(|file| mount_root.join(&file.path))
+        .unwrap_or_else(|| mount_root.join("store.wax"))
 }
 
 fn validate_store_docstore_against_dataset_pack(

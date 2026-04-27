@@ -4,7 +4,11 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use wax_bench_model::DatasetPackManifest;
+use wax_bench_model::{
+    CorpusProfile, DatasetIdentity, DatasetPackManifest, DirtyProfile, EnvironmentConstraints,
+    LengthBuckets, ManifestChecksums, ManifestFile, ManifestGenerator, MetadataProfile,
+    QueryVectorProfile, SelectivityExemplars, TextProfile, VectorProfile,
+};
 use wax_v2_docstore::DocIdMap;
 use wax_v2_docstore::Docstore;
 use wax_v2_search::hybrid_search_with_diagnostics;
@@ -37,6 +41,14 @@ pub struct RuntimeSearchHit {
 pub struct RuntimeSearchResponse {
     pub hits: Vec<RuntimeSearchHit>,
 }
+
+pub type MemorySearchResponse = RuntimeSearchResponse;
+pub type MemorySearchHit = RuntimeSearchHit;
+
+const DEFAULT_PRODUCT_EMBEDDING_DIMENSIONS: usize = 384;
+const MEMORY_SAVE_MAX_ATTEMPTS: usize = 3;
+const STORE_GENERATION_CHANGED_MESSAGE: &str =
+    "publish_raw_snapshot store generation changed before publish; retry with latest documents";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimePublishFamily {
@@ -162,6 +174,7 @@ impl fmt::Display for RuntimeError {
 
 pub struct RuntimeStore {
     root: PathBuf,
+    store_path: PathBuf,
     manifest: DatasetPackManifest,
     docstore: Docstore,
     text_lane: Option<TextLane>,
@@ -172,6 +185,33 @@ pub struct RuntimeStore {
 
 pub struct RuntimeStoreWriter<'a> {
     store: &'a mut RuntimeStore,
+}
+
+pub struct Memory {
+    runtime: RuntimeStore,
+    embedding_dimensions: usize,
+}
+
+struct LoadedRuntimeDocuments {
+    store_generation: u64,
+    documents: Vec<NewDocument>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemorySearchOptions {
+    pub mode: RuntimeSearchMode,
+    pub top_k: usize,
+    pub include_preview: bool,
+}
+
+impl Default for MemorySearchOptions {
+    fn default() -> Self {
+        Self {
+            mode: RuntimeSearchMode::Hybrid,
+            top_k: 5,
+            include_preview: true,
+        }
+    }
 }
 
 impl RuntimeStore {
@@ -216,7 +256,7 @@ impl RuntimeStore {
 
     pub fn create(root: &Path) -> Result<Self, RuntimeError> {
         let manifest = read_manifest(root)?;
-        let store_path = root.join("store.wax");
+        let store_path = writable_store_path_from_manifest(root, &manifest)?;
         if store_path.exists() {
             return Err(RuntimeError::InvalidRequest(format!(
                 "store already exists at {}",
@@ -228,9 +268,40 @@ impl RuntimeStore {
         Self::open_created_store(root, manifest, &store_path)
     }
 
+    pub fn create_at(path: &Path) -> Result<Self, RuntimeError> {
+        let root = product_store_root(path)?;
+        fs::create_dir_all(&root).map_err(|error| RuntimeError::Storage(error.to_string()))?;
+        if path.exists() {
+            return Err(RuntimeError::InvalidRequest(format!(
+                "store already exists at {}",
+                path.display()
+            )));
+        }
+        let manifest = product_manifest(&root, path)?;
+        wax_v2_core::create_empty_store(path)
+            .map_err(|error| RuntimeError::Storage(error.to_string()))?;
+        Self::open_created_store(&root, manifest, path)
+    }
+
     pub fn open(root: &Path) -> Result<Self, RuntimeError> {
         let manifest = read_manifest(root)?;
         Self::open_from_manifest(root, manifest)
+    }
+
+    pub fn open_at(path: &Path) -> Result<Self, RuntimeError> {
+        let root = product_store_root(path)?;
+        let manifest = product_manifest(&root, path)?;
+        Self::open_from_manifest(&root, manifest)
+    }
+
+    pub fn open_existing_at(path: &Path) -> Result<Self, RuntimeError> {
+        if !path.exists() {
+            return Err(RuntimeError::InvalidRequest(format!(
+                "memory store does not exist at {}",
+                path.display()
+            )));
+        }
+        Self::open_at(path)
     }
 
     pub fn writer(&mut self) -> Result<RuntimeStoreWriter<'_>, RuntimeError> {
@@ -243,14 +314,14 @@ impl RuntimeStore {
     }
 
     pub fn store_path(&self) -> PathBuf {
-        self.root.join("store.wax")
+        self.store_path.clone()
     }
 
     fn open_from_manifest(
         root: &Path,
         manifest: DatasetPackManifest,
     ) -> Result<Self, RuntimeError> {
-        let store_path = root.join("store.wax");
+        let store_path = store_path_from_manifest(root, &manifest);
         let store_generation = if store_path.exists() {
             Some(
                 wax_v2_core::open_store(&store_path)
@@ -266,6 +337,7 @@ impl RuntimeStore {
 
         Ok(Self {
             root: root.to_path_buf(),
+            store_path,
             manifest,
             docstore,
             text_lane: None,
@@ -325,6 +397,11 @@ impl RuntimeStore {
             return Ok(RuntimeSearchResponse { hits: Vec::new() });
         }
         self.refresh_read_state_if_store_generation_changed()?;
+        let live_doc_count = self.live_doc_count()?;
+        if live_doc_count == 0 {
+            return Ok(RuntimeSearchResponse { hits: Vec::new() });
+        }
+        let top_k = request.top_k.min(live_doc_count);
 
         let doc_ids = match request.mode {
             RuntimeSearchMode::Text => {
@@ -334,7 +411,7 @@ impl RuntimeStore {
                     )
                 })?;
                 self.ensure_text_lane()?
-                    .search_with_limit(text_query, request.top_k)
+                    .search_with_limit(text_query, top_k)
             }
             RuntimeSearchMode::Vector => {
                 let vector_query = request.vector_query.as_deref().ok_or_else(|| {
@@ -345,7 +422,7 @@ impl RuntimeStore {
                 self.ensure_vector_lane()?
                     .search_with_query(
                         vector_query,
-                        request.top_k,
+                        top_k,
                         wax_bench_model::VectorQueryMode::Auto,
                         false,
                     )
@@ -362,8 +439,7 @@ impl RuntimeStore {
                         "vector_query is required for hybrid search".to_owned(),
                     )
                 })?;
-                let live_doc_count = self.live_doc_count()?;
-                let text_limit = hybrid_text_candidate_limit(request.top_k, live_doc_count);
+                let text_limit = hybrid_text_candidate_limit(top_k, live_doc_count);
                 let text_hits = self
                     .ensure_text_lane()?
                     .search_with_limit(text_query, text_limit);
@@ -371,7 +447,7 @@ impl RuntimeStore {
                     &text_hits,
                     self.ensure_vector_lane()?,
                     vector_query,
-                    request.top_k,
+                    top_k,
                     wax_bench_model::VectorQueryMode::Auto,
                     false,
                 )
@@ -457,33 +533,50 @@ impl RuntimeStore {
         doc_ids: &[String],
         include_preview: bool,
     ) -> Result<Vec<RuntimeSearchHit>, RuntimeError> {
-        if !include_preview {
-            return Ok(doc_ids
-                .iter()
-                .cloned()
-                .map(|doc_id| RuntimeSearchHit {
-                    doc_id,
-                    preview: None,
-                })
-                .collect());
-        }
-
         let documents = self
             .docstore
             .load_documents_by_id(doc_ids)
             .map_err(|error| RuntimeError::Storage(docstore_error(error)))?;
-        Ok(doc_ids
+        if !include_preview {
+            return doc_ids
+                .iter()
+                .map(|doc_id| {
+                    if !documents.contains_key(doc_id) {
+                        return Err(RuntimeError::Storage(format!(
+                            "search hit {doc_id} has no loadable document payload"
+                        )));
+                    }
+                    Ok(RuntimeSearchHit {
+                        doc_id: doc_id.clone(),
+                        preview: None,
+                    })
+                })
+                .collect();
+        }
+
+        doc_ids
             .iter()
-            .cloned()
-            .map(|doc_id| RuntimeSearchHit {
-                preview: documents
-                    .get(&doc_id)
-                    .and_then(|document| document.get("text"))
+            .map(|doc_id| {
+                let document = documents.get(doc_id).ok_or_else(|| {
+                    RuntimeError::Storage(format!(
+                        "search hit {doc_id} has no loadable document payload"
+                    ))
+                })?;
+                let preview = document
+                    .get("text")
                     .and_then(|value| value.as_str())
-                    .map(ToOwned::to_owned),
-                doc_id,
+                    .ok_or_else(|| {
+                        RuntimeError::Storage(format!(
+                            "search hit {doc_id} document payload is missing text"
+                        ))
+                    })?
+                    .to_owned();
+                Ok(RuntimeSearchHit {
+                    doc_id: doc_id.clone(),
+                    preview: Some(preview),
+                })
             })
-            .collect())
+            .collect()
     }
 }
 
@@ -690,6 +783,10 @@ impl RuntimeStoreWriter<'_> {
                 merged.push(document);
             } else if let Some(value) = current_documents.get(&doc_id) {
                 merged.push(new_document_from_value(value)?);
+            } else {
+                return Err(RuntimeError::Storage(format!(
+                    "stored document id {doc_id} was listed but could not be loaded"
+                )));
             }
         }
         for doc_id in incoming_order {
@@ -807,6 +904,119 @@ impl RuntimeStoreWriter<'_> {
     }
 }
 
+impl Memory {
+    pub fn open(path: &Path) -> Result<Self, RuntimeError> {
+        let runtime = if path.exists() {
+            RuntimeStore::open_at(path)?
+        } else {
+            RuntimeStore::create_at(path)?
+        };
+        Ok(Self {
+            runtime,
+            embedding_dimensions: DEFAULT_PRODUCT_EMBEDDING_DIMENSIONS,
+        })
+    }
+
+    pub fn open_existing(path: &Path) -> Result<Self, RuntimeError> {
+        Ok(Self {
+            runtime: RuntimeStore::open_existing_at(path)?,
+            embedding_dimensions: DEFAULT_PRODUCT_EMBEDDING_DIMENSIONS,
+        })
+    }
+
+    pub fn remember(&mut self, text: impl Into<String>) -> Result<String, RuntimeError> {
+        self.save(text, serde_json::json!({}))
+    }
+
+    pub fn save(
+        &mut self,
+        text: impl Into<String>,
+        metadata: serde_json::Value,
+    ) -> Result<String, RuntimeError> {
+        let text = text.into();
+        for attempt in 0..MEMORY_SAVE_MAX_ATTEMPTS {
+            match self.save_once(text.clone(), metadata.clone()) {
+                Err(error)
+                    if is_store_generation_changed_error(&error)
+                        && attempt + 1 < MEMORY_SAVE_MAX_ATTEMPTS =>
+                {
+                    continue;
+                }
+                result => return result,
+            }
+        }
+        unreachable!("MEMORY_SAVE_MAX_ATTEMPTS loop always returns");
+    }
+
+    fn save_once(
+        &mut self,
+        text: String,
+        metadata: serde_json::Value,
+    ) -> Result<String, RuntimeError> {
+        let loaded = load_all_runtime_documents(&mut self.runtime)?;
+        let mut documents = loaded.documents;
+        let doc_id = next_memory_doc_id(&documents);
+        documents.push(NewDocument::new(doc_id.clone(), text).with_metadata(metadata));
+        let vectors = documents
+            .iter()
+            .map(|document| {
+                NewDocumentVector::new(
+                    document.doc_id.clone(),
+                    wax_bench_model::embed_text(&document.text, self.embedding_dimensions as u32),
+                )
+            })
+            .collect::<Vec<_>>();
+        let store_path = self.runtime.store_path();
+        self.runtime
+            .writer()?
+            .publish_raw_snapshot_with_expected_generation(
+                store_path,
+                loaded.store_generation,
+                documents,
+                Some(vectors),
+            )?;
+        Ok(doc_id)
+    }
+
+    pub fn search(
+        &mut self,
+        query: impl Into<String>,
+    ) -> Result<MemorySearchResponse, RuntimeError> {
+        self.search_with_options(query, MemorySearchOptions::default())
+    }
+
+    pub fn recall(
+        &mut self,
+        query: impl Into<String>,
+    ) -> Result<MemorySearchResponse, RuntimeError> {
+        self.search(query)
+    }
+
+    pub fn search_with_options(
+        &mut self,
+        query: impl Into<String>,
+        options: MemorySearchOptions,
+    ) -> Result<MemorySearchResponse, RuntimeError> {
+        let query = query.into();
+        let vector_query = matches!(
+            options.mode,
+            RuntimeSearchMode::Vector | RuntimeSearchMode::Hybrid
+        )
+        .then(|| wax_bench_model::embed_text(&query, self.embedding_dimensions as u32));
+        self.runtime.search(RuntimeSearchRequest {
+            mode: options.mode,
+            text_query: Some(query),
+            vector_query,
+            top_k: options.top_k,
+            include_preview: options.include_preview,
+        })
+    }
+
+    pub fn close(&mut self) -> Result<(), RuntimeError> {
+        self.runtime.close()
+    }
+}
+
 fn raw_ordered_documents(documents: &[NewDocument]) -> Vec<(String, serde_json::Value)> {
     documents
         .iter()
@@ -830,6 +1040,53 @@ fn raw_ordered_documents(documents: &[NewDocument]) -> Vec<(String, serde_json::
             (document.doc_id.clone(), serde_json::Value::Object(object))
         })
         .collect()
+}
+
+fn load_all_runtime_documents(
+    store: &mut RuntimeStore,
+) -> Result<LoadedRuntimeDocuments, RuntimeError> {
+    store.refresh_read_state_if_store_generation_changed()?;
+    let store_generation = store.store_generation.ok_or_else(|| {
+        RuntimeError::InvalidRequest("memory store is missing; reopen the memory store".to_owned())
+    })?;
+    let doc_ids = store
+        .docstore
+        .load_document_ids()
+        .map_err(|error| RuntimeError::Storage(docstore_error(error)))?;
+    let documents = store
+        .docstore
+        .load_documents_by_id(&doc_ids)
+        .map_err(|error| RuntimeError::Storage(docstore_error(error)))?;
+    let documents = doc_ids
+        .iter()
+        .map(|doc_id| {
+            documents.get(doc_id).ok_or_else(|| {
+                RuntimeError::Storage(format!(
+                    "stored document id {doc_id} was listed but could not be loaded"
+                ))
+            })
+        })
+        .map(|document| document.and_then(new_document_from_value))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(LoadedRuntimeDocuments {
+        store_generation,
+        documents,
+    })
+}
+
+fn next_memory_doc_id(documents: &[NewDocument]) -> String {
+    let existing = documents
+        .iter()
+        .map(|document| document.doc_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut index = documents.len() + 1;
+    loop {
+        let doc_id = format!("mem-{index:016}");
+        if !existing.contains(doc_id.as_str()) {
+            return doc_id;
+        }
+        index += 1;
+    }
 }
 
 fn new_document_from_value(value: &serde_json::Value) -> Result<NewDocument, RuntimeError> {
@@ -869,10 +1126,12 @@ fn new_document_from_value(value: &serde_json::Value) -> Result<NewDocument, Run
     Ok(document)
 }
 
+type SortedVectorInputs = (u64, u64, Vec<(String, Vec<f32>)>);
+
 fn vector_inputs_sorted_by_wax_doc_id(
     vectors: Vec<NewDocumentVector>,
     doc_id_map: &DocIdMap,
-) -> Result<(u64, u64, Vec<(String, Vec<f32>)>), RuntimeError> {
+) -> Result<SortedVectorInputs, RuntimeError> {
     let mut vector_inputs = vectors
         .into_iter()
         .map(|vector| {
@@ -998,8 +1257,7 @@ fn ensure_store_generation_unchanged(
     }
 
     Err(wax_v2_core::CoreError::PublishPreconditionFailed(
-        "publish_raw_snapshot store generation changed before publish; retry with latest documents"
-            .to_owned(),
+        STORE_GENERATION_CHANGED_MESSAGE.to_owned(),
     ))
 }
 
@@ -1010,6 +1268,13 @@ fn runtime_core_error(error: wax_v2_core::CoreError) -> RuntimeError {
         }
         other => RuntimeError::Storage(other.to_string()),
     }
+}
+
+fn is_store_generation_changed_error(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::InvalidRequest(message) if message == STORE_GENERATION_CHANGED_MESSAGE
+    )
 }
 
 fn hybrid_text_candidate_limit(top_k: usize, live_doc_count: usize) -> usize {
@@ -1139,6 +1404,143 @@ fn read_manifest(root: &Path) -> Result<DatasetPackManifest, RuntimeError> {
     serde_json_fallback_parse_manifest(&manifest_text)
 }
 
+fn product_store_root(path: &Path) -> Result<PathBuf, RuntimeError> {
+    Ok(path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(".")))
+}
+
+fn product_manifest(root: &Path, store_path: &Path) -> Result<DatasetPackManifest, RuntimeError> {
+    let store_file = store_path.strip_prefix(root).unwrap_or(store_path);
+    Ok(DatasetPackManifest {
+        schema_version: "rax-product-v1".to_owned(),
+        generated_at: "product-runtime".to_owned(),
+        generator: ManifestGenerator {
+            name: "rax".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+        },
+        identity: DatasetIdentity {
+            dataset_id: store_path.display().to_string(),
+            dataset_version: "1".to_owned(),
+            dataset_family: "memory".to_owned(),
+            dataset_tier: "product".to_owned(),
+            variant_id: "live".to_owned(),
+            embedding_spec_id: "rax-deterministic".to_owned(),
+            embedding_model_version: "1".to_owned(),
+            embedding_model_hash: "runtime".to_owned(),
+            corpus_checksum: "runtime".to_owned(),
+            query_checksum: "runtime".to_owned(),
+        },
+        environment_constraints: EnvironmentConstraints {
+            min_ram_gb: 1,
+            recommended_ram_gb: 1,
+            notes: Some("product memory store".to_owned()),
+        },
+        corpus: CorpusProfile {
+            doc_count: 0,
+            vector_count: 0,
+            total_text_bytes: 0,
+            avg_doc_length: 0.0,
+            median_doc_length: 0,
+            p95_doc_length: 0,
+            max_doc_length: 0,
+            languages: Vec::new(),
+        },
+        text_profile: TextProfile {
+            length_buckets: LengthBuckets {
+                short_ratio: 0.0,
+                medium_ratio: 0.0,
+                long_ratio: 0.0,
+            },
+            tokenization_notes: Some("runtime text segment".to_owned()),
+        },
+        metadata_profile: MetadataProfile {
+            facets: Vec::new(),
+            selectivity_exemplars: SelectivityExemplars {
+                broad: String::new(),
+                medium: String::new(),
+                narrow: String::new(),
+                zero_hit: String::new(),
+            },
+        },
+        vector_profile: VectorProfile {
+            enabled: true,
+            embedding_dimensions: DEFAULT_PRODUCT_EMBEDDING_DIMENSIONS as u32,
+            embedding_dtype: "f32".to_owned(),
+            distance_metric: "cosine".to_owned(),
+            ann_index_backend: None,
+            ann_sidecar_reproducibility: None,
+            query_vectors: QueryVectorProfile {
+                precomputed_available: false,
+                runtime_embedding_supported: true,
+            },
+        },
+        dirty_profile: DirtyProfile {
+            profile: "clean".to_owned(),
+            base_dataset_id: None,
+            seed: 0,
+            delete_ratio: 0.0,
+            update_ratio: 0.0,
+            append_ratio: 0.0,
+            target_segment_count_range: [1, 1],
+            target_segment_topology: Vec::new(),
+            target_tombstone_ratio: 0.0,
+            compaction_state: "none".to_owned(),
+        },
+        files: vec![ManifestFile {
+            path: store_file.display().to_string(),
+            kind: "store".to_owned(),
+            format: "wax".to_owned(),
+            record_count: 1,
+            checksum: "runtime".to_owned(),
+        }],
+        query_sets: Vec::new(),
+        checksums: ManifestChecksums {
+            manifest_payload_checksum: "runtime".to_owned(),
+            logical_documents_checksum: "runtime".to_owned(),
+            logical_metadata_checksum: "runtime".to_owned(),
+            logical_query_definitions_checksum: "runtime".to_owned(),
+            logical_vector_payload_checksum: None,
+            fairness_fingerprint: "runtime".to_owned(),
+        },
+    })
+}
+
+fn store_path_from_manifest(root: &Path, manifest: &DatasetPackManifest) -> PathBuf {
+    manifest_file_by_kind(manifest, "store")
+        .or_else(|| manifest_file_by_kind(manifest, "prebuilt_store"))
+        .map(|file| root.join(&file.path))
+        .unwrap_or_else(|| root.join("store.wax"))
+}
+
+fn writable_store_path_from_manifest(
+    root: &Path,
+    manifest: &DatasetPackManifest,
+) -> Result<PathBuf, RuntimeError> {
+    if let Some(file) = manifest.files.iter().find(|file| file.kind == "store") {
+        return Ok(root.join(&file.path));
+    }
+    if let Some(file) = manifest
+        .files
+        .iter()
+        .find(|file| file.kind == "prebuilt_store")
+    {
+        return Err(RuntimeError::InvalidRequest(format!(
+            "manifest prebuilt_store {} is read-only; declare a store file before creating a writable runtime store",
+            root.join(&file.path).display()
+        )));
+    }
+    Ok(root.join("store.wax"))
+}
+
+fn manifest_file_by_kind<'a>(
+    manifest: &'a DatasetPackManifest,
+    kind: &str,
+) -> Option<&'a wax_bench_model::ManifestFile> {
+    manifest.files.iter().find(|file| file.kind == kind)
+}
+
 fn serde_json_fallback_parse_manifest(text: &str) -> Result<DatasetPackManifest, RuntimeError> {
     serde_json::from_str(text).map_err(|error| RuntimeError::Storage(error.to_string()))
 }
@@ -1169,10 +1571,151 @@ mod tests {
     use wax_v2_vector::publish_compatibility_vector_segment;
 
     use crate::{
-        read_manifest, NewDocument, NewDocumentVector, RuntimeAccelerationAvailability,
-        RuntimeAccelerationPreference, RuntimeExecutionBackend, RuntimePlatformAccelerationFamily,
-        RuntimePublishFamily, RuntimeSearchMode, RuntimeSearchRequest, RuntimeStore,
+        load_all_runtime_documents, read_manifest, Memory, NewDocument, NewDocumentVector,
+        RuntimeAccelerationAvailability, RuntimeAccelerationPreference, RuntimeExecutionBackend,
+        RuntimePlatformAccelerationFamily, RuntimePublishFamily, RuntimeSearchMode,
+        RuntimeSearchRequest, RuntimeStore,
     };
+
+    #[test]
+    fn memory_facade_opens_single_file_remembers_and_recalls_hybrid_results() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("agent.wax");
+
+        let mut memory = Memory::open(&store_path).unwrap();
+        let doc_id = memory
+            .remember("The user is building a habit tracker in Rust")
+            .unwrap();
+        let results = memory.recall("What is the user building?").unwrap();
+        memory.close().unwrap();
+
+        assert_eq!(doc_id, "mem-0000000000000001");
+        assert!(store_path.exists());
+        assert_eq!(results.hits[0].doc_id, doc_id);
+        assert_eq!(
+            results.hits[0].preview.as_deref(),
+            Some("The user is building a habit tracker in Rust")
+        );
+
+        let mut reopened = Memory::open(&store_path).unwrap();
+        let reopened_results = reopened.search("habit tracker").unwrap();
+        assert_eq!(reopened_results.hits[0].doc_id, "mem-0000000000000001");
+    }
+
+    #[test]
+    fn memory_open_existing_rejects_missing_store_without_creating_it() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("missing.wax");
+
+        let error = match Memory::open_existing(&store_path) {
+            Ok(_) => panic!("missing store should not open"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, crate::RuntimeError::InvalidRequest(_)));
+        assert!(!store_path.exists());
+    }
+
+    #[test]
+    fn memory_search_refreshes_empty_handle_after_concurrent_remember() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("agent.wax");
+        let mut reader = Memory::open(&store_path).unwrap();
+
+        let mut writer = Memory::open(&store_path).unwrap();
+        writer
+            .remember("concurrent memory from another handle")
+            .unwrap();
+        writer.close().unwrap();
+
+        let results = reader.search("concurrent memory").unwrap();
+
+        assert_eq!(results.hits[0].doc_id, "mem-0000000000000001");
+        assert_eq!(
+            results.hits[0].preview.as_deref(),
+            Some("concurrent memory from another handle")
+        );
+    }
+
+    #[test]
+    fn runtime_store_create_honors_manifest_store_path() {
+        let dataset_dir = tempdir().unwrap();
+        let store_path = dataset_dir.path().join("nested").join("custom.wax");
+        let manifest = crate::product_manifest(dataset_dir.path(), &store_path).unwrap();
+        fs::write(
+            dataset_dir.path().join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
+
+        assert_eq!(runtime.store_path(), store_path);
+        assert!(store_path.exists());
+        assert!(!dataset_dir.path().join("store.wax").exists());
+    }
+
+    #[test]
+    fn runtime_store_create_prefers_store_over_prebuilt_store() {
+        let dataset_dir = tempdir().unwrap();
+        let writable_store = dataset_dir.path().join("writable.wax");
+        let prebuilt_store = dataset_dir.path().join("prebuilt.wax");
+        create_empty_store(&prebuilt_store).unwrap();
+        let mut manifest = crate::product_manifest(dataset_dir.path(), &writable_store).unwrap();
+        let mut prebuilt_file = manifest.files[0].clone();
+        prebuilt_file.path = "prebuilt.wax".to_owned();
+        prebuilt_file.kind = "prebuilt_store".to_owned();
+        manifest.files.insert(0, prebuilt_file);
+        fs::write(
+            dataset_dir.path().join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
+
+        assert_eq!(runtime.store_path(), writable_store);
+        assert!(writable_store.exists());
+    }
+
+    #[test]
+    fn memory_save_rejects_stale_snapshot_after_concurrent_publish() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("agent.wax");
+        let mut memory = Memory::open(&store_path).unwrap();
+        memory.remember("first memory").unwrap();
+
+        let mut stale_runtime = RuntimeStore::open_at(&store_path).unwrap();
+        let loaded = load_all_runtime_documents(&mut stale_runtime).unwrap();
+
+        let mut concurrent_memory = Memory::open(&store_path).unwrap();
+        concurrent_memory.remember("second memory").unwrap();
+
+        let mut stale_documents = loaded.documents;
+        stale_documents.push(NewDocument::new("mem-0000000000000003", "third memory"));
+        let vectors = stale_documents
+            .iter()
+            .map(|document| {
+                NewDocumentVector::new(document.doc_id.clone(), embed_text(&document.text, 384))
+            })
+            .collect::<Vec<_>>();
+        let runtime_store_path = stale_runtime.store_path();
+        let error = stale_runtime
+            .writer()
+            .unwrap()
+            .publish_raw_snapshot_with_expected_generation(
+                runtime_store_path,
+                loaded.store_generation,
+                stale_documents,
+                Some(vectors),
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "publish_raw_snapshot store generation changed before publish; retry with latest documents"
+        );
+    }
 
     #[test]
     fn runtime_store_open_searches_and_closes_without_benchmark_workload_names() {
@@ -2058,7 +2601,7 @@ mod tests {
             .segments
             .iter()
             .filter(|segment| segment.family == SegmentKind::Vec)
-            .last()
+            .next_back()
             .unwrap();
         let bytes =
             map_segment_object(&dataset_dir.path().join("store.wax"), vector_segment).unwrap();
@@ -2173,7 +2716,7 @@ mod tests {
             .segments
             .iter()
             .filter(|segment| segment.family == SegmentKind::Vec)
-            .last()
+            .next_back()
             .unwrap();
         let bytes =
             map_segment_object(&dataset_dir.path().join("store.wax"), vector_segment).unwrap();
@@ -2286,7 +2829,7 @@ mod tests {
                 RuntimeAccelerationAvailability::UnsupportedPlatform
             );
         }
-        assert!(apple.detail.as_deref().unwrap_or("").len() > 0);
+        assert!(!apple.detail.as_deref().unwrap_or("").is_empty());
     }
 
     #[test]
@@ -2306,7 +2849,11 @@ mod tests {
             selection.chosen_backend,
             RuntimeExecutionBackend::RustDefault
         );
-        assert!(selection.fallback_reason.as_deref().unwrap_or("").len() > 0);
+        assert!(!selection
+            .fallback_reason
+            .as_deref()
+            .unwrap_or("")
+            .is_empty());
     }
 
     fn test_vector(first_value: f32) -> Vec<f32> {

@@ -433,8 +433,10 @@ fn metadata_filter_candidate_limit(top_k: usize, active_doc_count: usize) -> usi
     }
     top_k
         .saturating_mul(METADATA_FILTER_CANDIDATE_MULTIPLIER)
-        .max(METADATA_FILTER_MIN_CANDIDATES)
-        .min(METADATA_FILTER_MAX_CANDIDATES)
+        .clamp(
+            METADATA_FILTER_MIN_CANDIDATES,
+            METADATA_FILTER_MAX_CANDIDATES,
+        )
         .min(active_doc_count)
 }
 

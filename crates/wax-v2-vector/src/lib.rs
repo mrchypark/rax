@@ -146,7 +146,7 @@ struct VectorLaneMetadata {
     vector_lane_skeleton_path: Option<PathBuf>,
     documents_path: Option<PathBuf>,
     document_ids_path: Option<PathBuf>,
-    document_vectors_path: PathBuf,
+    document_vectors_path: Option<PathBuf>,
     preview_vectors_path: Option<PathBuf>,
     hnsw_graph_basename: Option<String>,
 }
@@ -179,22 +179,24 @@ impl VectorLaneMetadata {
             .files
             .iter()
             .find(|file| file.kind == "document_vectors")
-            .map(|file| mount_root.join(&file.path))
-            .ok_or_else(|| "document_vectors file missing from manifest".to_owned())?;
+            .map(|file| mount_root.join(&file.path));
 
         let vector_segment = if prefer_store_segment {
-            resolve_store_vector_segment(mount_root)?
+            resolve_store_vector_segment(mount_root, manifest)?
         } else {
             None
         };
         if prefer_store_segment
             && vector_segment.is_none()
-            && store_has_manifest_visible_family(mount_root, SegmentKind::Doc)?
+            && store_has_manifest_visible_family(mount_root, manifest, SegmentKind::Doc)?
         {
             return Err(
                 "current store generation has manifest-visible documents but no matching vector segment; publish vectors before runtime vector search"
                     .to_owned(),
             );
+        }
+        if vector_segment.is_none() && document_vectors_path.is_none() {
+            return Err("document_vectors file missing from manifest".to_owned());
         }
         let doc_count = vector_segment
             .as_ref()
@@ -532,6 +534,7 @@ impl VectorLane {
         mode: VectorQueryMode,
         auto_force_exact: bool,
     ) -> Result<Vec<String>, String> {
+        let limit = self.effective_limit(limit);
         if limit == 0 || self.dimensions == 0 {
             return Ok(Vec::new());
         }
@@ -563,6 +566,7 @@ impl VectorLane {
         mode: VectorQueryMode,
         auto_force_exact: bool,
     ) -> SearchPhaseProfile {
+        let limit = self.effective_limit(limit);
         if limit == 0 || self.dimensions == 0 {
             return SearchPhaseProfile {
                 selected_mode: self.resolve_runtime_query_mode(
@@ -738,6 +742,7 @@ impl VectorLane {
     }
 
     fn prime_followup_mode(&mut self, limit: usize, mode: VectorQueryMode) -> Result<(), String> {
+        let limit = self.effective_limit(limit);
         let selected_mode = self.resolve_query_mode(limit, mode);
         self.backend_for_mode(selected_mode).warmup(self)
     }
@@ -833,6 +838,7 @@ impl VectorLane {
         limit: usize,
         scores: impl IntoIterator<Item = (usize, f32)>,
     ) -> Vec<(usize, f32)> {
+        let limit = self.effective_limit(limit);
         if limit == 0 {
             return Vec::new();
         }
@@ -856,6 +862,10 @@ impl VectorLane {
             score,
             doc_id: self.doc_id_bytes(index).to_vec(),
         }
+    }
+
+    fn effective_limit(&self, limit: usize) -> usize {
+        limit.min(self.skeleton_header.doc_count as usize)
     }
 
     fn compare_hits(&self, left: (usize, f32), right: (usize, f32)) -> std::cmp::Ordering {
@@ -936,17 +946,17 @@ fn auto_exact_fallback_doc_count(_limit: usize) -> usize {
 
 fn load_vector_lane_skeleton(metadata: &VectorLaneMetadata) -> Result<ByteStorage, String> {
     if let Some(path) = metadata.vector_lane_skeleton_path.as_ref() {
-        return map_read_only(&path).map(ByteStorage::Mapped);
+        return map_read_only(path).map(ByteStorage::Mapped);
     }
 
     let doc_ids = if let Some(document_ids_path) = metadata.document_ids_path.as_ref() {
-        load_document_ids(&document_ids_path)?
+        load_document_ids(document_ids_path)?
     } else {
         let documents_path = metadata
             .documents_path
             .as_ref()
             .ok_or_else(|| "documents file missing from manifest".to_owned())?;
-        load_document_ids_from_documents(&documents_path).map_err(docstore_error)?
+        load_document_ids_from_documents(documents_path).map_err(docstore_error)?
     };
     Ok(ByteStorage::Owned(build_vector_lane_skeleton(
         &doc_ids,
@@ -968,8 +978,11 @@ struct BinaryVectorSegmentLayout {
     preview_vectors_range: Option<Range<usize>>,
 }
 
-fn resolve_store_vector_segment(mount_root: &Path) -> Result<Option<StoreVectorSegment>, String> {
-    let store_path = mount_root.join("store.wax");
+fn resolve_store_vector_segment(
+    mount_root: &Path,
+    manifest: &DatasetPackManifest,
+) -> Result<Option<StoreVectorSegment>, String> {
+    let store_path = store_path_from_manifest(mount_root, manifest);
     if !store_path.exists() {
         return Ok(None);
     }
@@ -1009,9 +1022,10 @@ fn resolve_store_vector_segment(mount_root: &Path) -> Result<Option<StoreVectorS
 
 fn store_has_manifest_visible_family(
     mount_root: &Path,
+    manifest: &DatasetPackManifest,
     family: SegmentKind,
 ) -> Result<bool, String> {
-    let store_path = mount_root.join("store.wax");
+    let store_path = store_path_from_manifest(mount_root, manifest);
     if !store_path.exists() {
         return Ok(false);
     }
@@ -1021,6 +1035,21 @@ fn store_has_manifest_visible_family(
         .segments
         .iter()
         .any(|segment| segment.family == family))
+}
+
+fn store_path_from_manifest(mount_root: &Path, manifest: &DatasetPackManifest) -> PathBuf {
+    manifest
+        .files
+        .iter()
+        .find(|file| file.kind == "store")
+        .or_else(|| {
+            manifest
+                .files
+                .iter()
+                .find(|file| file.kind == "prebuilt_store")
+        })
+        .map(|file| mount_root.join(&file.path))
+        .unwrap_or_else(|| mount_root.join("store.wax"))
 }
 
 fn load_vector_segment(
@@ -1065,7 +1094,11 @@ fn load_compatibility_vector_payloads(
     metadata: &VectorLaneMetadata,
 ) -> Result<LoadedVectorPayloads, String> {
     let doc_ids = load_vector_lane_skeleton(metadata)?;
-    let doc_vectors = ByteStorage::Mapped(map_read_only(&metadata.document_vectors_path)?);
+    let document_vectors_path = metadata
+        .document_vectors_path
+        .as_ref()
+        .ok_or_else(|| "document_vectors file missing from manifest".to_owned())?;
+    let doc_vectors = ByteStorage::Mapped(map_read_only(document_vectors_path)?);
     validate_document_vectors(
         doc_vectors.as_slice(),
         metadata.dimensions,
@@ -1177,8 +1210,11 @@ pub fn load_compatibility_raw_vectors(
             .ok_or_else(|| "documents file missing from manifest".to_owned())?;
         load_document_ids_from_documents(documents_path).map_err(docstore_error)?
     };
-    let exact_vectors =
-        fs::read(&metadata.document_vectors_path).map_err(|error| error.to_string())?;
+    let document_vectors_path = metadata
+        .document_vectors_path
+        .as_ref()
+        .ok_or_else(|| "document_vectors file missing from manifest".to_owned())?;
+    let exact_vectors = fs::read(document_vectors_path).map_err(|error| error.to_string())?;
     validate_document_vectors(&exact_vectors, metadata.dimensions, metadata.doc_count)?;
     if doc_ids.len() != metadata.doc_count {
         return Err("document_ids row count does not match manifest vector_count".to_owned());
@@ -1199,11 +1235,14 @@ pub fn validate_store_segment_against_dataset_pack(
     mount_root: &Path,
     manifest: &DatasetPackManifest,
 ) -> Result<(), String> {
-    let Some(store_segment) = resolve_store_vector_segment(mount_root)? else {
+    let Some(store_segment) = resolve_store_vector_segment(mount_root, manifest)? else {
         return Ok(());
     };
-    let metadata = VectorLaneMetadata::resolve_compatibility(mount_root, manifest)?;
-    if !metadata.document_vectors_path.exists() {
+    let metadata = VectorLaneMetadata::resolve(mount_root, manifest)?;
+    let Some(document_vectors_path) = metadata.document_vectors_path.as_ref() else {
+        return Ok(());
+    };
+    if !document_vectors_path.exists() {
         return Ok(());
     }
 
@@ -1830,6 +1869,11 @@ mod tests {
                 .unwrap(),
             vec!["doc-3", "doc-2"]
         );
+        assert_eq!(
+            lane.search_with_query(&[0.0, 1.0], usize::MAX, VectorQueryMode::ExactFlat, false)
+                .unwrap(),
+            vec!["doc-3", "doc-2", "doc-1"]
+        );
     }
 
     #[test]
@@ -1852,7 +1896,7 @@ mod tests {
         assert_eq!(metadata.doc_count, 3);
         assert_eq!(
             metadata.document_vectors_path,
-            mount_root.join("document_vectors.bin")
+            Some(mount_root.join("document_vectors.bin"))
         );
         assert_eq!(
             metadata.preview_vectors_path,
@@ -2147,7 +2191,7 @@ mod tests {
             vector_lane_skeleton_path: None,
             documents_path: None,
             document_ids_path: None,
-            document_vectors_path: temp_dir.path().join("unused.bin"),
+            document_vectors_path: None,
             preview_vectors_path: None,
             hnsw_graph_basename: None,
         };

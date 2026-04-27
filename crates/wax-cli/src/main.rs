@@ -2,10 +2,11 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use serde::Deserialize;
 use wax_v2_runtime::{
-    NewDocument, NewDocumentVector, RuntimeSearchMode, RuntimeSearchRequest, RuntimeStore,
+    Memory, MemorySearchOptions, NewDocument, NewDocumentVector, RuntimeSearchMode,
+    RuntimeSearchRequest, RuntimeStore,
 };
 
 #[derive(Debug, Parser)]
@@ -30,9 +31,25 @@ enum Command {
         #[arg(long)]
         root: PathBuf,
     },
+    Remember {
+        #[arg(long)]
+        store: PathBuf,
+        text: String,
+    },
+    Recall {
+        #[arg(long)]
+        store: PathBuf,
+        query: String,
+        #[arg(long, default_value_t = 5)]
+        top_k: usize,
+        #[arg(long = "no-preview", action = ArgAction::SetFalse, default_value_t = true)]
+        preview: bool,
+    },
     Search {
         #[arg(long)]
-        root: PathBuf,
+        root: Option<PathBuf>,
+        #[arg(long)]
+        store: Option<PathBuf>,
         #[arg(long)]
         text: String,
         #[arg(long, default_value_t = 5)]
@@ -138,12 +155,63 @@ fn main() -> Result<(), String> {
             runtime.close().map_err(|error| error.to_string())?;
             Ok(())
         }
+        Command::Remember { store, text } => {
+            let mut memory = Memory::open(&store).map_err(|error| error.to_string())?;
+            let doc_id = memory.remember(text).map_err(|error| error.to_string())?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({ "doc_id": doc_id }))
+                    .map_err(|error| error.to_string())?
+            );
+            memory.close().map_err(|error| error.to_string())?;
+            Ok(())
+        }
+        Command::Recall {
+            store,
+            query,
+            top_k,
+            preview,
+        } => {
+            let mut memory = Memory::open_existing(&store).map_err(|error| error.to_string())?;
+            let response = memory
+                .search_with_options(
+                    query,
+                    MemorySearchOptions {
+                        mode: RuntimeSearchMode::Hybrid,
+                        top_k,
+                        include_preview: preview,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            println!("{}", render_hits(response.hits)?);
+            memory.close().map_err(|error| error.to_string())?;
+            Ok(())
+        }
         Command::Search {
             root,
+            store,
             text,
             top_k,
             preview,
         } => {
+            if let Some(store) = store {
+                let mut memory =
+                    Memory::open_existing(&store).map_err(|error| error.to_string())?;
+                let response = memory
+                    .search_with_options(
+                        text,
+                        MemorySearchOptions {
+                            mode: RuntimeSearchMode::Hybrid,
+                            top_k,
+                            include_preview: preview,
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+                println!("{}", render_hits(response.hits)?);
+                memory.close().map_err(|error| error.to_string())?;
+                return Ok(());
+            }
+            let root = root.ok_or_else(|| "search requires --root or --store".to_owned())?;
             let mut runtime = RuntimeStore::open(&root).map_err(|error| error.to_string())?;
             let response = runtime
                 .search(RuntimeSearchRequest {
@@ -154,24 +222,24 @@ fn main() -> Result<(), String> {
                     include_preview: preview,
                 })
                 .map_err(|error| error.to_string())?;
-            let rendered_hits = response
-                .hits
-                .into_iter()
-                .map(|hit| {
-                    serde_json::json!({
-                        "doc_id": hit.doc_id,
-                        "preview": hit.preview,
-                    })
-                })
-                .collect::<Vec<_>>();
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&rendered_hits).map_err(|error| error.to_string())?
-            );
+            println!("{}", render_hits(response.hits)?);
             runtime.close().map_err(|error| error.to_string())?;
             Ok(())
         }
     }
+}
+
+fn render_hits(hits: Vec<wax_v2_runtime::RuntimeSearchHit>) -> Result<String, String> {
+    let rendered_hits = hits
+        .into_iter()
+        .map(|hit| {
+            serde_json::json!({
+                "doc_id": hit.doc_id,
+                "preview": hit.preview,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string_pretty(&rendered_hits).map_err(|error| error.to_string())
 }
 
 fn default_metadata() -> serde_json::Value {

@@ -9,6 +9,87 @@ use wax_v2_core::open_store;
 use wax_v2_runtime::{NewDocument, RuntimeStore};
 
 #[test]
+fn product_cli_remembers_and_recalls_from_single_wax_file() {
+    let store_dir = tempdir().unwrap();
+    let store_path = store_dir.path().join("agent.wax");
+
+    let remember = Command::new("cargo")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args([
+            "run",
+            "-p",
+            "wax-cli",
+            "--",
+            "remember",
+            "--store",
+            store_path.to_str().unwrap(),
+            "The user is building a habit tracker in Rust",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        remember.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&remember.stdout),
+        String::from_utf8_lossy(&remember.stderr)
+    );
+    assert!(store_path.exists());
+
+    let recall = Command::new("cargo")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args([
+            "run",
+            "-p",
+            "wax-cli",
+            "--",
+            "recall",
+            "--store",
+            store_path.to_str().unwrap(),
+            "What is the user building?",
+            "--top-k",
+            "3",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        recall.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&recall.stdout),
+        String::from_utf8_lossy(&recall.stderr)
+    );
+    let stdout = String::from_utf8(recall.stdout).unwrap();
+    assert!(stdout.contains("\"doc_id\": \"mem-0000000000000001\""));
+    assert!(stdout.contains("\"preview\": \"The user is building a habit tracker in Rust\""));
+
+    let recall_without_preview = Command::new("cargo")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args([
+            "run",
+            "-p",
+            "wax-cli",
+            "--",
+            "recall",
+            "--store",
+            store_path.to_str().unwrap(),
+            "What is the user building?",
+            "--top-k",
+            "3",
+            "--no-preview",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        recall_without_preview.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&recall_without_preview.stdout),
+        String::from_utf8_lossy(&recall_without_preview.stderr)
+    );
+    let stdout = String::from_utf8(recall_without_preview.stdout).unwrap();
+    assert!(stdout.contains("\"doc_id\": \"mem-0000000000000001\""));
+    assert!(stdout.contains("\"preview\": null"));
+}
+
+#[test]
 fn product_cli_creates_store_when_create_targets_dataset_root() {
     let dataset_dir = tempdir().unwrap();
     let fixture_root =

@@ -114,7 +114,7 @@ enum TextLaneSource {
 
 impl TextLaneMetadata {
     fn resolve(mount_root: &Path, manifest: &DatasetPackManifest) -> Result<Self, String> {
-        let store_path = mount_root.join("store.wax");
+        let store_path = store_path_from_manifest(mount_root, manifest);
         if store_path.exists() {
             let opened = wax_v2_core::open_store(&store_path).map_err(|error| error.to_string())?;
             let latest_doc_generation = opened
@@ -315,7 +315,7 @@ pub fn validate_store_segment_against_dataset_pack(
     let Some(documents_path) = documents_path_from_manifest(mount_root, manifest) else {
         return Ok(());
     };
-    let store_path = mount_root.join("store.wax");
+    let store_path = store_path_from_manifest(mount_root, manifest);
     if !store_path.exists() {
         return Ok(());
     }
@@ -402,6 +402,21 @@ fn documents_path_from_manifest(
         .find(|file| file.kind == "documents")
         .map(|file| mount_root.join(&file.path))
         .filter(|path| path.exists())
+}
+
+fn store_path_from_manifest(mount_root: &Path, manifest: &DatasetPackManifest) -> PathBuf {
+    manifest
+        .files
+        .iter()
+        .find(|file| file.kind == "store")
+        .or_else(|| {
+            manifest
+                .files
+                .iter()
+                .find(|file| file.kind == "prebuilt_store")
+        })
+        .map(|file| mount_root.join(&file.path))
+        .unwrap_or_else(|| mount_root.join("store.wax"))
 }
 
 fn load_documents_for_text_builder(path: &Path) -> Result<Vec<(String, String)>, String> {
@@ -683,9 +698,7 @@ mod tests {
         .unwrap();
         fs::write(
             temp_dir.path().join("queries.jsonl"),
-            concat!(
-                "{\"query_id\":\"q-001\",\"query_class\":\"keyword\",\"difficulty\":\"easy\",\"query_text\":\"alpha beta\",\"top_k\":2,\"filter_spec\":{},\"preview_expected\":true,\"embedding_available\":false,\"lane_eligibility\":{\"text\":true,\"vector\":false,\"hybrid\":true}}\n",
-            ),
+            "{\"query_id\":\"q-001\",\"query_class\":\"keyword\",\"difficulty\":\"easy\",\"query_text\":\"alpha beta\",\"top_k\":2,\"filter_spec\":{},\"preview_expected\":true,\"embedding_available\":false,\"lane_eligibility\":{\"text\":true,\"vector\":false,\"hybrid\":true}}\n",
         )
         .unwrap();
 
@@ -804,9 +817,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         fs::write(
             temp_dir.path().join("queries.jsonl"),
-            concat!(
-                "{\"query_id\":\"q-filtered\",\"query_class\":\"keyword\",\"difficulty\":\"easy\",\"query_text\":\"alpha\",\"top_k\":2,\"filter_spec\":{\"workspace_id\":\"w1\",\"ignored\":1},\"preview_expected\":true,\"embedding_available\":false,\"lane_eligibility\":{\"text\":true,\"vector\":false,\"hybrid\":false}}\n",
-            ),
+            "{\"query_id\":\"q-filtered\",\"query_class\":\"keyword\",\"difficulty\":\"easy\",\"query_text\":\"alpha\",\"top_k\":2,\"filter_spec\":{\"workspace_id\":\"w1\",\"ignored\":1},\"preview_expected\":true,\"embedding_available\":false,\"lane_eligibility\":{\"text\":true,\"vector\":false,\"hybrid\":false}}\n",
         )
         .unwrap();
 
@@ -840,9 +851,7 @@ mod tests {
         .unwrap();
         fs::write(
             temp_dir.path().join("queries.jsonl"),
-            concat!(
-                "{\"query_id\":\"q-001\",\"query_class\":\"keyword\",\"difficulty\":\"easy\",\"query_text\":\"alpha beta\",\"top_k\":2,\"filter_spec\":{},\"preview_expected\":true,\"embedding_available\":false,\"lane_eligibility\":{\"text\":true,\"vector\":false,\"hybrid\":true}}\n",
-            ),
+            "{\"query_id\":\"q-001\",\"query_class\":\"keyword\",\"difficulty\":\"easy\",\"query_text\":\"alpha beta\",\"top_k\":2,\"filter_spec\":{},\"preview_expected\":true,\"embedding_available\":false,\"lane_eligibility\":{\"text\":true,\"vector\":false,\"hybrid\":true}}\n",
         )
         .unwrap();
         create_empty_store(&store_path).unwrap();
@@ -971,9 +980,7 @@ mod tests {
         .unwrap();
         fs::write(
             temp_dir.path().join("queries.jsonl"),
-            concat!(
-                "{\"query_id\":\"q-001\",\"query_class\":\"keyword\",\"difficulty\":\"easy\",\"query_text\":\"alpha beta\",\"top_k\":2,\"filter_spec\":{},\"preview_expected\":true,\"embedding_available\":false,\"lane_eligibility\":{\"text\":true,\"vector\":false,\"hybrid\":true}}\n",
-            ),
+            "{\"query_id\":\"q-001\",\"query_class\":\"keyword\",\"difficulty\":\"easy\",\"query_text\":\"alpha beta\",\"top_k\":2,\"filter_spec\":{},\"preview_expected\":true,\"embedding_available\":false,\"lane_eligibility\":{\"text\":true,\"vector\":false,\"hybrid\":true}}\n",
         )
         .unwrap();
         create_empty_store(&store_path).unwrap();
