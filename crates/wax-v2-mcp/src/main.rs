@@ -5,6 +5,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use wax_v2_mcp::{McpError, McpRequest, WaxMcpSurface, MAX_MCP_SEARCH_TOP_K};
 
+const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+
 #[derive(Debug)]
 struct JsonRpcRequest {
     jsonrpc: Option<String>,
@@ -99,11 +101,7 @@ struct JsonRpcInvalidRequest {
 }
 
 fn parse_json_rpc_request(value: Value) -> Result<JsonRpcRequest, JsonRpcInvalidRequest> {
-    let id = value
-        .get("id")
-        .cloned()
-        .map(JsonRpcRequestId::Present)
-        .unwrap_or(JsonRpcRequestId::Missing);
+    let id = parse_json_rpc_id(value.get("id"))?;
     let error_id = match &id {
         JsonRpcRequestId::Missing => Value::Null,
         JsonRpcRequestId::Present(id) => id.clone(),
@@ -144,6 +142,20 @@ fn parse_json_rpc_request(value: Value) -> Result<JsonRpcRequest, JsonRpcInvalid
     })
 }
 
+fn parse_json_rpc_id(id: Option<&Value>) -> Result<JsonRpcRequestId, JsonRpcInvalidRequest> {
+    let Some(id) = id else {
+        return Ok(JsonRpcRequestId::Missing);
+    };
+    if id.is_string() || id.is_number() {
+        return Ok(JsonRpcRequestId::Present(id.clone()));
+    }
+    Err(JsonRpcInvalidRequest {
+        id: Value::Null,
+        code: -32600,
+        message: "JSON-RPC id must be a string or number".to_owned(),
+    })
+}
+
 fn handle_json_rpc(
     surface: &mut WaxMcpSurface,
     request: JsonRpcRequest,
@@ -168,19 +180,7 @@ fn handle_json_rpc(
                 return None;
             };
             match request.method.as_str() {
-                "initialize" => Some(JsonRpcResponse::ok(
-                    id,
-                    json!({
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": {
-                            "tools": {}
-                        },
-                        "serverInfo": {
-                            "name": "wax-mcp",
-                            "version": env!("CARGO_PKG_VERSION")
-                        }
-                    }),
-                )),
+                "initialize" => Some(handle_initialize(id, request.params)),
                 "tools/list" => Some(JsonRpcResponse::ok(
                     id,
                     json!({
@@ -228,6 +228,31 @@ fn handle_json_rpc(
             }
         }
     }
+}
+
+fn handle_initialize(id: Value, params: Value) -> JsonRpcResponse {
+    let requested_version = params.get("protocolVersion").and_then(Value::as_str);
+    if requested_version != Some(MCP_PROTOCOL_VERSION) {
+        return JsonRpcResponse::error(
+            id,
+            -32602,
+            format!("unsupported MCP protocolVersion; expected {MCP_PROTOCOL_VERSION}"),
+            None,
+        );
+    }
+    JsonRpcResponse::ok(
+        id,
+        json!({
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "capabilities": {
+                "tools": {}
+            },
+            "serverInfo": {
+                "name": "wax-mcp",
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        }),
+    )
 }
 
 fn handle_tool_call(surface: &mut WaxMcpSurface, id: Value, params: Value) -> JsonRpcResponse {
@@ -423,17 +448,92 @@ mod tests {
     }
 
     #[test]
-    fn json_rpc_explicit_null_id_is_a_request_id() {
+    fn json_rpc_rejects_explicit_null_id() {
+        let error =
+            parse_json_rpc_request(json!({"jsonrpc":"2.0","id":null,"method":"tools/list"}))
+                .unwrap_err();
+
+        assert_eq!(error.id, Value::Null);
+        assert_eq!(error.code, -32600);
+        assert!(error.message.contains("id must be a string or number"));
+    }
+
+    #[test]
+    fn json_rpc_accepts_string_and_number_ids() {
         let mut surface = WaxMcpSurface::default();
         let request =
-            parse_json_rpc_request(json!({"jsonrpc":"2.0","id":null,"method":"tools/list"}))
+            parse_json_rpc_request(json!({"jsonrpc":"2.0","id":"req-1","method":"tools/list"}))
                 .unwrap();
 
-        let response = handle_json_rpc(&mut surface, request).expect("null id request responds");
+        let response = handle_json_rpc(&mut surface, request).expect("string id request responds");
         let encoded = serde_json::to_value(response).unwrap();
 
-        assert_eq!(encoded.get("id"), Some(&Value::Null));
+        assert_eq!(encoded.get("id"), Some(&json!("req-1")));
         assert!(encoded.get("result").is_some());
+
+        let request =
+            parse_json_rpc_request(json!({"jsonrpc":"2.0","id":7,"method":"tools/list"})).unwrap();
+        let response = handle_json_rpc(&mut surface, request).expect("number id request responds");
+        let encoded = serde_json::to_value(response).unwrap();
+
+        assert_eq!(encoded.get("id"), Some(&json!(7)));
+        assert!(encoded.get("result").is_some());
+    }
+
+    #[test]
+    fn json_rpc_rejects_container_ids() {
+        for id in [json!({}), json!([]), json!(true)] {
+            let error =
+                parse_json_rpc_request(json!({"jsonrpc":"2.0","id":id,"method":"tools/list"}))
+                    .unwrap_err();
+
+            assert_eq!(error.id, Value::Null);
+            assert_eq!(error.code, -32600);
+        }
+    }
+
+    #[test]
+    fn initialize_requires_supported_protocol_version() {
+        let mut surface = WaxMcpSurface::default();
+        let request = parse_json_rpc_request(json!({
+            "jsonrpc":"2.0",
+            "id":"init-1",
+            "method":"initialize",
+            "params":{"protocolVersion":"2024-11-05"}
+        }))
+        .unwrap();
+
+        let response = handle_json_rpc(&mut surface, request).expect("initialize responds");
+        let encoded = serde_json::to_value(response).unwrap();
+
+        assert_eq!(
+            encoded.pointer("/result/protocolVersion"),
+            Some(&json!("2024-11-05"))
+        );
+    }
+
+    #[test]
+    fn initialize_rejects_missing_or_unsupported_protocol_version() {
+        let mut surface = WaxMcpSurface::default();
+        for params in [
+            json!({}),
+            json!({"protocolVersion":"2099-01-01"}),
+            json!({"protocolVersion":7}),
+        ] {
+            let request = parse_json_rpc_request(json!({
+                "jsonrpc":"2.0",
+                "id":"init-1",
+                "method":"initialize",
+                "params":params
+            }))
+            .unwrap();
+
+            let response = handle_json_rpc(&mut surface, request).expect("initialize responds");
+            let encoded = serde_json::to_value(response).unwrap();
+
+            assert_eq!(encoded.pointer("/error/code"), Some(&json!(-32602)));
+            assert!(encoded.pointer("/result").is_none());
+        }
     }
 
     #[test]
