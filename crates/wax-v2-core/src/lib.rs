@@ -7,6 +7,10 @@ use std::path::Path;
 use fs2::FileExt;
 use memmap2::{Mmap, MmapOptions};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 
 const FILE_MAGIC: &[u8; 8] = b"RAXWAXV2";
 const MANIFEST_MAGIC: &[u8; 8] = b"RAXMANI1";
@@ -517,7 +521,9 @@ pub fn create_empty_store(path: &Path) -> Result<(), CoreError> {
         ActiveManifest::checksum(&manifest_bytes),
     );
 
-    let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    let mut file = open_no_follow(&mut options, path)?;
     let encoded_superblock = superblock.encode();
     file.write_all(&encoded_superblock)?;
     file.write_all(&encoded_superblock)?;
@@ -529,11 +535,13 @@ pub fn create_empty_store(path: &Path) -> Result<(), CoreError> {
 }
 
 pub fn open_store(path: &Path) -> Result<OpenedStore, CoreError> {
-    let mut file = OpenOptions::new().read(true).open(path)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    let mut file = open_no_follow(&mut options, path)?;
     open_store_from_file(&mut file)
 }
 
-fn open_store_from_file(mut file: &mut OpenOptionsFile) -> Result<OpenedStore, CoreError> {
+fn open_store_from_file(file: &mut OpenOptionsFile) -> Result<OpenedStore, CoreError> {
     let file_length = file.metadata()?.len();
     if file_length < (SUPERBLOCK_SIZE * 2) as u64 {
         return Err(CoreError::UnexpectedLength {
@@ -555,7 +563,7 @@ fn open_store_from_file(mut file: &mut OpenOptionsFile) -> Result<OpenedStore, C
 
     let mut last_error = None;
     for candidate in candidates {
-        match open_store_from_superblock(&mut file, file_length, candidate) {
+        match open_store_from_superblock(file, file_length, candidate) {
             Ok(opened) => return Ok(opened),
             Err(error) => last_error = Some(error),
         }
@@ -611,7 +619,9 @@ where
         ));
     }
 
-    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
+    let mut file = open_no_follow(&mut options, path)?;
     file.try_lock_exclusive()?;
 
     let opened = open_store_from_file(&mut file)?;
@@ -711,7 +721,9 @@ pub fn map_segment_object(
     path: &Path,
     descriptor: &SegmentDescriptor,
 ) -> Result<SegmentObject, CoreError> {
-    let file = OpenOptions::new().read(true).open(path)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    let file = open_no_follow(&mut options, path)?;
     let file_length = file.metadata()?.len();
     let object_end = descriptor
         .object_offset
@@ -722,7 +734,11 @@ pub fn map_segment_object(
             "segment object range extends past end of file".to_owned(),
         ));
     }
-    if descriptor.object_offset % DEFAULT_OBJECT_ALIGNMENT != 0 {
+    if descriptor
+        .object_offset
+        .checked_rem(DEFAULT_OBJECT_ALIGNMENT)
+        != Some(0)
+    {
         return Err(CoreError::InvalidManifest(
             "segment object offset must use store object alignment".to_owned(),
         ));
@@ -919,6 +935,19 @@ fn write_zero_padding(file: &mut OpenOptionsFile, target_offset: u64) -> Result<
 }
 
 type OpenOptionsFile = std::fs::File;
+
+fn open_no_follow(options: &mut OpenOptions, path: &Path) -> Result<OpenOptionsFile, CoreError> {
+    #[cfg(unix)]
+    {
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path).map_err(CoreError::from)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AppendedObject {
@@ -1394,6 +1423,20 @@ mod tests {
         std::fs::write(&path, b"existing").expect("seed existing file");
 
         let error = create_empty_store(&path).expect_err("existing store path should fail");
+        assert!(matches!(error, CoreError::Io(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_store_rejects_symlink_leaf_paths() {
+        let temp_dir = tempdir().expect("tempdir");
+        let target = temp_dir.path().join("target.wax");
+        let link = temp_dir.path().join("link.wax");
+        create_empty_store(&target).expect("store should be created");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink should be created");
+
+        let error = open_store(&link).expect_err("symlink store path should fail");
+
         assert!(matches!(error, CoreError::Io(_)));
     }
 

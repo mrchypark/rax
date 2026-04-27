@@ -1244,7 +1244,9 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tempfile",
  "wax-v2-broker",
+ "wax-v2-runtime",
 ]
 
 [[package]]

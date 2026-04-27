@@ -25,7 +25,7 @@ fn mcp_surface_ingests_documents_and_vectors_through_explicit_raw_requests() {
     let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
     runtime.close().unwrap();
 
-    let mut mcp = WaxMcpSurface::with_allowed_root(dataset_dir.path()).unwrap();
+    let mut mcp = WaxMcpSurface::with_allowed_root_and_raw_sessions(dataset_dir.path()).unwrap();
     let open = mcp
         .handle(McpRequest::OpenSession {
             root: dataset_dir.path().display().to_string(),

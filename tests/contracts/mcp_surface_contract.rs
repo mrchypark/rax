@@ -21,7 +21,7 @@ fn mcp_surface_opens_session_and_searches_text_through_tool_boundary() {
     ))
     .unwrap();
 
-    let mut mcp = WaxMcpSurface::with_allowed_root(dataset_dir.path()).unwrap();
+    let mut mcp = WaxMcpSurface::with_allowed_root_and_raw_sessions(dataset_dir.path()).unwrap();
     let open = mcp
         .handle(McpRequest::OpenSession {
             root: dataset_dir.path().display().to_string(),
@@ -60,7 +60,7 @@ fn mcp_surface_rejects_session_roots_outside_allowed_root() {
     let allowed_dir = tempdir().unwrap();
     let outside_dir = tempdir().unwrap();
 
-    let mut mcp = WaxMcpSurface::with_allowed_root(allowed_dir.path()).unwrap();
+    let mut mcp = WaxMcpSurface::with_allowed_root_and_raw_sessions(allowed_dir.path()).unwrap();
     let error = mcp
         .handle(McpRequest::OpenSession {
             root: outside_dir.path().display().to_string(),
@@ -84,7 +84,7 @@ fn mcp_surface_imports_compatibility_snapshot_then_searches_without_sidecars() {
     ))
     .unwrap();
 
-    let mut mcp = WaxMcpSurface::with_allowed_root(dataset_dir.path()).unwrap();
+    let mut mcp = WaxMcpSurface::with_allowed_root_and_raw_sessions(dataset_dir.path()).unwrap();
     let open = mcp
         .handle(McpRequest::OpenSession {
             root: dataset_dir.path().display().to_string(),
@@ -174,7 +174,7 @@ fn mcp_surface_searches_raw_prepared_store_without_sidecars() {
         }
     }
 
-    let mut mcp = WaxMcpSurface::with_allowed_root(dataset_dir.path()).unwrap();
+    let mut mcp = WaxMcpSurface::with_allowed_root_and_raw_sessions(dataset_dir.path()).unwrap();
     let open = mcp
         .handle(McpRequest::OpenSession {
             root: dataset_dir.path().display().to_string(),
