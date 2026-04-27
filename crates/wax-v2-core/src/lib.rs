@@ -734,9 +734,10 @@ pub fn map_segment_object(
             "segment object range extends past end of file".to_owned(),
         ));
     }
-    if !descriptor
+    if descriptor
         .object_offset
-        .is_multiple_of(DEFAULT_OBJECT_ALIGNMENT)
+        .checked_rem(DEFAULT_OBJECT_ALIGNMENT)
+        != Some(0)
     {
         return Err(CoreError::InvalidManifest(
             "segment object offset must use store object alignment".to_owned(),

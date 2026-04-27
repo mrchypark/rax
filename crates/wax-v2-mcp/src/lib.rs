@@ -418,7 +418,10 @@ impl WaxMcpSurface {
 
     fn authorized_path(&self, path: &str) -> Result<PathBuf, McpError> {
         let path = Path::new(path);
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
         let parent = parent.canonicalize().map_err(|error| McpError {
             code: McpErrorCode::InvalidRequest,
             message: error.to_string(),
@@ -677,6 +680,16 @@ mod tests {
             hits[0].preview.as_deref(),
             Some("The user is building a habit tracker in Rust")
         );
+    }
+
+    #[test]
+    fn mcp_surface_authorizes_simple_relative_store_path_under_current_allowed_root() {
+        let allowed_root = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let surface = WaxMcpSurface::with_allowed_root(&allowed_root).unwrap();
+
+        let authorized = surface.authorized_path("agent.wax").unwrap();
+
+        assert_eq!(authorized, allowed_root.join("agent.wax"));
     }
 
     #[test]

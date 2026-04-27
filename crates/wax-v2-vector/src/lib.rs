@@ -1180,6 +1180,46 @@ pub fn prepare_raw_vector_segment(
     })
 }
 
+pub fn load_runtime_raw_vectors(
+    mount_root: &Path,
+    manifest: &DatasetPackManifest,
+) -> Result<Vec<(String, Vec<f32>)>, String> {
+    let metadata = VectorLaneMetadata::resolve(mount_root, manifest)?;
+    if let Some(segment) = metadata.vector_segment.as_ref() {
+        let bytes = wax_v2_core::read_segment_object(&segment.store_path, &segment.descriptor)
+            .map_err(|error| error.to_string())?;
+        let segment = BinaryVectorSegment::decode(&bytes)?;
+        if segment.dimensions != metadata.dimensions {
+            return Err("vector segment dimensions do not match manifest".to_owned());
+        }
+        return raw_vectors_from_binary_segment(segment);
+    }
+    load_compatibility_raw_vectors(mount_root, manifest)
+}
+
+fn raw_vectors_from_binary_segment(
+    segment: BinaryVectorSegment,
+) -> Result<Vec<(String, Vec<f32>)>, String> {
+    validate_document_vectors(
+        &segment.exact_vectors,
+        segment.dimensions,
+        segment.doc_ids.len(),
+    )?;
+    Ok(segment
+        .doc_ids
+        .into_iter()
+        .enumerate()
+        .map(|(index, doc_id)| {
+            let start = index * segment.dimensions * 4;
+            let end = start + segment.dimensions * 4;
+            (
+                doc_id,
+                decode_f32le_slice(&segment.exact_vectors[start..end]),
+            )
+        })
+        .collect())
+}
+
 fn load_document_ids(path: &Path) -> Result<Vec<String>, String> {
     let file = File::open(path).map_err(|error| error.to_string())?;
     let reader = BufReader::new(file);

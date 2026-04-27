@@ -956,16 +956,16 @@ impl Memory {
         let loaded = load_all_runtime_documents(&mut self.runtime)?;
         let mut documents = loaded.documents;
         let doc_id = next_memory_doc_id(&documents);
+        let mut vectors =
+            load_memory_vectors_or_embed(&self.runtime, &documents, self.embedding_dimensions)?;
         documents.push(NewDocument::new(doc_id.clone(), text).with_metadata(metadata));
-        let vectors = documents
-            .iter()
-            .map(|document| {
-                NewDocumentVector::new(
-                    document.doc_id.clone(),
-                    wax_bench_model::embed_text(&document.text, self.embedding_dimensions as u32),
-                )
-            })
-            .collect::<Vec<_>>();
+        let new_document = documents
+            .last()
+            .expect("new memory document was just appended");
+        vectors.push(NewDocumentVector::new(
+            new_document.doc_id.clone(),
+            wax_bench_model::embed_text(&new_document.text, self.embedding_dimensions as u32),
+        ));
         let store_path = self.runtime.store_path();
         self.runtime
             .writer()?
@@ -1072,6 +1072,47 @@ fn load_all_runtime_documents(
         store_generation,
         documents,
     })
+}
+
+fn load_memory_vectors_or_embed(
+    store: &RuntimeStore,
+    documents: &[NewDocument],
+    embedding_dimensions: usize,
+) -> Result<Vec<NewDocumentVector>, RuntimeError> {
+    if documents.is_empty() {
+        return Ok(Vec::new());
+    }
+    let raw_vectors = match wax_v2_vector::load_runtime_raw_vectors(&store.root, &store.manifest) {
+        Ok(vectors) => vectors,
+        Err(_) => {
+            return Ok(documents
+                .iter()
+                .map(|document| {
+                    NewDocumentVector::new(
+                        document.doc_id.clone(),
+                        wax_bench_model::embed_text(&document.text, embedding_dimensions as u32),
+                    )
+                })
+                .collect());
+        }
+    };
+    let mut vectors_by_doc_id = raw_vectors
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+    documents
+        .iter()
+        .map(|document| {
+            vectors_by_doc_id
+                .remove(&document.doc_id)
+                .map(|values| NewDocumentVector::new(document.doc_id.clone(), values))
+                .ok_or_else(|| {
+                    RuntimeError::Storage(format!(
+                        "stored document id {} has no persisted vector payload",
+                        document.doc_id
+                    ))
+                })
+        })
+        .collect()
 }
 
 fn next_memory_doc_id(documents: &[NewDocument]) -> String {
@@ -1407,6 +1448,7 @@ fn read_manifest(root: &Path) -> Result<DatasetPackManifest, RuntimeError> {
 fn product_store_root(path: &Path) -> Result<PathBuf, RuntimeError> {
     Ok(path
         .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(".")))
 }
@@ -1559,7 +1601,7 @@ fn docstore_error(error: wax_v2_docstore::DocstoreError) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use serde_json::json;
     use tempfile::tempdir;
@@ -1634,6 +1676,41 @@ mod tests {
         assert_eq!(
             results.hits[0].preview.as_deref(),
             Some("concurrent memory from another handle")
+        );
+    }
+
+    #[test]
+    fn memory_save_reuses_existing_vectors_when_appending() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("agent.wax");
+        let mut memory = Memory::open(&store_path).unwrap();
+
+        let first_doc_id = memory.remember("alpha first").unwrap();
+        memory
+            .runtime
+            .writer()
+            .unwrap()
+            .publish_raw_vectors(vec![NewDocumentVector::new(
+                first_doc_id.clone(),
+                test_vector(42.0),
+            )])
+            .unwrap();
+        let second_doc_id = memory.remember("beta second").unwrap();
+
+        let vectors =
+            wax_v2_vector::load_runtime_raw_vectors(&memory.runtime.root, &memory.runtime.manifest)
+                .unwrap()
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(vectors[&first_doc_id][0], 42.0);
+        assert_ne!(vectors[&second_doc_id][0], 42.0);
+    }
+
+    #[test]
+    fn product_store_root_defaults_simple_relative_paths_to_current_directory() {
+        assert_eq!(
+            super::product_store_root(Path::new("agent.wax")).unwrap(),
+            PathBuf::from(".")
         );
     }
 

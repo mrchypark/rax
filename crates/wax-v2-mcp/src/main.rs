@@ -40,6 +40,13 @@ struct JsonRpcError {
     data: Option<Value>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum JsonRpcMessageResponse {
+    Single(JsonRpcResponse),
+    Batch(Vec<JsonRpcResponse>),
+}
+
 fn main() {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -49,7 +56,7 @@ fn main() {
             Err(error) => {
                 let _ = write_response(
                     &mut stdout,
-                    JsonRpcResponse::from_mcp_error(Value::Null, error),
+                    JsonRpcResponse::from_mcp_error(Value::Null, error).into(),
                 );
                 return;
             }
@@ -64,28 +71,17 @@ fn main() {
             Err(error) => {
                 let _ = write_response(
                     &mut stdout,
-                    JsonRpcResponse::error(Value::Null, -32000, error.to_string(), None),
+                    JsonRpcResponse::error(Value::Null, -32000, error.to_string(), None).into(),
                 );
                 continue;
             }
         };
 
         let response = match serde_json::from_str::<Value>(&line) {
-            Ok(value) => match parse_json_rpc_request(value) {
-                Ok(request) => handle_json_rpc(&mut surface, request),
-                Err(error) => Some(JsonRpcResponse::error(
-                    error.id,
-                    error.code,
-                    error.message,
-                    None,
-                )),
-            },
-            Err(error) => Some(JsonRpcResponse::error(
-                Value::Null,
-                -32700,
-                error.to_string(),
-                None,
-            )),
+            Ok(value) => handle_json_rpc_message(&mut surface, value),
+            Err(error) => {
+                Some(JsonRpcResponse::error(Value::Null, -32700, error.to_string(), None).into())
+            }
         };
         if let Some(response) = response {
             let _ = write_response(&mut stdout, response);
@@ -154,6 +150,48 @@ fn parse_json_rpc_id(id: Option<&Value>) -> Result<JsonRpcRequestId, JsonRpcInva
         code: -32600,
         message: "JSON-RPC id must be a string or number".to_owned(),
     })
+}
+
+fn handle_json_rpc_message(
+    surface: &mut WaxMcpSurface,
+    value: Value,
+) -> Option<JsonRpcMessageResponse> {
+    if let Some(items) = value.as_array() {
+        if items.is_empty() {
+            return Some(
+                JsonRpcResponse::error(
+                    Value::Null,
+                    -32600,
+                    "JSON-RPC batch must not be empty".to_owned(),
+                    None,
+                )
+                .into(),
+            );
+        }
+        let responses = items
+            .iter()
+            .filter_map(|item| handle_json_rpc_value(surface, item.clone()))
+            .collect::<Vec<_>>();
+        if responses.is_empty() {
+            None
+        } else {
+            Some(JsonRpcMessageResponse::Batch(responses))
+        }
+    } else {
+        handle_json_rpc_value(surface, value).map(Into::into)
+    }
+}
+
+fn handle_json_rpc_value(surface: &mut WaxMcpSurface, value: Value) -> Option<JsonRpcResponse> {
+    match parse_json_rpc_request(value) {
+        Ok(request) => handle_json_rpc(surface, request),
+        Err(error) => Some(JsonRpcResponse::error(
+            error.id,
+            error.code,
+            error.message,
+            None,
+        )),
+    }
 }
 
 fn handle_json_rpc(
@@ -371,10 +409,16 @@ fn optional_bool(arguments: &Value, key: &str, default: bool) -> Result<bool, Mc
         .unwrap_or(Ok(default))
 }
 
-fn write_response(stdout: &mut io::Stdout, response: JsonRpcResponse) -> io::Result<()> {
+fn write_response(stdout: &mut io::Stdout, response: JsonRpcMessageResponse) -> io::Result<()> {
     serde_json::to_writer(&mut *stdout, &response)?;
     stdout.write_all(b"\n")?;
     stdout.flush()
+}
+
+impl From<JsonRpcResponse> for JsonRpcMessageResponse {
+    fn from(response: JsonRpcResponse) -> Self {
+        Self::Single(response)
+    }
 }
 
 impl JsonRpcResponse {
@@ -413,7 +457,8 @@ impl JsonRpcResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        handle_json_rpc, parse_json_rpc_request, JsonRpcRequest, JsonRpcRequestId, JsonRpcResponse,
+        handle_json_rpc, handle_json_rpc_message, parse_json_rpc_request, JsonRpcMessageResponse,
+        JsonRpcRequest, JsonRpcRequestId, JsonRpcResponse,
     };
     use serde_json::{json, Value};
     use wax_v2_mcp::WaxMcpSurface;
@@ -490,6 +535,51 @@ mod tests {
             assert_eq!(error.id, Value::Null);
             assert_eq!(error.code, -32600);
         }
+    }
+
+    #[test]
+    fn json_rpc_batch_returns_responses_for_requests_only() {
+        let mut surface = WaxMcpSurface::default();
+        let response = handle_json_rpc_message(
+            &mut surface,
+            json!([
+                {"jsonrpc":"2.0","id":"list","method":"tools/list"},
+                {"jsonrpc":"2.0","method":"notifications/initialized"},
+                {"jsonrpc":"2.0","id":{},"method":"tools/list"}
+            ]),
+        )
+        .expect("batch has request responses");
+        let JsonRpcMessageResponse::Batch(responses) = response else {
+            panic!("expected batch response");
+        };
+
+        assert_eq!(responses.len(), 2);
+        let encoded = serde_json::to_value(responses).unwrap();
+        assert_eq!(encoded.pointer("/0/id"), Some(&json!("list")));
+        assert_eq!(encoded.pointer("/1/id"), Some(&Value::Null));
+        assert_eq!(encoded.pointer("/1/error/code"), Some(&json!(-32600)));
+    }
+
+    #[test]
+    fn json_rpc_notification_only_batch_has_no_response() {
+        let mut surface = WaxMcpSurface::default();
+        let response = handle_json_rpc_message(
+            &mut surface,
+            json!([{"jsonrpc":"2.0","method":"notifications/initialized"}]),
+        );
+
+        assert!(response.is_none());
+    }
+
+    #[test]
+    fn json_rpc_empty_batch_is_invalid_request() {
+        let mut surface = WaxMcpSurface::default();
+        let response =
+            handle_json_rpc_message(&mut surface, json!([])).expect("empty batch responds");
+        let encoded = serde_json::to_value(response).unwrap();
+
+        assert_eq!(encoded.pointer("/id"), Some(&Value::Null));
+        assert_eq!(encoded.pointer("/error/code"), Some(&json!(-32600)));
     }
 
     #[test]
