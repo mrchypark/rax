@@ -1,9 +1,10 @@
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
+use serde_json::Value;
 use wax_bench_model::{tokenize, DatasetPackManifest};
 use wax_v2_core::{PendingSegmentDescriptor, PendingSegmentWrite, SegmentDescriptor, SegmentKind};
 
@@ -32,7 +33,7 @@ pub struct TextBatchQuery {
 
 impl TextBatchQuery {
     pub fn load_jsonl(path: &Path) -> Result<Vec<Self>, String> {
-        BufReader::new(File::open(path).map_err(|error| error.to_string())?)
+        BufReader::new(open_read_no_symlinks(path)?)
             .lines()
             .filter_map(|line| match line {
                 Ok(line) if line.trim().is_empty() => None,
@@ -97,7 +98,6 @@ pub struct TextLaneEligibility {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TextLaneMetadata {
-    indexed_doc_count: usize,
     source: TextLaneSource,
 }
 
@@ -114,16 +114,24 @@ enum TextLaneSource {
 
 impl TextLaneMetadata {
     fn resolve(mount_root: &Path, manifest: &DatasetPackManifest) -> Result<Self, String> {
-        let store_path = store_path_from_manifest(mount_root, manifest);
+        let store_path = store_path_from_manifest(mount_root, manifest)?;
+        Self::resolve_with_store_path(mount_root, manifest, &store_path)
+    }
+
+    fn resolve_with_store_path(
+        mount_root: &Path,
+        manifest: &DatasetPackManifest,
+        store_path: &Path,
+    ) -> Result<Self, String> {
         if store_path.exists() {
-            let opened = wax_v2_core::open_store(&store_path).map_err(|error| error.to_string())?;
-            let latest_doc_generation = opened
+            let opened = wax_v2_core::open_store(store_path).map_err(|error| error.to_string())?;
+            let latest_doc_descriptor = opened
                 .manifest
                 .segments
                 .iter()
                 .filter(|segment| segment.family == SegmentKind::Doc)
                 .max_by_key(|segment| (segment.segment_generation, segment.object_offset))
-                .map(|segment| segment.segment_generation);
+                .cloned();
             if let Some(descriptor) = opened
                 .manifest
                 .segments
@@ -132,23 +140,37 @@ impl TextLaneMetadata {
                 .max_by_key(|segment| (segment.segment_generation, segment.object_offset))
                 .cloned()
             {
-                if let Some(doc_generation) = latest_doc_generation {
-                    if descriptor.segment_generation < doc_generation {
-                        return Err(
-                            "latest text segment is stale relative to the current document generation; republish text before runtime text search"
-                                .to_owned(),
-                        );
-                    }
+                let Some(doc_descriptor) = latest_doc_descriptor.as_ref() else {
+                    return Err(
+                        "store-backed text segment requires a matching document segment; republish documents and text before runtime text search"
+                            .to_owned(),
+                    );
+                };
+                if descriptor.segment_generation < doc_descriptor.segment_generation {
+                    return Err(
+                        "latest text segment is stale relative to the current document generation; republish text before runtime text search"
+                            .to_owned(),
+                    );
                 }
+                if !same_active_doc_coverage(&descriptor, doc_descriptor) {
+                    return Err(
+                        "latest text segment does not cover the active document segment; republish text before runtime text search"
+                            .to_owned(),
+                    );
+                }
+                validate_text_segment_against_store_doc_descriptor(
+                    store_path,
+                    &descriptor,
+                    doc_descriptor,
+                )?;
                 return Ok(Self {
-                    indexed_doc_count: manifest.corpus.doc_count as usize,
                     source: TextLaneSource::Store {
-                        store_path,
+                        store_path: store_path.to_path_buf(),
                         descriptor,
                     },
                 });
             }
-            if latest_doc_generation.is_some() {
+            if latest_doc_descriptor.is_some() {
                 return Err(
                     "current store generation has manifest-visible documents but no matching text segment; publish text before runtime text search"
                         .to_owned(),
@@ -157,7 +179,6 @@ impl TextLaneMetadata {
         }
 
         Ok(Self {
-            indexed_doc_count: manifest.corpus.doc_count as usize,
             source: TextLaneSource::Compatibility {
                 postings_path: compatibility_postings_path(mount_root, manifest)?,
             },
@@ -175,8 +196,8 @@ impl TextQueryInputs {
         let query_paths = manifest
             .query_sets
             .iter()
-            .map(|query_set| mount_root.join(&query_set.path))
-            .collect::<Vec<_>>();
+            .map(|query_set| manifest_query_set_path(mount_root, &query_set.path))
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Self { query_paths })
     }
@@ -185,6 +206,23 @@ impl TextQueryInputs {
 impl TextLane {
     pub fn load(mount_root: &Path, manifest: &DatasetPackManifest) -> Result<Self, String> {
         let metadata = TextLaneMetadata::resolve(mount_root, manifest)?;
+        Self::load_with_metadata(mount_root, manifest, metadata)
+    }
+
+    pub fn load_with_store_path(
+        mount_root: &Path,
+        manifest: &DatasetPackManifest,
+        store_path: &Path,
+    ) -> Result<Self, String> {
+        let metadata = TextLaneMetadata::resolve_with_store_path(mount_root, manifest, store_path)?;
+        Self::load_with_metadata(mount_root, manifest, metadata)
+    }
+
+    fn load_with_metadata(
+        mount_root: &Path,
+        manifest: &DatasetPackManifest,
+        metadata: TextLaneMetadata,
+    ) -> Result<Self, String> {
         let query_inputs = TextQueryInputs::resolve(mount_root, manifest)?;
         let (first_text_query, first_text_top_k) =
             load_first_text_query(&query_inputs.query_paths)?;
@@ -252,9 +290,67 @@ pub fn publish_compatibility_text_segment(
     manifest: &DatasetPackManifest,
     store_path: &Path,
 ) -> Result<(), String> {
-    let prepared = prepare_compatibility_text_segment(mount_root, manifest)?;
-    wax_v2_core::publish_segment(store_path, prepared.descriptor, &prepared.object_bytes)
-        .map_err(|error| error.to_string())?;
+    let opened = wax_v2_core::open_store(store_path).map_err(|error| error.to_string())?;
+    let expected_generation = opened.manifest.generation;
+    let expected_doc_descriptor = active_doc_descriptor(&opened.manifest);
+    if let Some(descriptor) = expected_doc_descriptor.as_ref() {
+        wax_v2_docstore::validate_store_doc_descriptor_against_dataset_pack(
+            store_path, descriptor, mount_root, manifest,
+        )
+        .map_err(docstore_error)?;
+    }
+    let (prepared, doc_pending) = if let Some(descriptor) = expected_doc_descriptor.as_ref() {
+        let documents = wax_v2_docstore::load_store_ordered_documents(store_path, descriptor)
+            .map_err(docstore_error)?;
+        let mut prepared = prepare_text_segment_from_document_values(&documents)?;
+        align_pending_descriptor_to_doc_range(
+            &mut prepared.descriptor,
+            descriptor.doc_id_start,
+            descriptor.doc_id_end_exclusive,
+            descriptor.live_items,
+        );
+        (prepared, None)
+    } else if documents_path_from_manifest(mount_root, manifest)?.is_some() {
+        let documents = wax_v2_docstore::load_dataset_ordered_documents(mount_root, manifest)
+            .map_err(docstore_error)?;
+        let doc_pending =
+            wax_v2_docstore::prepare_raw_documents_segment(store_path, documents.clone())
+                .map_err(docstore_error)?;
+        let mut prepared = prepare_text_segment_from_document_values(&documents)?;
+        align_pending_descriptor_to_doc_range(
+            &mut prepared.descriptor,
+            doc_pending.descriptor.doc_id_start,
+            doc_pending.descriptor.doc_id_end_exclusive,
+            doc_pending.descriptor.live_items,
+        );
+        (prepared, Some(doc_pending))
+    } else {
+        (
+            prepare_compatibility_text_segment(mount_root, manifest)?,
+            None,
+        )
+    };
+    let pending_segments = doc_pending
+        .into_iter()
+        .chain(std::iter::once(prepared))
+        .collect::<Vec<_>>();
+    wax_v2_core::publish_segments_with_precondition(store_path, pending_segments, |manifest| {
+        if manifest.generation != expected_generation {
+            return Err(wax_v2_core::CoreError::PublishPreconditionFailed(
+                format!(
+                    "store generation changed during text publish: expected {expected_generation}, found {}",
+                    manifest.generation
+                ),
+            ));
+        }
+        if active_doc_descriptor(manifest) != expected_doc_descriptor {
+            return Err(wax_v2_core::CoreError::PublishPreconditionFailed(
+                "store doc segment changed during text publish".to_owned(),
+            ));
+        }
+        Ok(())
+    })
+    .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -266,7 +362,8 @@ pub fn prepare_compatibility_text_segment(
         .files
         .iter()
         .find(|file| file.kind == "documents")
-        .map(|file| mount_root.join(&file.path))
+        .map(|file| manifest_file_path(mount_root, file))
+        .transpose()?
         .ok_or_else(|| "documents file missing from manifest".to_owned())?;
     let documents = load_documents_for_text_builder(&documents_path)?;
     prepare_text_segment_from_documents(&documents)
@@ -280,6 +377,23 @@ pub fn prepare_text_segment_from_documents(
             .iter()
             .map(|(doc_id, text)| (doc_id.as_str(), text.as_str())),
     )
+}
+
+fn prepare_text_segment_from_document_values(
+    documents: &[(String, Value)],
+) -> Result<PendingSegmentWrite, String> {
+    let documents = documents
+        .iter()
+        .map(|(doc_id, document)| {
+            let text = document
+                .as_object()
+                .and_then(|object| object.get("text"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("document {doc_id} missing text"))?;
+            Ok((doc_id.as_str(), text))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    prepare_text_segment_from_document_refs(documents)
 }
 
 pub fn prepare_text_segment_from_document_refs<'a, I>(
@@ -308,19 +422,38 @@ where
     })
 }
 
+fn align_pending_descriptor_to_doc_range(
+    descriptor: &mut PendingSegmentDescriptor,
+    doc_id_start: u64,
+    doc_id_end_exclusive: u64,
+    live_items: u64,
+) {
+    descriptor.doc_id_start = doc_id_start;
+    descriptor.doc_id_end_exclusive = doc_id_end_exclusive;
+    descriptor.live_items = live_items;
+}
+
 pub fn validate_store_segment_against_dataset_pack(
     mount_root: &Path,
     manifest: &DatasetPackManifest,
 ) -> Result<(), String> {
-    let Some(documents_path) = documents_path_from_manifest(mount_root, manifest) else {
+    let store_path = store_path_from_manifest(mount_root, manifest)?;
+    validate_store_segment_against_dataset_pack_with_store_path(&store_path, mount_root, manifest)
+}
+
+pub fn validate_store_segment_against_dataset_pack_with_store_path(
+    store_path: &Path,
+    mount_root: &Path,
+    manifest: &DatasetPackManifest,
+) -> Result<(), String> {
+    let Some(documents_path) = documents_path_from_manifest(mount_root, manifest)? else {
         return Ok(());
     };
-    let store_path = store_path_from_manifest(mount_root, manifest);
     if !store_path.exists() {
         return Ok(());
     }
 
-    let opened = wax_v2_core::open_store(&store_path).map_err(|error| error.to_string())?;
+    let opened = wax_v2_core::open_store(store_path).map_err(|error| error.to_string())?;
     let Some(descriptor) = opened
         .manifest
         .segments
@@ -331,7 +464,7 @@ pub fn validate_store_segment_against_dataset_pack(
         return Ok(());
     };
 
-    let bytes = wax_v2_core::map_segment_object(&store_path, descriptor)
+    let bytes = wax_v2_core::map_segment_object(store_path, descriptor)
         .map_err(|error| error.to_string())?;
     let persisted_segment = BinaryTextSegment::decode(&bytes)?;
     let documents = load_documents_for_text_builder(&documents_path)?;
@@ -345,7 +478,7 @@ pub fn validate_store_segment_against_dataset_pack(
 
 fn load_first_text_query(paths: &[PathBuf]) -> Result<(String, usize), String> {
     for path in paths {
-        for line in BufReader::new(File::open(path).map_err(|error| error.to_string())?).lines() {
+        for line in BufReader::new(open_read_no_symlinks(path)?).lines() {
             let line = line.map_err(|error| error.to_string())?;
             if line.trim().is_empty() {
                 continue;
@@ -362,7 +495,7 @@ fn load_first_text_query(paths: &[PathBuf]) -> Result<(String, usize), String> {
 
 fn load_first_hybrid_text_query(paths: &[PathBuf]) -> Result<Option<FirstTextQuery>, String> {
     for path in paths {
-        for line in BufReader::new(File::open(path).map_err(|error| error.to_string())?).lines() {
+        for line in BufReader::new(open_read_no_symlinks(path)?).lines() {
             let line = line.map_err(|error| error.to_string())?;
             if line.trim().is_empty() {
                 continue;
@@ -388,23 +521,28 @@ fn compatibility_postings_path(
         .files
         .iter()
         .find(|file| file.kind == "text_postings")
-        .map(|file| mount_root.join(&file.path))
+        .map(|file| manifest_file_path(mount_root, file))
+        .transpose()?
         .ok_or_else(|| "text_postings file missing from manifest".to_owned())
 }
 
 fn documents_path_from_manifest(
     mount_root: &Path,
     manifest: &DatasetPackManifest,
-) -> Option<PathBuf> {
-    manifest
+) -> Result<Option<PathBuf>, String> {
+    Ok(manifest
         .files
         .iter()
         .find(|file| file.kind == "documents")
-        .map(|file| mount_root.join(&file.path))
-        .filter(|path| path.exists())
+        .map(|file| manifest_file_path(mount_root, file))
+        .transpose()?
+        .filter(|path| path.exists()))
 }
 
-fn store_path_from_manifest(mount_root: &Path, manifest: &DatasetPackManifest) -> PathBuf {
+fn store_path_from_manifest(
+    mount_root: &Path,
+    manifest: &DatasetPackManifest,
+) -> Result<PathBuf, String> {
     manifest
         .files
         .iter()
@@ -415,12 +553,244 @@ fn store_path_from_manifest(mount_root: &Path, manifest: &DatasetPackManifest) -
                 .iter()
                 .find(|file| file.kind == "prebuilt_store")
         })
-        .map(|file| mount_root.join(&file.path))
-        .unwrap_or_else(|| mount_root.join("store.wax"))
+        .map(|file| manifest_file_path(mount_root, file))
+        .unwrap_or_else(|| Ok(mount_root.join("store.wax")))
+}
+
+fn manifest_file_path(
+    mount_root: &Path,
+    file: &wax_bench_model::ManifestFile,
+) -> Result<PathBuf, String> {
+    let path = Path::new(&file.path);
+    if !is_pack_relative_path(path) {
+        return Err(format!(
+            "manifest {} path {} must stay within dataset root",
+            file.kind, file.path
+        ));
+    }
+    root_confined_path(mount_root, path, &file.kind)
+}
+
+fn manifest_query_set_path(mount_root: &Path, path: &str) -> Result<PathBuf, String> {
+    let path = Path::new(path);
+    if !is_pack_relative_path(path) {
+        return Err(format!(
+            "manifest query_set path {} must stay within dataset root",
+            path.display()
+        ));
+    }
+    root_confined_path(mount_root, path, "query_set")
+}
+
+fn is_pack_relative_path(path: &Path) -> bool {
+    !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn root_confined_path(mount_root: &Path, path: &Path, kind: &str) -> Result<PathBuf, String> {
+    if matches!(kind, "store" | "prebuilt_store")
+        && is_stable_fd_table_root(mount_root)
+        && is_single_numeric_path_component(path)
+    {
+        return Ok(mount_root.join(path));
+    }
+    if is_linux_proc_self_fd_root(mount_root) {
+        reject_symlink_components(mount_root, path, kind)?;
+        return Ok(mount_root.join(path));
+    }
+    let Ok(root) = mount_root.canonicalize() else {
+        return Ok(mount_root.join(path));
+    };
+    reject_symlink_components(&root, path, kind)?;
+    let candidate = root.join(path);
+    if candidate.exists() {
+        let canonical = candidate
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        if !canonical.starts_with(&root) {
+            return Err(format!(
+                "manifest {kind} path {} resolves outside dataset root {}",
+                candidate.display(),
+                root.display()
+            ));
+        }
+        return Ok(canonical);
+    }
+    let mut ancestor = candidate.parent();
+    while let Some(path) = ancestor {
+        if path.exists() {
+            let canonical = path.canonicalize().map_err(|error| error.to_string())?;
+            if !canonical.starts_with(&root) {
+                return Err(format!(
+                    "manifest {kind} ancestor {} resolves outside dataset root {}",
+                    path.display(),
+                    root.display()
+                ));
+            }
+            return Ok(candidate);
+        }
+        ancestor = path.parent();
+    }
+    if !candidate.starts_with(&root) {
+        return Err(format!(
+            "manifest {kind} path {} is outside dataset root {}",
+            candidate.display(),
+            root.display()
+        ));
+    }
+    Ok(candidate)
+}
+
+#[cfg(unix)]
+fn is_stable_fd_table_root(path: &Path) -> bool {
+    path_has_absolute_normal_components(path, stable_fd_table_components())
+}
+
+#[cfg(not(unix))]
+fn is_stable_fd_table_root(_path: &Path) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn stable_fd_table_components() -> &'static [&'static str] {
+    &["proc", "self", "fd"]
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn stable_fd_table_components() -> &'static [&'static str] {
+    &["dev", "fd"]
+}
+
+#[cfg(unix)]
+fn path_has_absolute_normal_components(path: &Path, expected_components: &[&str]) -> bool {
+    let mut components = path.components();
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return false;
+    }
+    for expected in expected_components {
+        match components.next() {
+            Some(Component::Normal(component)) if component == *expected => {}
+            _ => return false,
+        }
+    }
+    components.next().is_none()
+}
+
+fn is_single_numeric_path_component(path: &Path) -> bool {
+    let mut components = path.components();
+    let is_numeric = match components.next() {
+        Some(Component::Normal(component)) => component.to_str().is_some_and(|value| {
+            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+        }),
+        _ => false,
+    };
+    is_numeric && components.next().is_none()
+}
+
+#[cfg(target_os = "linux")]
+fn is_linux_proc_self_fd_root(path: &Path) -> bool {
+    let mut components = path.components();
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return false;
+    }
+    for expected in ["proc", "self", "fd"] {
+        match components.next() {
+            Some(Component::Normal(component)) if component == expected => {}
+            _ => return false,
+        }
+    }
+    let has_valid_fd = match components.next() {
+        Some(Component::Normal(fd)) => fd
+            .to_str()
+            .is_some_and(|fd| !fd.is_empty() && fd.bytes().all(|byte| byte.is_ascii_digit())),
+        _ => false,
+    };
+    has_valid_fd && components.next().is_none()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_linux_proc_self_fd_root(_path: &Path) -> bool {
+    false
+}
+
+fn reject_symlink_components(root: &Path, path: &Path, kind: &str) -> Result<(), String> {
+    let mut current = root.to_path_buf();
+    for component in path.components() {
+        let Component::Normal(component) = component else {
+            continue;
+        };
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "manifest {kind} path {} contains a symlink component",
+                    current.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(())
+}
+
+fn active_doc_descriptor(
+    manifest: &wax_v2_core::ActiveManifest,
+) -> Option<wax_v2_core::SegmentDescriptor> {
+    manifest
+        .segments
+        .iter()
+        .filter(|segment| segment.family == SegmentKind::Doc)
+        .max_by_key(|segment| (segment.segment_generation, segment.object_offset))
+        .cloned()
+}
+
+fn same_active_doc_coverage(
+    descriptor: &SegmentDescriptor,
+    doc_descriptor: &SegmentDescriptor,
+) -> bool {
+    descriptor.doc_id_start == doc_descriptor.doc_id_start
+        && descriptor.doc_id_end_exclusive == doc_descriptor.doc_id_end_exclusive
+        && descriptor.live_items == doc_descriptor.live_items
+}
+
+fn validate_text_segment_against_store_doc_descriptor(
+    store_path: &Path,
+    descriptor: &SegmentDescriptor,
+    doc_descriptor: &SegmentDescriptor,
+) -> Result<(), String> {
+    let bytes = wax_v2_core::map_segment_object(store_path, descriptor)
+        .map_err(|error| error.to_string())?;
+    let persisted_segment = BinaryTextSegment::decode(&bytes)?;
+    let documents = wax_v2_docstore::load_store_ordered_documents(store_path, doc_descriptor)
+        .map_err(docstore_error)?;
+    let expected_segment = prepare_text_segment_from_document_values(&documents)
+        .and_then(|pending| BinaryTextSegment::decode(&pending.object_bytes))?;
+    if persisted_segment != expected_segment {
+        return Err(
+            "latest text segment does not match the active document segment; republish text before runtime text search"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn docstore_error(error: wax_v2_docstore::DocstoreError) -> String {
+    match error {
+        wax_v2_docstore::DocstoreError::Io(message)
+        | wax_v2_docstore::DocstoreError::Json(message)
+        | wax_v2_docstore::DocstoreError::InvalidDocument(message) => message,
+        wax_v2_docstore::DocstoreError::MissingDocumentsFile => {
+            "documents file missing from manifest".to_owned()
+        }
+    }
 }
 
 fn load_documents_for_text_builder(path: &Path) -> Result<Vec<(String, String)>, String> {
-    BufReader::new(File::open(path).map_err(|error| error.to_string())?)
+    BufReader::new(open_read_no_symlinks(path)?)
         .lines()
         .filter_map(|line| match line {
             Ok(line) if line.trim().is_empty() => None,
@@ -465,7 +835,7 @@ fn load_text_postings(metadata: &TextLaneMetadata) -> Result<HashMap<String, Vec
 }
 
 fn load_text_postings_from_path(path: &Path) -> Result<HashMap<String, Vec<String>>, String> {
-    let reader = BufReader::new(File::open(path).map_err(|error| error.to_string())?);
+    let reader = BufReader::new(open_read_no_symlinks(path)?);
     let mut postings = HashMap::new();
     for line in reader.lines() {
         let line = line.map_err(|error| error.to_string())?;
@@ -554,7 +924,8 @@ impl BinaryTextSegment {
             return Err("unsupported text segment version".to_owned());
         }
 
-        let record_count = read_u64(bytes, 8) as usize;
+        let record_count = usize::try_from(read_u64(bytes, 8))
+            .map_err(|_| "text segment record_count exceeds addressable memory".to_owned())?;
         let mut cursor = TEXT_SEGMENT_HEADER_LENGTH;
         if record_count > bytes[cursor..].len() / 8 {
             return Err("text segment record_count exceeds possible records in slice".to_owned());
@@ -626,6 +997,10 @@ fn read_string_at(bytes: &[u8], cursor: &mut usize, length: usize) -> Result<Str
     Ok(value.to_owned())
 }
 
+fn open_read_no_symlinks(path: &Path) -> Result<File, String> {
+    wax_v2_core::open_file_read_no_symlinks(path).map_err(|error| error.to_string())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct QueryRecord {
     query_id: String,
@@ -667,8 +1042,8 @@ mod tests {
     use wax_v2_docstore::prepare_raw_documents_segment;
 
     use crate::{
-        publish_compatibility_text_segment, BinaryTextSegment, TextBatchQuery, TextLane,
-        TextLaneMetadata, TextLaneSource, TextQueryInputs,
+        prepare_compatibility_text_segment, publish_compatibility_text_segment, BinaryTextSegment,
+        TextBatchQuery, TextLane, TextLaneMetadata, TextLaneSource, TextQueryInputs,
     };
 
     #[test]
@@ -716,7 +1091,6 @@ mod tests {
         let metadata = TextLaneMetadata::resolve(&mount_root, &test_manifest()).unwrap();
         let query_inputs = TextQueryInputs::resolve(&mount_root, &test_manifest()).unwrap();
 
-        assert_eq!(metadata.indexed_doc_count, 2);
         assert_eq!(
             metadata.source,
             TextLaneSource::Compatibility {
@@ -727,6 +1101,17 @@ mod tests {
             query_inputs.query_paths,
             vec![mount_root.join("queries.jsonl")]
         );
+    }
+
+    #[test]
+    fn text_lane_rejects_manifest_paths_outside_root() {
+        let mount_root = tempdir().unwrap();
+        let mut manifest = test_manifest();
+        manifest.query_sets[0].path = "../queries.jsonl".to_owned();
+
+        let error = TextLane::load(mount_root.path(), &manifest).unwrap_err();
+
+        assert!(error.contains("must stay within dataset root"));
     }
 
     #[test]
@@ -904,10 +1289,92 @@ mod tests {
             ],
         )
         .unwrap();
-        publish_segments(&store_path, vec![doc_pending]).unwrap();
+        wax_v2_core::publish_segments_with_precondition(&store_path, vec![doc_pending], |_| Ok(()))
+            .unwrap();
 
         let error = TextLane::load(temp_dir.path(), &test_manifest()).unwrap_err();
         assert!(error.contains("stale"));
+    }
+
+    #[test]
+    fn text_lane_rejects_text_store_segment_without_document_segment() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("store.wax");
+        fs::write(
+            temp_dir.path().join("docs.ndjson"),
+            concat!(
+                "{\"doc_id\":\"doc-1\",\"text\":\"alpha\"}\n",
+                "{\"doc_id\":\"doc-2\",\"text\":\"beta\"}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("postings.jsonl"),
+            concat!(
+                "{\"token\":\"alpha\",\"doc_ids\":[\"doc-1\"]}\n",
+                "{\"token\":\"beta\",\"doc_ids\":[\"doc-2\"]}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("queries.jsonl"),
+            "{\"query_id\":\"q-001\",\"query_class\":\"keyword\",\"difficulty\":\"easy\",\"query_text\":\"alpha\",\"top_k\":2,\"filter_spec\":{},\"preview_expected\":true,\"embedding_available\":false,\"lane_eligibility\":{\"text\":true,\"vector\":false,\"hybrid\":false}}\n",
+        )
+        .unwrap();
+        create_empty_store(&store_path).unwrap();
+        let text_pending =
+            prepare_compatibility_text_segment(temp_dir.path(), &test_manifest()).unwrap();
+        publish_segments(&store_path, vec![text_pending]).unwrap();
+
+        let error = TextLane::load(temp_dir.path(), &test_manifest()).unwrap_err();
+
+        assert!(error.contains("requires a matching document segment"));
+    }
+
+    #[test]
+    fn compatibility_text_publish_rejects_store_documents_from_different_snapshot() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("store.wax");
+        fs::write(
+            temp_dir.path().join("docs.ndjson"),
+            concat!(
+                "{\"doc_id\":\"doc-1\",\"text\":\"alpha\"}\n",
+                "{\"doc_id\":\"doc-2\",\"text\":\"beta\"}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("postings.jsonl"),
+            concat!(
+                "{\"token\":\"alpha\",\"doc_ids\":[\"doc-1\"]}\n",
+                "{\"token\":\"beta\",\"doc_ids\":[\"doc-2\"]}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("queries.jsonl"),
+            "{\"query_id\":\"q-001\",\"query_class\":\"keyword\",\"difficulty\":\"easy\",\"query_text\":\"alpha\",\"top_k\":2,\"filter_spec\":{},\"preview_expected\":true,\"embedding_available\":false,\"lane_eligibility\":{\"text\":true,\"vector\":false,\"hybrid\":false}}\n",
+        )
+        .unwrap();
+        create_empty_store(&store_path).unwrap();
+        let stale_doc_pending = prepare_raw_documents_segment(
+            &store_path,
+            vec![
+                (
+                    "doc-1".to_owned(),
+                    json!({"doc_id":"doc-1","text":"wrong alpha"}),
+                ),
+                ("doc-2".to_owned(), json!({"doc_id":"doc-2","text":"beta"})),
+            ],
+        )
+        .unwrap();
+        publish_segments(&store_path, vec![stale_doc_pending]).unwrap();
+
+        let error =
+            publish_compatibility_text_segment(temp_dir.path(), &test_manifest(), &store_path)
+                .unwrap_err();
+
+        assert!(error.contains("store doc segment does not match mounted dataset payload"));
     }
 
     #[test]

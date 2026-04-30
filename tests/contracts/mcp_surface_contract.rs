@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use serde_json::json;
@@ -8,9 +10,20 @@ use wax_v2_runtime::{NewDocument, RuntimeStore};
 
 use wax_v2_mcp::{McpErrorCode, McpRequest, McpResponse, WaxMcpSurface};
 
+#[cfg(unix)]
+fn make_private_dir(path: &std::path::Path) {
+    let mut permissions = fs::metadata(path).unwrap().permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(path, permissions).unwrap();
+}
+
+#[cfg(not(unix))]
+fn make_private_dir(_path: &std::path::Path) {}
+
 #[test]
 fn mcp_surface_opens_session_and_searches_text_through_tool_boundary() {
     let dataset_dir = tempdir().unwrap();
+    make_private_dir(dataset_dir.path());
     let fixture_root =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/bench/source/minimal");
     pack_dataset(&PackRequest::new(
@@ -59,6 +72,7 @@ fn mcp_surface_opens_session_and_searches_text_through_tool_boundary() {
 fn mcp_surface_rejects_session_roots_outside_allowed_root() {
     let allowed_dir = tempdir().unwrap();
     let outside_dir = tempdir().unwrap();
+    make_private_dir(allowed_dir.path());
 
     let mut mcp = WaxMcpSurface::with_allowed_root_and_raw_sessions(allowed_dir.path()).unwrap();
     let error = mcp
@@ -74,6 +88,7 @@ fn mcp_surface_rejects_session_roots_outside_allowed_root() {
 #[test]
 fn mcp_surface_imports_compatibility_snapshot_then_searches_without_sidecars() {
     let dataset_dir = tempdir().unwrap();
+    make_private_dir(dataset_dir.path());
     let fixture_root =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/bench/source/minimal");
     let manifest = pack_dataset(&PackRequest::new(
@@ -145,6 +160,7 @@ fn mcp_surface_imports_compatibility_snapshot_then_searches_without_sidecars() {
 #[test]
 fn mcp_surface_searches_raw_prepared_store_without_sidecars() {
     let dataset_dir = tempdir().unwrap();
+    make_private_dir(dataset_dir.path());
     let fixture_root =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/bench/source/minimal");
     let manifest = pack_dataset(&PackRequest::new(

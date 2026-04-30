@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -34,6 +36,11 @@ fn product_cli_remembers_and_recalls_from_single_wax_file() {
         String::from_utf8_lossy(&remember.stderr)
     );
     assert!(store_path.exists());
+    assert_eq!(
+        store_dir_entries(&store_dir),
+        vec!["agent.wax".to_owned()],
+        "product memory must keep the user-visible store as a single .wax file"
+    );
 
     let recall = Command::new("cargo")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -85,6 +92,84 @@ fn product_cli_remembers_and_recalls_from_single_wax_file() {
         String::from_utf8_lossy(&recall_without_preview.stderr)
     );
     let stdout = String::from_utf8(recall_without_preview.stdout).unwrap();
+    assert!(stdout.contains("\"doc_id\": \"mem-0000000000000001\""));
+    assert!(stdout.contains("\"preview\": null"));
+    assert_eq!(
+        store_dir_entries(&store_dir),
+        vec!["agent.wax".to_owned()],
+        "recall must not create lock or sidecar files next to the product store"
+    );
+}
+
+fn store_dir_entries(store_dir: &tempfile::TempDir) -> Vec<String> {
+    let mut entries = fs::read_dir(store_dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
+}
+
+#[cfg(unix)]
+#[test]
+fn product_cli_recalls_from_read_only_single_wax_file() {
+    let store_dir = tempdir().unwrap();
+    let store_path = store_dir.path().join("agent.wax");
+
+    let remember = Command::new("cargo")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args([
+            "run",
+            "-p",
+            "wax-cli",
+            "--",
+            "remember",
+            "--store",
+            store_path.to_str().unwrap(),
+            "The user stores read-only memories",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        remember.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&remember.stdout),
+        String::from_utf8_lossy(&remember.stderr)
+    );
+
+    let mut permissions = fs::metadata(&store_path).unwrap().permissions();
+    permissions.set_mode(0o400);
+    fs::set_permissions(&store_path, permissions).unwrap();
+
+    let recall = Command::new("cargo")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args([
+            "run",
+            "-p",
+            "wax-cli",
+            "--",
+            "recall",
+            "--store",
+            store_path.to_str().unwrap(),
+            "What does the user store?",
+            "--top-k",
+            "1",
+            "--no-preview",
+        ])
+        .output()
+        .unwrap();
+
+    let mut permissions = fs::metadata(&store_path).unwrap().permissions();
+    permissions.set_mode(0o600);
+    fs::set_permissions(&store_path, permissions).unwrap();
+
+    assert!(
+        recall.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&recall.stdout),
+        String::from_utf8_lossy(&recall.stderr)
+    );
+    let stdout = String::from_utf8(recall.stdout).unwrap();
     assert!(stdout.contains("\"doc_id\": \"mem-0000000000000001\""));
     assert!(stdout.contains("\"preview\": null"));
 }
@@ -274,6 +359,13 @@ fn product_cli_searches_text_from_raw_prepared_store_after_sidecar_removal() {
         for file in manifest.files.iter().filter(|file| file.kind == kind) {
             fs::remove_file(dataset_dir.path().join(&file.path)).unwrap();
         }
+    }
+    #[cfg(unix)]
+    {
+        let store_path = dataset_dir.path().join("store.wax");
+        let mut permissions = fs::metadata(&store_path).unwrap().permissions();
+        permissions.set_mode(0o444);
+        fs::set_permissions(&store_path, permissions).unwrap();
     }
 
     let search = Command::new("cargo")

@@ -1,9 +1,11 @@
 # rax
 
-`rax` is a cross-platform Rust workspace inspired by
+`rax` is a Rust workspace inspired by
 https://github.com/christopherkarani/Wax. The goal is to keep the Wax user model
-portable: one local memory store, no server, remember text, and recall it with
-hybrid local search. It has two main surfaces:
+portable across platforms: one local memory store, no server, remember text, and
+recall it with hybrid local search. The product CLI/runtime store path is
+supported on Unix and Windows; the untrusted MCP store-file surface is
+intentionally narrower and documented below. It has two main surfaces:
 
 - `wax`: the product-facing CLI for creating a store, ingesting documents or
   vectors, and searching the store.
@@ -27,8 +29,9 @@ Remember text into a single `.wax` file. If the file does not exist, `wax`
 creates it.
 
 ```bash
+install -d -m 700 ~/.local/share/rax
 cargo run -p wax-cli -- remember \
-  --store /tmp/agent.wax \
+  --store ~/.local/share/rax/agent.wax \
   "The user is building a habit tracker in Rust."
 ```
 
@@ -36,7 +39,7 @@ Recall from the same file:
 
 ```bash
 cargo run -p wax-cli -- recall \
-  --store /tmp/agent.wax \
+  --store ~/.local/share/rax/agent.wax \
   "What is the user building?" \
   --top-k 5
 ```
@@ -45,7 +48,7 @@ cargo run -p wax-cli -- recall \
 
 ```bash
 cargo run -p wax-cli -- search \
-  --store /tmp/agent.wax \
+  --store ~/.local/share/rax/agent.wax \
   --text "habit tracker" \
   --top-k 5 \
   --preview
@@ -53,24 +56,36 @@ cargo run -p wax-cli -- search \
 
 ## Use The MCP Server
 
-`wax-mcp` exposes the same memory flow over stdio JSON-RPC tools:
+`wax-mcp` exposes the same memory flow over stdio JSON-RPC tools on Linux:
 
 - `remember`
 - `recall`
 - `search`
 
-Run it with an allowed root for store paths. The MCP product tools only accept a
-`.wax` store file directly under this trusted root; nested paths and symlink leaf
-paths are rejected.
+The CLI/runtime store path is cross-platform for Unix and Windows. The
+untrusted MCP store-file surface is intentionally Linux-only for now because it
+relies on fd-relative opening through `/proc/self/fd` to avoid symlink,
+hard-link, and path-swap races inside `WAX_MCP_ALLOWED_ROOT`. On non-Linux
+targets the server initializes without tool capabilities instead of exposing an
+unsafe partial implementation.
+
+Run it with a private allowed root for store paths. The directory must be owned
+by the server user and mode `0700` or stricter; do not use `/tmp` directly. The
+MCP product tools only accept a `.wax` store file directly under this trusted
+root; nested paths, symlink leaf paths, hard-linked files, and group/world
+readable store files are rejected. Unlike the product CLI/runtime path, MCP may
+create hidden `.wax-mcp-lock-*` coordination files inside the allowed root.
 
 ```bash
-WAX_MCP_ALLOWED_ROOT=/tmp cargo run -p wax-v2-mcp --bin wax-mcp
+install -d -m 700 ~/.local/share/rax-mcp
+WAX_MCP_ALLOWED_ROOT=$HOME/.local/share/rax-mcp cargo run -p wax-v2-mcp --bin wax-mcp
 ```
 
-Example `tools/call` payload:
+After the JSON-RPC `initialize` request succeeds and the client sends
+`notifications/initialized`, this is a valid `tools/call` payload:
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"remember","arguments":{"store":"/tmp/agent.wax","content":"The user is building a habit tracker in Rust."}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"remember","arguments":{"store":"/home/alice/.local/share/rax-mcp/agent.wax","content":"The user is building a habit tracker in Rust."}}}
 ```
 
 ## Use Lower-Level Ingest Commands

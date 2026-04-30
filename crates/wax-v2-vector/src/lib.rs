@@ -1,12 +1,12 @@
 use std::borrow::Cow;
 use std::cell::UnsafeCell;
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -29,20 +29,49 @@ const VECTOR_SEGMENT_MINOR: u16 = 0;
 const VECTOR_SEGMENT_HEADER_LENGTH: usize = 48;
 const VECTOR_SEGMENT_FLAG_HAS_PREVIEW: u32 = 1;
 
-struct HnswIoOwner(UnsafeCell<HnswIo>);
+struct HnswIoOwner {
+    io: UnsafeCell<HnswIo>,
+    _staged_dir: tempfile::TempDir,
+}
 
 impl HnswIoOwner {
-    fn new(mount_root: &Path, basename: &str) -> Self {
-        Self(UnsafeCell::new(HnswIo::new(mount_root, basename)))
+    fn new(paths: &HnswSidecarPaths) -> Result<Self, String> {
+        let staged_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        // HnswIo reopens sidecar files by path, so load manifest-declared sidecars through the
+        // core no-symlink opener and hand HnswIo private staged copies instead.
+        copy_sidecar_no_symlinks(
+            &paths.graph_path,
+            &staged_dir
+                .path()
+                .join(format!("{}.hnsw.graph", paths.basename)),
+        )?;
+        copy_sidecar_no_symlinks(
+            &paths.data_path,
+            &staged_dir
+                .path()
+                .join(format!("{}.hnsw.data", paths.basename)),
+        )?;
+        Ok(Self {
+            io: UnsafeCell::new(HnswIo::new(staged_dir.path(), &paths.basename)),
+            _staged_dir: staged_dir,
+        })
     }
 
     fn load<'a>(&'a self) -> Result<BorrowedHnsw<'a>, String> {
         unsafe {
-            (&mut *self.0.get())
+            (&mut *self.io.get())
                 .load_hnsw::<f32, DistCosine>()
                 .map_err(|error| error.to_string())
         }
     }
+}
+
+fn copy_sidecar_no_symlinks(source: &Path, destination: &Path) -> Result<(), String> {
+    let mut source =
+        wax_v2_core::open_file_read_no_symlinks(source).map_err(|error| error.to_string())?;
+    let mut destination = File::create(destination).map_err(|error| error.to_string())?;
+    std::io::copy(&mut source, &mut destination).map_err(|error| error.to_string())?;
+    destination.sync_all().map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -102,7 +131,6 @@ pub struct SearchPhaseProfile {
 }
 
 pub struct VectorLane {
-    mount_root: PathBuf,
     metadata: VectorLaneMetadata,
     first_vector_query: Vec<f32>,
     pub first_vector_top_k: usize,
@@ -148,7 +176,14 @@ struct VectorLaneMetadata {
     document_ids_path: Option<PathBuf>,
     document_vectors_path: Option<PathBuf>,
     preview_vectors_path: Option<PathBuf>,
-    hnsw_graph_basename: Option<String>,
+    hnsw_sidecar: Option<HnswSidecarPaths>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HnswSidecarPaths {
+    basename: String,
+    graph_path: PathBuf,
+    data_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,35 +195,45 @@ struct StoreVectorSegment {
 
 impl VectorLaneMetadata {
     fn resolve(mount_root: &Path, manifest: &DatasetPackManifest) -> Result<Self, String> {
-        Self::resolve_with_store_preference(mount_root, manifest, true)
+        let store_path = store_path_from_manifest(mount_root, manifest)?;
+        Self::resolve_with_store_preference(mount_root, manifest, Some(&store_path), true)
     }
 
     fn resolve_compatibility(
         mount_root: &Path,
         manifest: &DatasetPackManifest,
     ) -> Result<Self, String> {
-        Self::resolve_with_store_preference(mount_root, manifest, false)
+        Self::resolve_with_store_preference(mount_root, manifest, None, false)
+    }
+
+    fn resolve_with_store_path(
+        mount_root: &Path,
+        manifest: &DatasetPackManifest,
+        store_path: &Path,
+    ) -> Result<Self, String> {
+        Self::resolve_with_store_preference(mount_root, manifest, Some(store_path), true)
     }
 
     fn resolve_with_store_preference(
         mount_root: &Path,
         manifest: &DatasetPackManifest,
+        store_path: Option<&Path>,
         prefer_store_segment: bool,
     ) -> Result<Self, String> {
-        let document_vectors_path = manifest
-            .files
-            .iter()
-            .find(|file| file.kind == "document_vectors")
-            .map(|file| mount_root.join(&file.path));
+        let document_vectors_path =
+            manifest_file_path_by_kind(mount_root, manifest, "document_vectors")?;
+        let documents_available =
+            manifest_file_path_by_kind(mount_root, manifest, "documents")?.is_some();
 
         let vector_segment = if prefer_store_segment {
-            resolve_store_vector_segment(mount_root, manifest)?
+            let store_path = store_path.ok_or_else(|| "store path missing".to_owned())?;
+            resolve_store_vector_segment(store_path, documents_available)?
         } else {
             None
         };
         if prefer_store_segment
             && vector_segment.is_none()
-            && store_has_manifest_visible_family(mount_root, manifest, SegmentKind::Doc)?
+            && store_has_manifest_visible_family(store_path.expect("store path"), SegmentKind::Doc)?
         {
             return Err(
                 "current store generation has manifest-visible documents but no matching vector segment; publish vectors before runtime vector search"
@@ -211,33 +256,20 @@ impl VectorLaneMetadata {
             dimensions: manifest.vector_profile.embedding_dimensions as usize,
             doc_count,
             vector_segment,
-            vector_lane_skeleton_path: manifest
-                .files
-                .iter()
-                .find(|file| file.kind == "vector_lane_skeleton")
-                .map(|file| mount_root.join(&file.path)),
-            documents_path: manifest
-                .files
-                .iter()
-                .find(|file| file.kind == "documents")
-                .map(|file| mount_root.join(&file.path)),
-            document_ids_path: manifest
-                .files
-                .iter()
-                .find(|file| file.kind == "document_ids")
-                .map(|file| mount_root.join(&file.path)),
+            vector_lane_skeleton_path: manifest_file_path_by_kind(
+                mount_root,
+                manifest,
+                "vector_lane_skeleton",
+            )?,
+            documents_path: manifest_file_path_by_kind(mount_root, manifest, "documents")?,
+            document_ids_path: manifest_file_path_by_kind(mount_root, manifest, "document_ids")?,
             document_vectors_path,
-            preview_vectors_path: manifest
-                .files
-                .iter()
-                .find(|file| file.kind == "document_vectors_preview_q8")
-                .map(|file| mount_root.join(&file.path)),
-            hnsw_graph_basename: manifest
-                .files
-                .iter()
-                .find(|file| file.kind == "vector_hnsw_graph")
-                .and_then(|file| file.path.strip_suffix(".hnsw.graph"))
-                .map(str::to_owned),
+            preview_vectors_path: manifest_file_path_by_kind(
+                mount_root,
+                manifest,
+                "document_vectors_preview_q8",
+            )?,
+            hnsw_sidecar: manifest_hnsw_sidecar(mount_root, manifest)?,
         })
     }
 
@@ -248,15 +280,14 @@ impl VectorLaneMetadata {
             || self.preview_vectors_path.is_some()
     }
 
-    fn has_hnsw_sidecar(&self, mount_root: &Path) -> bool {
+    fn has_hnsw_sidecar(&self) -> bool {
         if self.vector_segment.is_some() {
             return false;
         }
-        let Some(basename) = self.hnsw_graph_basename.as_deref() else {
+        let Some(sidecar) = self.hnsw_sidecar.as_ref() else {
             return false;
         };
-        mount_root.join(format!("{basename}.hnsw.graph")).exists()
-            && mount_root.join(format!("{basename}.hnsw.data")).exists()
+        sidecar.graph_path.exists() && sidecar.data_path.exists()
     }
 }
 
@@ -271,8 +302,8 @@ impl VectorQueryInputs {
             .files
             .iter()
             .filter(|file| file.kind == "query_vectors")
-            .map(|file| mount_root.join(&file.path))
-            .collect::<Vec<_>>();
+            .map(|file| manifest_file_path(mount_root, file))
+            .collect::<Result<Vec<_>, _>>()?;
         if query_vector_paths.is_empty() {
             return Err("query_vectors file missing from manifest".to_owned());
         }
@@ -387,6 +418,17 @@ impl VectorLane {
         Self::load_runtime_with_report(mount_root, manifest, vector_mode).map(|(lane, _)| lane)
     }
 
+    pub fn load_runtime_with_store_path(
+        mount_root: &Path,
+        manifest: &DatasetPackManifest,
+        store_path: &Path,
+        vector_mode: VectorQueryMode,
+    ) -> Result<Self, String> {
+        let metadata =
+            VectorLaneMetadata::resolve_with_store_path(mount_root, manifest, store_path)?;
+        Self::load_from_parts(mount_root, metadata, None, vector_mode).map(|(lane, _)| lane)
+    }
+
     pub fn load_with_report(
         mount_root: &Path,
         manifest: &DatasetPackManifest,
@@ -409,7 +451,7 @@ impl VectorLane {
     }
 
     fn load_from_parts(
-        mount_root: &Path,
+        _mount_root: &Path,
         metadata: VectorLaneMetadata,
         query_inputs: Option<VectorQueryInputs>,
         vector_mode: VectorQueryMode,
@@ -433,6 +475,7 @@ impl VectorLane {
         let (first_vector_query, first_hybrid_query) = if let Some(query_inputs) = query_inputs {
             let query_vector_records =
                 load_query_vector_records_from_paths(&query_inputs.query_vector_paths)?;
+            validate_query_vector_record_dimensions(&query_vector_records, metadata.dimensions)?;
             (
                 Some(first_vector_query_from_records(&query_vector_records)?),
                 first_hybrid_vector_query_from_records(&query_vector_records),
@@ -440,7 +483,7 @@ impl VectorLane {
         } else {
             (None, None)
         };
-        let hnsw_available = metadata.has_hnsw_sidecar(mount_root);
+        let hnsw_available = metadata.has_hnsw_sidecar();
         let dimensions = metadata.dimensions;
         let should_load_hnsw = match vector_mode {
             VectorQueryMode::Auto => false,
@@ -450,10 +493,11 @@ impl VectorLane {
         let (hnsw_index, hnsw_sidecar_load_ms) = if should_load_hnsw {
             let load_start = Instant::now();
             let index = metadata
-                .hnsw_graph_basename
-                .as_deref()
-                .map(|basename| load_hnsw_index(mount_root, basename))
-                .transpose()?;
+                .hnsw_sidecar
+                .as_ref()
+                .map(load_hnsw_index_if_present)
+                .transpose()?
+                .flatten();
             (index, Some(elapsed_ms(load_start.elapsed())))
         } else {
             (None, None)
@@ -461,7 +505,6 @@ impl VectorLane {
 
         Ok((
             Self {
-                mount_root: mount_root.to_path_buf(),
                 metadata,
                 first_vector_query: first_vector_query
                     .as_ref()
@@ -722,19 +765,8 @@ impl VectorLane {
 
     fn ensure_hnsw_sidecar(&mut self) -> Result<bool, String> {
         if self.hnsw_index.is_none() {
-            if let Some(basename) = self.metadata.hnsw_graph_basename.as_deref() {
-                if !self
-                    .mount_root
-                    .join(format!("{basename}.hnsw.graph"))
-                    .exists()
-                    || !self
-                        .mount_root
-                        .join(format!("{basename}.hnsw.data"))
-                        .exists()
-                {
-                    return Ok(false);
-                }
-                self.hnsw_index = Some(load_hnsw_index(&self.mount_root, basename)?);
+            if let Some(sidecar) = self.metadata.hnsw_sidecar.as_ref() {
+                self.hnsw_index = load_hnsw_index_if_present(sidecar)?;
             }
         }
 
@@ -979,14 +1011,13 @@ struct BinaryVectorSegmentLayout {
 }
 
 fn resolve_store_vector_segment(
-    mount_root: &Path,
-    manifest: &DatasetPackManifest,
+    store_path: &Path,
+    documents_available: bool,
 ) -> Result<Option<StoreVectorSegment>, String> {
-    let store_path = store_path_from_manifest(mount_root, manifest);
     if !store_path.exists() {
         return Ok(None);
     }
-    let opened = wax_v2_core::open_store(&store_path).map_err(|error| error.to_string())?;
+    let opened = wax_v2_core::open_store(store_path).map_err(|error| error.to_string())?;
     let latest_vec = opened
         .manifest
         .segments
@@ -994,42 +1025,59 @@ fn resolve_store_vector_segment(
         .filter(|segment| segment.family == SegmentKind::Vec)
         .max_by_key(|segment| (segment.segment_generation, segment.object_offset))
         .cloned();
-    let latest_doc_generation = opened
+    let latest_doc_descriptor = opened
         .manifest
         .segments
         .iter()
         .filter(|segment| segment.family == SegmentKind::Doc)
         .max_by_key(|segment| (segment.segment_generation, segment.object_offset))
-        .map(|segment| segment.segment_generation);
-    if let (Some(doc_generation), Some(descriptor)) = (latest_doc_generation, latest_vec.as_ref()) {
-        if descriptor.segment_generation < doc_generation {
+        .cloned();
+    if latest_vec.is_some() && latest_doc_descriptor.is_none() && documents_available {
+        return Err(
+            "store-backed vector segment requires a matching document segment when mounted documents are available; republish documents and vectors before runtime vector search"
+                .to_owned(),
+        );
+    }
+    if let (Some(doc_descriptor), Some(descriptor)) =
+        (latest_doc_descriptor.as_ref(), latest_vec.as_ref())
+    {
+        if descriptor.segment_generation < doc_descriptor.segment_generation {
             return Err(
                 "latest vector segment is stale relative to the current document generation; republish vectors before runtime vector search"
                     .to_owned(),
             );
         }
+        if !same_active_doc_coverage(descriptor, doc_descriptor) {
+            return Err(
+                "latest vector segment does not cover the active document segment; republish vectors before runtime vector search"
+                    .to_owned(),
+            );
+        }
+        validate_vector_segment_doc_ids_against_store_doc_descriptor(
+            store_path,
+            descriptor,
+            doc_descriptor,
+        )?;
     }
     let Some(descriptor) = latest_vec else {
         return Ok(None);
     };
     let has_preview = descriptor.backend_aux != 0;
     Ok(Some(StoreVectorSegment {
-        store_path,
+        store_path: store_path.to_path_buf(),
         descriptor,
         has_preview,
     }))
 }
 
 fn store_has_manifest_visible_family(
-    mount_root: &Path,
-    manifest: &DatasetPackManifest,
+    store_path: &Path,
     family: SegmentKind,
 ) -> Result<bool, String> {
-    let store_path = store_path_from_manifest(mount_root, manifest);
     if !store_path.exists() {
         return Ok(false);
     }
-    let opened = wax_v2_core::open_store(&store_path).map_err(|error| error.to_string())?;
+    let opened = wax_v2_core::open_store(store_path).map_err(|error| error.to_string())?;
     Ok(opened
         .manifest
         .segments
@@ -1037,7 +1085,10 @@ fn store_has_manifest_visible_family(
         .any(|segment| segment.family == family))
 }
 
-fn store_path_from_manifest(mount_root: &Path, manifest: &DatasetPackManifest) -> PathBuf {
+fn store_path_from_manifest(
+    mount_root: &Path,
+    manifest: &DatasetPackManifest,
+) -> Result<PathBuf, String> {
     manifest
         .files
         .iter()
@@ -1048,8 +1099,288 @@ fn store_path_from_manifest(mount_root: &Path, manifest: &DatasetPackManifest) -
                 .iter()
                 .find(|file| file.kind == "prebuilt_store")
         })
-        .map(|file| mount_root.join(&file.path))
-        .unwrap_or_else(|| mount_root.join("store.wax"))
+        .map(|file| manifest_file_path(mount_root, file))
+        .unwrap_or_else(|| Ok(mount_root.join("store.wax")))
+}
+
+fn active_doc_descriptor(
+    manifest: &wax_v2_core::ActiveManifest,
+) -> Option<wax_v2_core::SegmentDescriptor> {
+    manifest
+        .segments
+        .iter()
+        .filter(|segment| segment.family == SegmentKind::Doc)
+        .max_by_key(|segment| (segment.segment_generation, segment.object_offset))
+        .cloned()
+}
+
+fn active_doc_descriptor_from_store(
+    store_path: &Path,
+) -> Result<Option<wax_v2_core::SegmentDescriptor>, String> {
+    let opened = wax_v2_core::open_store(store_path).map_err(|error| error.to_string())?;
+    Ok(active_doc_descriptor(&opened.manifest))
+}
+
+fn same_active_doc_coverage(
+    descriptor: &SegmentDescriptor,
+    doc_descriptor: &SegmentDescriptor,
+) -> bool {
+    descriptor.doc_id_start == doc_descriptor.doc_id_start
+        && descriptor.doc_id_end_exclusive == doc_descriptor.doc_id_end_exclusive
+        && descriptor.live_items == doc_descriptor.live_items
+}
+
+fn validate_vector_segment_doc_ids_against_store_doc_descriptor(
+    store_path: &Path,
+    descriptor: &SegmentDescriptor,
+    doc_descriptor: &SegmentDescriptor,
+) -> Result<(), String> {
+    let bytes = wax_v2_core::map_segment_object(store_path, descriptor)
+        .map_err(|error| error.to_string())?;
+    let layout = BinaryVectorSegmentLayout::decode(&bytes)?;
+    let documents = wax_v2_docstore::load_store_ordered_documents(store_path, doc_descriptor)
+        .map_err(docstore_error)?;
+    let doc_ids = documents
+        .iter()
+        .map(|(doc_id, _)| doc_id.as_str())
+        .collect::<Vec<_>>();
+    if layout
+        .doc_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        != doc_ids
+    {
+        return Err(
+            "latest vector segment document ids do not match the active document segment; republish vectors before runtime vector search"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn manifest_file_path_by_kind(
+    mount_root: &Path,
+    manifest: &DatasetPackManifest,
+    kind: &str,
+) -> Result<Option<PathBuf>, String> {
+    manifest
+        .files
+        .iter()
+        .find(|file| file.kind == kind)
+        .map(|file| manifest_file_path(mount_root, file))
+        .transpose()
+}
+
+fn manifest_file_path(
+    mount_root: &Path,
+    file: &wax_bench_model::ManifestFile,
+) -> Result<PathBuf, String> {
+    let path = Path::new(&file.path);
+    if !is_pack_relative_path(path) {
+        return Err(format!(
+            "manifest {} path {} must stay within dataset root",
+            file.kind, file.path
+        ));
+    }
+    root_confined_path(mount_root, path, &file.kind)
+}
+
+fn manifest_hnsw_sidecar(
+    mount_root: &Path,
+    manifest: &DatasetPackManifest,
+) -> Result<Option<HnswSidecarPaths>, String> {
+    manifest
+        .files
+        .iter()
+        .find(|file| file.kind == "vector_hnsw_graph")
+        .map(|file| {
+            let path = Path::new(&file.path);
+            if !is_pack_relative_path(path) {
+                return Err(format!(
+                    "manifest {} path {} must stay within dataset root",
+                    file.kind, file.path
+                ));
+            }
+            let basename = file
+                .path
+                .strip_suffix(".hnsw.graph")
+                .map(str::to_owned)
+                .ok_or_else(|| "vector_hnsw_graph path must end with .hnsw.graph".to_owned())?;
+            let graph_path = root_confined_path(mount_root, path, &file.kind)?;
+            let data_path = root_confined_path(
+                mount_root,
+                Path::new(&format!("{basename}.hnsw.data")),
+                "vector_hnsw_data",
+            )?;
+            let basename = graph_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_suffix(".hnsw.graph"))
+                .map(str::to_owned)
+                .ok_or_else(|| "vector_hnsw_graph path must end with .hnsw.graph".to_owned())?;
+            Ok(HnswSidecarPaths {
+                basename,
+                graph_path,
+                data_path,
+            })
+        })
+        .transpose()
+}
+
+fn is_pack_relative_path(path: &Path) -> bool {
+    !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn root_confined_path(mount_root: &Path, path: &Path, kind: &str) -> Result<PathBuf, String> {
+    if matches!(kind, "store" | "prebuilt_store")
+        && is_stable_fd_table_root(mount_root)
+        && is_single_numeric_path_component(path)
+    {
+        return Ok(mount_root.join(path));
+    }
+    if is_linux_proc_self_fd_root(mount_root) {
+        reject_symlink_components(mount_root, path, kind)?;
+        return Ok(mount_root.join(path));
+    }
+    let Ok(root) = mount_root.canonicalize() else {
+        return Ok(mount_root.join(path));
+    };
+    reject_symlink_components(&root, path, kind)?;
+    let candidate = root.join(path);
+    if candidate.exists() {
+        let canonical = candidate
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        if !canonical.starts_with(&root) {
+            return Err(format!(
+                "manifest {kind} path {} resolves outside dataset root {}",
+                candidate.display(),
+                root.display()
+            ));
+        }
+        return Ok(canonical);
+    }
+    let mut ancestor = candidate.parent();
+    while let Some(path) = ancestor {
+        if path.exists() {
+            let canonical = path.canonicalize().map_err(|error| error.to_string())?;
+            if !canonical.starts_with(&root) {
+                return Err(format!(
+                    "manifest {kind} ancestor {} resolves outside dataset root {}",
+                    path.display(),
+                    root.display()
+                ));
+            }
+            return Ok(candidate);
+        }
+        ancestor = path.parent();
+    }
+    if !candidate.starts_with(&root) {
+        return Err(format!(
+            "manifest {kind} path {} is outside dataset root {}",
+            candidate.display(),
+            root.display()
+        ));
+    }
+    Ok(candidate)
+}
+
+#[cfg(unix)]
+fn is_stable_fd_table_root(path: &Path) -> bool {
+    path_has_absolute_normal_components(path, stable_fd_table_components())
+}
+
+#[cfg(not(unix))]
+fn is_stable_fd_table_root(_path: &Path) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn stable_fd_table_components() -> &'static [&'static str] {
+    &["proc", "self", "fd"]
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn stable_fd_table_components() -> &'static [&'static str] {
+    &["dev", "fd"]
+}
+
+#[cfg(unix)]
+fn path_has_absolute_normal_components(path: &Path, expected_components: &[&str]) -> bool {
+    let mut components = path.components();
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return false;
+    }
+    for expected in expected_components {
+        match components.next() {
+            Some(Component::Normal(component)) if component == *expected => {}
+            _ => return false,
+        }
+    }
+    components.next().is_none()
+}
+
+fn is_single_numeric_path_component(path: &Path) -> bool {
+    let mut components = path.components();
+    let is_numeric = match components.next() {
+        Some(Component::Normal(component)) => component.to_str().is_some_and(|value| {
+            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+        }),
+        _ => false,
+    };
+    is_numeric && components.next().is_none()
+}
+
+#[cfg(target_os = "linux")]
+fn is_linux_proc_self_fd_root(path: &Path) -> bool {
+    let mut components = path.components();
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return false;
+    }
+    for expected in ["proc", "self", "fd"] {
+        match components.next() {
+            Some(Component::Normal(component)) if component == expected => {}
+            _ => return false,
+        }
+    }
+    let has_valid_fd = match components.next() {
+        Some(Component::Normal(fd)) => fd
+            .to_str()
+            .is_some_and(|fd| !fd.is_empty() && fd.bytes().all(|byte| byte.is_ascii_digit())),
+        _ => false,
+    };
+    has_valid_fd && components.next().is_none()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_linux_proc_self_fd_root(_path: &Path) -> bool {
+    false
+}
+
+fn reject_symlink_components(root: &Path, path: &Path, kind: &str) -> Result<(), String> {
+    let mut current = root.to_path_buf();
+    for component in path.components() {
+        let Component::Normal(component) = component else {
+            continue;
+        };
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "manifest {kind} path {} contains a symlink component",
+                    current.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(())
 }
 
 fn load_vector_segment(
@@ -1121,12 +1452,19 @@ fn load_compatibility_vector_payloads(
     })
 }
 
-fn load_hnsw_index(mount_root: &Path, basename: &str) -> Result<HnswIndexCell, String> {
-    HnswIndexCell::try_new(HnswIoOwner::new(mount_root, basename), |owner| owner.load())
+fn load_hnsw_index(paths: &HnswSidecarPaths) -> Result<HnswIndexCell, String> {
+    HnswIndexCell::try_new(HnswIoOwner::new(paths)?, |owner| owner.load())
+}
+
+fn load_hnsw_index_if_present(paths: &HnswSidecarPaths) -> Result<Option<HnswIndexCell>, String> {
+    if !paths.graph_path.exists() || !paths.data_path.exists() {
+        return Ok(None);
+    }
+    load_hnsw_index(paths).map(Some)
 }
 
 fn map_read_only(path: &Path) -> Result<Mmap, String> {
-    let file = File::open(path).map_err(|error| error.to_string())?;
+    let file = open_read_no_symlinks(path)?;
     unsafe { MmapOptions::new().map(&file) }.map_err(|error| error.to_string())
 }
 
@@ -1139,10 +1477,115 @@ pub fn publish_compatibility_vector_segment(
     manifest: &DatasetPackManifest,
     store_path: &Path,
 ) -> Result<(), String> {
-    let prepared = prepare_compatibility_vector_segment(mount_root, manifest)?;
-    wax_v2_core::publish_segment(store_path, prepared.descriptor, &prepared.object_bytes)
-        .map_err(|error| error.to_string())?;
+    let opened = wax_v2_core::open_store(store_path).map_err(|error| error.to_string())?;
+    let expected_generation = opened.manifest.generation;
+    let expected_doc_descriptor = active_doc_descriptor(&opened.manifest);
+    if let Some(descriptor) = expected_doc_descriptor.as_ref() {
+        wax_v2_docstore::validate_store_doc_descriptor_against_dataset_pack(
+            store_path, descriptor, mount_root, manifest,
+        )
+        .map_err(docstore_error)?;
+    }
+    let mut raw_vectors = load_compatibility_raw_vectors(mount_root, manifest)?;
+    let doc_pending = if expected_doc_descriptor.is_none()
+        && manifest_file_path_by_kind(mount_root, manifest, "documents")?.is_some()
+    {
+        let documents = wax_v2_docstore::load_dataset_ordered_documents(mount_root, manifest)
+            .map_err(docstore_error)?;
+        raw_vectors = reorder_vectors_for_document_order(&documents, raw_vectors)?;
+        Some(
+            wax_v2_docstore::prepare_raw_documents_segment(store_path, documents)
+                .map_err(docstore_error)?,
+        )
+    } else {
+        None
+    };
+    if let Some(descriptor) = expected_doc_descriptor.as_ref() {
+        raw_vectors =
+            reorder_vectors_for_store_doc_descriptor(store_path, descriptor, raw_vectors)?;
+    }
+    let mut prepared = prepare_raw_vector_segment(
+        manifest.vector_profile.embedding_dimensions as usize,
+        &raw_vectors,
+    )?;
+    if let Some(descriptor) = expected_doc_descriptor.as_ref() {
+        align_pending_descriptor_to_doc_range(
+            &mut prepared.descriptor,
+            descriptor.doc_id_start,
+            descriptor.doc_id_end_exclusive,
+            descriptor.live_items,
+        );
+    } else if let Some(doc_pending) = doc_pending.as_ref() {
+        align_pending_descriptor_to_doc_range(
+            &mut prepared.descriptor,
+            doc_pending.descriptor.doc_id_start,
+            doc_pending.descriptor.doc_id_end_exclusive,
+            doc_pending.descriptor.live_items,
+        );
+    }
+    let pending_segments = doc_pending
+        .into_iter()
+        .chain(std::iter::once(prepared))
+        .collect::<Vec<_>>();
+    wax_v2_core::publish_segments_with_precondition(store_path, pending_segments, |manifest| {
+        if manifest.generation != expected_generation {
+            return Err(wax_v2_core::CoreError::PublishPreconditionFailed(
+                format!(
+                    "store generation changed during vector publish: expected {expected_generation}, found {}",
+                    manifest.generation
+                ),
+            ));
+        }
+        if active_doc_descriptor(manifest) != expected_doc_descriptor {
+            return Err(wax_v2_core::CoreError::PublishPreconditionFailed(
+                "store doc segment changed during vector publish".to_owned(),
+            ));
+        }
+        Ok(())
+    })
+    .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn align_pending_descriptor_to_doc_range(
+    descriptor: &mut PendingSegmentDescriptor,
+    doc_id_start: u64,
+    doc_id_end_exclusive: u64,
+    live_items: u64,
+) {
+    descriptor.doc_id_start = doc_id_start;
+    descriptor.doc_id_end_exclusive = doc_id_end_exclusive;
+    descriptor.live_items = live_items;
+}
+
+fn reorder_vectors_for_store_doc_descriptor(
+    store_path: &Path,
+    descriptor: &SegmentDescriptor,
+    raw_vectors: Vec<(String, Vec<f32>)>,
+) -> Result<Vec<(String, Vec<f32>)>, String> {
+    let store_documents = wax_v2_docstore::load_store_ordered_documents(store_path, descriptor)
+        .map_err(docstore_error)?;
+    reorder_vectors_for_document_order(&store_documents, raw_vectors)
+}
+
+fn reorder_vectors_for_document_order(
+    ordered_documents: &[(String, serde_json::Value)],
+    raw_vectors: Vec<(String, Vec<f32>)>,
+) -> Result<Vec<(String, Vec<f32>)>, String> {
+    let mut vectors_by_doc_id = raw_vectors.into_iter().collect::<HashMap<_, _>>();
+    let mut ordered_vectors = Vec::with_capacity(ordered_documents.len());
+    for (doc_id, _) in ordered_documents {
+        let vector = vectors_by_doc_id.remove(doc_id.as_str()).ok_or_else(|| {
+            "store doc segment does not match mounted dataset vector document ids".to_owned()
+        })?;
+        ordered_vectors.push((doc_id.clone(), vector));
+    }
+    if !vectors_by_doc_id.is_empty() {
+        return Err(
+            "store doc segment does not match mounted dataset vector document ids".to_owned(),
+        );
+    }
+    Ok(ordered_vectors)
 }
 
 pub fn prepare_compatibility_vector_segment(
@@ -1185,6 +1628,23 @@ pub fn load_runtime_raw_vectors(
     manifest: &DatasetPackManifest,
 ) -> Result<Vec<(String, Vec<f32>)>, String> {
     let metadata = VectorLaneMetadata::resolve(mount_root, manifest)?;
+    load_runtime_raw_vectors_from_metadata(mount_root, manifest, metadata)
+}
+
+pub fn load_runtime_raw_vectors_with_store_path(
+    mount_root: &Path,
+    manifest: &DatasetPackManifest,
+    store_path: &Path,
+) -> Result<Vec<(String, Vec<f32>)>, String> {
+    let metadata = VectorLaneMetadata::resolve_with_store_path(mount_root, manifest, store_path)?;
+    load_runtime_raw_vectors_from_metadata(mount_root, manifest, metadata)
+}
+
+fn load_runtime_raw_vectors_from_metadata(
+    mount_root: &Path,
+    manifest: &DatasetPackManifest,
+    metadata: VectorLaneMetadata,
+) -> Result<Vec<(String, Vec<f32>)>, String> {
     if let Some(segment) = metadata.vector_segment.as_ref() {
         let bytes = wax_v2_core::read_segment_object(&segment.store_path, &segment.descriptor)
             .map_err(|error| error.to_string())?;
@@ -1221,7 +1681,7 @@ fn raw_vectors_from_binary_segment(
 }
 
 fn load_document_ids(path: &Path) -> Result<Vec<String>, String> {
-    let file = File::open(path).map_err(|error| error.to_string())?;
+    let file = open_read_no_symlinks(path)?;
     let reader = BufReader::new(file);
     reader
         .lines()
@@ -1254,7 +1714,8 @@ pub fn load_compatibility_raw_vectors(
         .document_vectors_path
         .as_ref()
         .ok_or_else(|| "document_vectors file missing from manifest".to_owned())?;
-    let exact_vectors = fs::read(document_vectors_path).map_err(|error| error.to_string())?;
+    let exact_vectors = wax_v2_core::read_file_no_symlinks(document_vectors_path)
+        .map_err(|error| error.to_string())?;
     validate_document_vectors(&exact_vectors, metadata.dimensions, metadata.doc_count)?;
     if doc_ids.len() != metadata.doc_count {
         return Err("document_ids row count does not match manifest vector_count".to_owned());
@@ -1275,10 +1736,21 @@ pub fn validate_store_segment_against_dataset_pack(
     mount_root: &Path,
     manifest: &DatasetPackManifest,
 ) -> Result<(), String> {
-    let Some(store_segment) = resolve_store_vector_segment(mount_root, manifest)? else {
+    let store_path = store_path_from_manifest(mount_root, manifest)?;
+    validate_store_segment_against_dataset_pack_with_store_path(&store_path, mount_root, manifest)
+}
+
+pub fn validate_store_segment_against_dataset_pack_with_store_path(
+    store_path: &Path,
+    mount_root: &Path,
+    manifest: &DatasetPackManifest,
+) -> Result<(), String> {
+    let documents_available =
+        manifest_file_path_by_kind(mount_root, manifest, "documents")?.is_some();
+    let Some(store_segment) = resolve_store_vector_segment(store_path, documents_available)? else {
         return Ok(());
     };
-    let metadata = VectorLaneMetadata::resolve(mount_root, manifest)?;
+    let metadata = VectorLaneMetadata::resolve_with_store_path(mount_root, manifest, store_path)?;
     let Some(document_vectors_path) = metadata.document_vectors_path.as_ref() else {
         return Ok(());
     };
@@ -1286,7 +1758,14 @@ pub fn validate_store_segment_against_dataset_pack(
         return Ok(());
     }
 
-    let expected_raw_vectors = load_compatibility_raw_vectors(mount_root, manifest)?;
+    let mut expected_raw_vectors = load_compatibility_raw_vectors(mount_root, manifest)?;
+    if let Some(doc_descriptor) = active_doc_descriptor_from_store(&store_segment.store_path)? {
+        expected_raw_vectors = reorder_vectors_for_store_doc_descriptor(
+            &store_segment.store_path,
+            &doc_descriptor,
+            expected_raw_vectors,
+        )?;
+    }
     let expected_without_preview =
         BinaryVectorSegment::from_raw_vectors(metadata.dimensions, &expected_raw_vectors)?;
     let mut expected_with_preview = expected_without_preview.clone();
@@ -1295,7 +1774,8 @@ pub fn validate_store_segment_against_dataset_pack(
         .as_ref()
         .filter(|path| path.exists())
     {
-        let preview_vectors = fs::read(preview_path).map_err(|error| error.to_string())?;
+        let preview_vectors =
+            wax_v2_core::read_file_no_symlinks(preview_path).map_err(|error| error.to_string())?;
         validate_preview_vectors(
             &preview_vectors,
             metadata.dimensions,
@@ -1334,10 +1814,15 @@ impl BinaryVectorSegment {
         if expected_dimensions == 0 {
             return Err("raw vector segment requires non-zero dimensions".to_owned());
         }
+        let exact_vector_bytes = vector_inputs
+            .len()
+            .checked_mul(expected_dimensions)
+            .and_then(|values| values.checked_mul(4))
+            .ok_or_else(|| "raw vector segment byte length overflow".to_owned())?;
 
         let mut seen_doc_ids = std::collections::BTreeSet::new();
         let mut doc_ids = Vec::with_capacity(vector_inputs.len());
-        let mut exact_vectors = Vec::with_capacity(vector_inputs.len() * expected_dimensions * 4);
+        let mut exact_vectors = Vec::with_capacity(exact_vector_bytes);
 
         for (doc_id, values) in vector_inputs {
             if values.len() != expected_dimensions {
@@ -1352,7 +1837,12 @@ impl BinaryVectorSegment {
                 ));
             }
             doc_ids.push(doc_id.clone());
-            for value in values {
+            for (index, value) in values.iter().enumerate() {
+                if !value.is_finite() {
+                    return Err(format!(
+                        "raw vector for {doc_id} contains non-finite value at index {index}"
+                    ));
+                }
                 exact_vectors.extend_from_slice(&value.to_le_bytes());
             }
         }
@@ -1462,7 +1952,7 @@ impl BinaryVectorSegmentLayout {
         if doc_ids_offset != VECTOR_SEGMENT_HEADER_LENGTH
             || doc_ids_offset > exact_vectors_offset
             || exact_vectors_offset > bytes.len()
-            || exact_vectors_offset % 4 != 0
+            || !exact_vectors_offset.is_multiple_of(4)
         {
             return Err("vector segment section offsets are invalid".to_owned());
         }
@@ -1610,6 +2100,7 @@ fn validate_document_vectors(
     if bytes.len() / 4 != expected_values {
         return Err("document vector payload row count does not match manifest".to_owned());
     }
+    validate_f32le_bytes_are_finite(bytes, "document vector")?;
     Ok(())
 }
 
@@ -1635,7 +2126,7 @@ fn load_query_vector_records_from_paths(
 ) -> Result<Vec<QueryVectorRecord>, String> {
     let mut records = Vec::new();
     for path in paths {
-        let reader = BufReader::new(File::open(path).map_err(|error| error.to_string())?);
+        let reader = BufReader::new(open_read_no_symlinks(path)?);
         for line in reader.lines() {
             let line = line.map_err(|error| error.to_string())?;
             if line.trim().is_empty() {
@@ -1655,6 +2146,37 @@ fn validate_query_dimensions(query: &[f32], expected_dimensions: usize) -> Resul
             "query vector dimensions do not match lane dimensions: expected {expected_dimensions}, got {}",
             query.len()
         ));
+    }
+    for (index, value) in query.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(format!(
+                "query vector contains non-finite value at index {index}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_f32le_bytes_are_finite(bytes: &[u8], context: &str) -> Result<(), String> {
+    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
+        let value = f32::from_le_bytes(chunk.try_into().expect("4-byte f32 chunk"));
+        if !value.is_finite() {
+            return Err(format!(
+                "{context} contains non-finite value at index {index}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_query_vector_record_dimensions(
+    records: &[QueryVectorRecord],
+    expected_dimensions: usize,
+) -> Result<(), String> {
+    for record in records {
+        if record.lane_eligibility.vector || record.lane_eligibility.hybrid {
+            validate_query_dimensions(&record.vector, expected_dimensions)?;
+        }
     }
     Ok(())
 }
@@ -1758,6 +2280,10 @@ fn dot_product_i8_preview(left: &[f32], right: &[u8]) -> f32 {
     sum0 + sum1 + sum2 + sum3 + tail
 }
 
+fn open_read_no_symlinks(path: &Path) -> Result<File, String> {
+    wax_v2_core::open_file_read_no_symlinks(path).map_err(|error| error.to_string())
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct LaneEligibility {
     vector: bool,
@@ -1803,7 +2329,7 @@ mod tests {
         align_up_usize, dot_product_f32le, load_compatibility_raw_vectors, load_vector_segment,
         prepare_raw_vector_segment, publish_compatibility_vector_segment,
         read_length_prefixed_strings, read_u64, resolve_auto_vector_mode,
-        validate_document_vectors, validate_preview_vectors,
+        validate_document_vectors, validate_preview_vectors, validate_query_dimensions,
         validate_store_segment_against_dataset_pack, BinaryVectorSegment, ByteStorage,
         StoreVectorSegment, VectorLane, VectorLaneMetadata, VectorQueryInputs,
     };
@@ -1831,6 +2357,17 @@ mod tests {
     }
 
     #[test]
+    fn raw_vector_segment_rejects_non_finite_values() {
+        let error =
+            BinaryVectorSegment::from_raw_vectors(2, &[("doc-1".to_owned(), vec![1.0, f32::NAN])])
+                .expect_err("non-finite raw vector should fail");
+
+        assert!(error.contains("non-finite"));
+        assert!(error.contains("doc-1"));
+        assert!(error.contains("index 1"));
+    }
+
+    #[test]
     fn vector_segment_string_reader_rejects_impossible_count_before_allocation() {
         let mut cursor = 0usize;
         let error = read_length_prefixed_strings(&[], usize::MAX, &mut cursor)
@@ -1852,6 +2389,17 @@ mod tests {
             validate_document_vectors(&[], usize::MAX / 2 + 1, 3).expect_err("shape overflows");
 
         assert!(error.contains("overflows"));
+    }
+
+    #[test]
+    fn validate_document_vectors_rejects_non_finite_payload_values() {
+        let bytes = [1.0f32.to_le_bytes(), f32::INFINITY.to_le_bytes()].concat();
+
+        let error = validate_document_vectors(&bytes, 2, 1)
+            .expect_err("non-finite persisted vector should fail");
+
+        assert!(error.contains("non-finite"));
+        assert!(error.contains("index 1"));
     }
 
     #[test]
@@ -1917,6 +2465,40 @@ mod tests {
     }
 
     #[test]
+    fn vector_lane_rejects_mismatched_query_vector_dimensions_on_load() {
+        let temp_dir = tempdir().unwrap();
+        fs::write(
+            temp_dir.path().join("document_ids.txt"),
+            concat!("{\"doc_id\":\"doc-1\"}\n", "{\"doc_id\":\"doc-2\"}\n",),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("document_vectors.bin"),
+            bytemuck::cast_slice::<f32, u8>(&[
+                1.0f32, 0.0f32, //
+                0.0f32, 1.0f32, //
+            ]),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("query_vectors.jsonl"),
+            "{\"query_id\":\"q-001\",\"top_k\":2,\"vector\":[1.0,0.0,0.5],\"lane_eligibility\":{\"text\":false,\"vector\":true,\"hybrid\":false}}\n",
+        )
+        .unwrap();
+
+        let error = match VectorLane::load(
+            temp_dir.path(),
+            &test_manifest_with_count(2, false, false),
+            VectorQueryMode::ExactFlat,
+        ) {
+            Ok(_) => panic!("mismatched persisted query dimensions should fail during lane load"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("dimensions"));
+    }
+
+    #[test]
     fn resolve_auto_vector_mode_prefers_preview_when_large_without_hnsw() {
         assert_eq!(
             resolve_auto_vector_mode(128, 10, false, true),
@@ -1942,7 +2524,13 @@ mod tests {
             metadata.preview_vectors_path,
             Some(mount_root.join("preview.bin"))
         );
-        assert_eq!(metadata.hnsw_graph_basename.as_deref(), Some("graph"));
+        assert_eq!(
+            metadata
+                .hnsw_sidecar
+                .as_ref()
+                .map(|sidecar| sidecar.basename.as_str()),
+            Some("graph")
+        );
         assert_eq!(
             metadata.document_ids_path,
             Some(mount_root.join("document_ids.txt"))
@@ -1952,6 +2540,22 @@ mod tests {
             query_inputs.query_vector_paths,
             vec![mount_root.join("query_vectors.jsonl")]
         );
+    }
+
+    #[test]
+    fn vector_lane_metadata_rejects_manifest_paths_outside_root() {
+        let temp_dir = tempdir().unwrap();
+        let mut manifest = test_manifest(false, false);
+        manifest
+            .files
+            .iter_mut()
+            .find(|file| file.kind == "document_vectors")
+            .unwrap()
+            .path = "../outside.bin".to_owned();
+
+        let error = VectorLaneMetadata::resolve(temp_dir.path(), &manifest).unwrap_err();
+
+        assert!(error.contains("must stay within dataset root"));
     }
 
     #[test]
@@ -2065,6 +2669,60 @@ mod tests {
     }
 
     #[test]
+    fn compatibility_vector_publish_rejects_store_documents_from_different_snapshot() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("store.wax");
+        fs::write(
+            temp_dir.path().join("document_ids.txt"),
+            concat!(
+                "{\"doc_id\":\"doc-1\"}\n",
+                "{\"doc_id\":\"doc-2\"}\n",
+                "{\"doc_id\":\"doc-3\"}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("document_vectors.bin"),
+            bytemuck::cast_slice::<f32, u8>(&[
+                1.0f32, 0.0f32, //
+                0.0f32, 1.0f32, //
+                0.5f32, 0.5f32, //
+            ]),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("query_vectors.jsonl"),
+            concat!(
+                "{\"query_id\":\"q-001\",\"top_k\":2,\"vector\":[1.0,0.0],\"lane_eligibility\":{\"text\":false,\"vector\":true,\"hybrid\":false}}\n",
+                "{\"query_id\":\"q-002\",\"top_k\":2,\"vector\":[0.9,0.1],\"lane_eligibility\":{\"text\":true,\"vector\":true,\"hybrid\":true}}\n",
+            ),
+        )
+        .unwrap();
+        create_empty_store(&store_path).unwrap();
+        let stale_doc_pending = prepare_raw_documents_segment(
+            &store_path,
+            vec![
+                ("doc-1".to_owned(), json!({"doc_id":"doc-1","text":"alpha"})),
+                ("doc-x".to_owned(), json!({"doc_id":"doc-x","text":"wrong"})),
+                ("doc-3".to_owned(), json!({"doc_id":"doc-3","text":"gamma"})),
+            ],
+        )
+        .unwrap();
+        publish_segments(&store_path, vec![stale_doc_pending]).unwrap();
+
+        let error = publish_compatibility_vector_segment(
+            temp_dir.path(),
+            &test_manifest(false, false),
+            &store_path,
+        )
+        .unwrap_err();
+
+        assert!(
+            error.contains("store doc segment does not match mounted dataset vector document ids")
+        );
+    }
+
+    #[test]
     fn vector_lane_prefers_manifest_visible_segment_when_sidecars_are_missing() {
         let temp_dir = tempdir().unwrap();
         let store_path = temp_dir.path().join("store.wax");
@@ -2169,6 +2827,54 @@ mod tests {
     }
 
     #[test]
+    fn vector_lane_rejects_store_vector_with_mounted_documents_but_no_doc_segment() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("store.wax");
+        create_empty_store(&store_path).unwrap();
+        fs::write(
+            temp_dir.path().join("docs.ndjson"),
+            concat!(
+                "{\"doc_id\":\"doc-1\",\"text\":\"alpha\"}\n",
+                "{\"doc_id\":\"doc-2\",\"text\":\"beta\"}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("document_vectors.bin"),
+            bytemuck::cast_slice::<f32, u8>(&[
+                1.0f32, 0.0f32, //
+                0.0f32, 1.0f32, //
+            ]),
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("query_vectors.jsonl"),
+            "{\"query_id\":\"q-001\",\"top_k\":2,\"vector\":[1.0,0.0],\"lane_eligibility\":{\"text\":false,\"vector\":true,\"hybrid\":false}}\n",
+        )
+        .unwrap();
+        let pending = prepare_raw_vector_segment(
+            2,
+            &[
+                ("doc-1".to_owned(), vec![1.0f32, 0.0f32]),
+                ("doc-2".to_owned(), vec![0.0f32, 1.0f32]),
+            ],
+        )
+        .unwrap();
+        publish_segments(&store_path, vec![pending]).unwrap();
+
+        let error = match VectorLane::load_runtime(
+            temp_dir.path(),
+            &test_manifest_without_document_ids("docs.ndjson", 2),
+            VectorQueryMode::Auto,
+        ) {
+            Ok(_) => panic!("store vector without document segment should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("requires a matching document segment"));
+    }
+
+    #[test]
     fn search_with_query_rejects_mismatched_query_dimensions() {
         let temp_dir = tempdir().unwrap();
         let store_path = temp_dir.path().join("store.wax");
@@ -2196,6 +2902,15 @@ mod tests {
             .expect_err("mismatched query dimensions should fail");
 
         assert!(error.contains("dimensions"));
+    }
+
+    #[test]
+    fn query_validation_rejects_non_finite_values() {
+        let error = validate_query_dimensions(&[1.0, f32::NEG_INFINITY], 2)
+            .expect_err("non-finite query should fail");
+
+        assert!(error.contains("non-finite"));
+        assert!(error.contains("index 1"));
     }
 
     #[test]
@@ -2233,7 +2948,7 @@ mod tests {
             document_ids_path: None,
             document_vectors_path: None,
             preview_vectors_path: None,
-            hnsw_graph_basename: None,
+            hnsw_sidecar: None,
         };
 
         let loaded =
@@ -2561,7 +3276,7 @@ mod tests {
 
         let exact_vectors_offset = read_u64(&bytes, 32) as usize;
 
-        assert_eq!(exact_vectors_offset % 4, 0);
+        assert!(exact_vectors_offset.is_multiple_of(4));
         assert!(BinaryVectorSegment::decode(&bytes).is_ok());
     }
 

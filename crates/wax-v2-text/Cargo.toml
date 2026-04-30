@@ -8,7 +8,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 wax-bench-model = { path = "../wax-bench-model" }
 wax-v2-core = { path = "../wax-v2-core" }
+wax-v2-docstore = { path = "../wax-v2-docstore" }
 
 [dev-dependencies]
 tempfile = "3.23.0"
-wax-v2-docstore = { path = "../wax-v2-docstore" }

@@ -172,7 +172,8 @@ fn main() -> Result<(), String> {
             top_k,
             preview,
         } => {
-            let mut memory = Memory::open_existing(&store).map_err(|error| error.to_string())?;
+            let mut memory =
+                Memory::open_existing_read_only(&store).map_err(|error| error.to_string())?;
             let response = memory
                 .search_with_options(
                     query,
@@ -193,10 +194,12 @@ fn main() -> Result<(), String> {
             text,
             top_k,
             preview,
-        } => {
-            if let Some(store) = store {
+        } => match (root, store) {
+            (Some(_), Some(_)) => Err("search accepts exactly one of --root or --store".to_owned()),
+            (None, None) => Err("search requires --root or --store".to_owned()),
+            (None, Some(store)) => {
                 let mut memory =
-                    Memory::open_existing(&store).map_err(|error| error.to_string())?;
+                    Memory::open_existing_read_only(&store).map_err(|error| error.to_string())?;
                 let response = memory
                     .search_with_options(
                         text,
@@ -209,23 +212,25 @@ fn main() -> Result<(), String> {
                     .map_err(|error| error.to_string())?;
                 println!("{}", render_hits(response.hits)?);
                 memory.close().map_err(|error| error.to_string())?;
-                return Ok(());
+                Ok(())
             }
-            let root = root.ok_or_else(|| "search requires --root or --store".to_owned())?;
-            let mut runtime = RuntimeStore::open(&root).map_err(|error| error.to_string())?;
-            let response = runtime
-                .search(RuntimeSearchRequest {
-                    mode: RuntimeSearchMode::Text,
-                    text_query: Some(text),
-                    vector_query: None,
-                    top_k,
-                    include_preview: preview,
-                })
-                .map_err(|error| error.to_string())?;
-            println!("{}", render_hits(response.hits)?);
-            runtime.close().map_err(|error| error.to_string())?;
-            Ok(())
-        }
+            (Some(root), None) => {
+                let mut runtime =
+                    RuntimeStore::open_read_only(&root).map_err(|error| error.to_string())?;
+                let response = runtime
+                    .search(RuntimeSearchRequest {
+                        mode: RuntimeSearchMode::Text,
+                        text_query: Some(text),
+                        vector_query: None,
+                        top_k,
+                        include_preview: preview,
+                    })
+                    .map_err(|error| error.to_string())?;
+                println!("{}", render_hits(response.hits)?);
+                runtime.close().map_err(|error| error.to_string())?;
+                Ok(())
+            }
+        },
     }
 }
 
