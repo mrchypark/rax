@@ -13,7 +13,7 @@ fn raw_full_snapshot_publish_matches_compatibility_import_semantics_for_equivale
     let compat_root = tempdir().unwrap();
     let raw_root = tempdir().unwrap();
     let docs_path = source_dir.path().join("docs.ndjson");
-    let docs = vec![
+    let docs = [
         (
             "doc-001",
             "rust benchmark guide",

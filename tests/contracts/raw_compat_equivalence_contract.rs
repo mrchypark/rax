@@ -15,7 +15,7 @@ fn raw_and_compatibility_ingest_produce_equivalent_runtime_results_for_the_same_
     let compat_root = tempdir().unwrap();
     let raw_root = tempdir().unwrap();
     let docs_path = source_dir.path().join("docs.ndjson");
-    let docs = vec![
+    let docs = [
         (
             "doc-001",
             "rust benchmark guide",

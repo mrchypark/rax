@@ -23,7 +23,7 @@ fn runtime_reports_apple_acceleration_capability_explicitly() {
             RuntimeAccelerationAvailability::UnsupportedPlatform
         );
     }
-    assert!(apple.detail.as_deref().unwrap_or("").len() > 0);
+    assert!(!apple.detail.as_deref().unwrap_or("").is_empty());
 }
 
 #[test]
@@ -43,5 +43,9 @@ fn runtime_resolves_platform_preference_without_changing_default_backend() {
         selection.requested_family,
         Some(RuntimePlatformAccelerationFamily::Apple)
     );
-    assert!(selection.fallback_reason.as_deref().unwrap_or("").len() > 0);
+    assert!(!selection
+        .fallback_reason
+        .as_deref()
+        .unwrap_or("")
+        .is_empty());
 }

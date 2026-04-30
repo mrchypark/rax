@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use tempfile::tempdir;
@@ -12,6 +14,12 @@ use wax_v2_mcp::{McpRequest, McpResponse, WaxMcpSurface};
 #[test]
 fn mcp_surface_ingests_documents_and_vectors_through_explicit_raw_requests() {
     let dataset_dir = tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(dataset_dir.path()).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(dataset_dir.path(), permissions).unwrap();
+    }
     let fixture_root =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/bench/source/minimal");
     let manifest = pack_dataset(&PackRequest::new(
@@ -25,7 +33,7 @@ fn mcp_surface_ingests_documents_and_vectors_through_explicit_raw_requests() {
     let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
     runtime.close().unwrap();
 
-    let mut mcp = WaxMcpSurface::with_allowed_root(dataset_dir.path()).unwrap();
+    let mut mcp = WaxMcpSurface::with_allowed_root_and_raw_sessions(dataset_dir.path()).unwrap();
     let open = mcp
         .handle(McpRequest::OpenSession {
             root: dataset_dir.path().display().to_string(),

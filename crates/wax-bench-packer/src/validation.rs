@@ -179,6 +179,7 @@ fn validate_file_references(manifest: &DatasetPackManifest) -> Result<(), Valida
                 | "document_vectors_preview_q8"
                 | "vector_lane_skeleton"
                 | "query_vectors"
+                | "store"
                 | "prebuilt_store"
         ) {
             return Err(ValidationError::new("invalid file kind"));

@@ -37,7 +37,7 @@ fn photorag_lists_only_image_assets_through_typed_image_api() {
     let photo_assets = session.list_photo_assets().unwrap();
     assert_eq!(photo_assets.len(), 1);
     assert_eq!(photo_assets[0].asset_id, "image:cover");
-    assert_eq!(photo_assets[0].stored_relative_path.ends_with(".png"), true);
+    assert!(photo_assets[0].stored_relative_path.ends_with(".png"));
 }
 
 #[test]

@@ -1,16 +1,19 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use wax_bench_model::DatasetPackManifest;
-use wax_v2_core::{OpenedStore, PendingSegmentDescriptor, PendingSegmentWrite, SegmentKind};
+use wax_v2_core::{
+    CoreError, OpenedStore, PendingSegmentDescriptor, PendingSegmentWrite, SegmentDescriptor,
+    SegmentKind,
+};
 
 const DOC_SEGMENT_MAGIC: &[u8; 4] = b"WXDG";
 const DOC_SEGMENT_MAJOR: u16 = 1;
@@ -125,13 +128,19 @@ impl DocIdMap {
         Self::from_bindings(bindings)
     }
 
-    pub fn next_wax_doc_id(&self) -> u64 {
-        self.bindings
+    pub fn next_wax_doc_id(&self) -> Result<u64, DocstoreError> {
+        Ok(self
+            .bindings
             .iter()
             .map(|binding| binding.wax_doc_id)
             .max()
-            .map(|value| value + 1)
-            .unwrap_or(0)
+            .map(|value| {
+                value.checked_add(1).ok_or_else(|| {
+                    DocstoreError::InvalidDocument("wax_doc_id space exhausted".to_owned())
+                })
+            })
+            .transpose()?
+            .unwrap_or(0))
     }
 
     pub fn extend_to_cover_document_order(
@@ -139,7 +148,7 @@ impl DocIdMap {
         document_ids: &[String],
     ) -> Result<Self, DocstoreError> {
         let mut bindings = self.bindings.clone();
-        let mut next_wax_doc_id = self.next_wax_doc_id();
+        let mut next_wax_doc_id = self.next_wax_doc_id()?;
         let mut seen = HashSet::with_capacity(document_ids.len());
 
         for document_id in document_ids {
@@ -150,7 +159,9 @@ impl DocIdMap {
             }
             if self.wax_doc_id(document_id).is_none() {
                 bindings.push(DocIdBinding::new(next_wax_doc_id, document_id.clone()));
-                next_wax_doc_id += 1;
+                next_wax_doc_id = next_wax_doc_id.checked_add(1).ok_or_else(|| {
+                    DocstoreError::InvalidDocument("wax_doc_id space exhausted".to_owned())
+                })?;
             }
         }
 
@@ -511,6 +522,7 @@ pub struct Docstore {
 
 #[derive(Debug)]
 enum DocstoreSource {
+    Empty,
     DatasetPack {
         documents_path: PathBuf,
         offset_index: Option<HashMap<String, DocumentOffsetEntry>>,
@@ -675,7 +687,12 @@ impl StoreDocSegment {
             let Some(row) = self.find_row_by_wax_doc_id(wax_doc_id) else {
                 continue;
             };
-            let (_, value) = self.parse_payload_document(&row)?;
+            let (payload_doc_id, value) = self.parse_payload_document(&row)?;
+            if payload_doc_id != *doc_id {
+                return Err(DocstoreError::InvalidDocument(format!(
+                    "store-backed document payload doc_id {payload_doc_id} does not match binding {doc_id}"
+                )));
+            }
             documents.insert(doc_id.clone(), value);
         }
         Ok(documents)
@@ -843,9 +860,17 @@ fn read_doc_row(row_bytes: &[u8]) -> DocRow {
 
 impl Docstore {
     pub fn open(mount_root: &Path, manifest: &DatasetPackManifest) -> Result<Self, DocstoreError> {
-        let store_path = mount_root.join("store.wax");
+        let store_path = store_path_from_manifest(mount_root, manifest)?;
+        Self::open_with_store_path(mount_root, manifest, &store_path)
+    }
+
+    pub fn open_with_store_path(
+        mount_root: &Path,
+        manifest: &DatasetPackManifest,
+        store_path: &Path,
+    ) -> Result<Self, DocstoreError> {
         if store_path.exists() {
-            let opened = wax_v2_core::open_store(&store_path)
+            let opened = wax_v2_core::open_store(store_path)
                 .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))?;
             if let Some(descriptor) = opened
                 .manifest
@@ -854,8 +879,13 @@ impl Docstore {
                 .filter(|segment| segment.family == SegmentKind::Doc)
                 .max_by_key(|segment| (segment.segment_generation, segment.object_offset))
             {
-                return Self::open_store_segment(&store_path, descriptor);
+                return Self::open_store_segment(store_path, descriptor);
             }
+        }
+        if manifest.files.iter().all(|file| file.kind != "documents") {
+            return Ok(Self {
+                source: DocstoreSource::Empty,
+            });
         }
 
         Self::open_dataset_pack(mount_root, manifest)
@@ -869,14 +899,16 @@ impl Docstore {
             .files
             .iter()
             .find(|file| file.kind == "documents")
-            .map(|file| mount_root.join(&file.path))
+            .map(|file| manifest_file_path(mount_root, file))
+            .transpose()?
             .ok_or(DocstoreError::MissingDocumentsFile)?;
 
         let offset_index = manifest
             .files
             .iter()
             .find(|file| file.kind == "document_offsets")
-            .map(|file| mount_root.join(&file.path))
+            .map(|file| manifest_file_path(mount_root, file))
+            .transpose()?
             .filter(|path| path.exists())
             .map(|path| load_document_offset_index(&path))
             .transpose()?;
@@ -894,6 +926,7 @@ impl Docstore {
         target_doc_ids: &[String],
     ) -> Result<HashMap<String, Value>, DocstoreError> {
         match &self.source {
+            DocstoreSource::Empty => Ok(HashMap::new()),
             DocstoreSource::DatasetPack {
                 documents_path,
                 offset_index,
@@ -911,7 +944,7 @@ impl Docstore {
                     .map(String::as_str)
                     .collect::<HashSet<_>>();
                 let mut documents = HashMap::new();
-                let file = File::open(documents_path)?;
+                let file = open_read_no_symlinks(documents_path)?;
                 let reader = BufReader::new(file);
                 for line in reader.lines() {
                     let line = line?;
@@ -942,6 +975,7 @@ impl Docstore {
 
     pub fn load_document_ids(&self) -> Result<Vec<String>, DocstoreError> {
         match &self.source {
+            DocstoreSource::Empty => Ok(Vec::new()),
             DocstoreSource::DatasetPack { documents_path, .. } => {
                 load_document_ids_from_documents(documents_path)
             }
@@ -951,6 +985,7 @@ impl Docstore {
 
     pub fn build_doc_id_map(&self) -> Result<DocIdMap, DocstoreError> {
         match &self.source {
+            DocstoreSource::Empty => DocIdMap::from_document_order(&[]),
             DocstoreSource::DatasetPack { .. } => {
                 let document_ids = self.load_document_ids()?;
                 DocIdMap::from_document_order(&document_ids)
@@ -960,9 +995,22 @@ impl Docstore {
     }
 
     pub fn build_binary_doc_segment(&self) -> Result<BinaryDocSegment, DocstoreError> {
-        let ordered_documents = match &self.source {
+        let ordered_documents = self.ordered_documents()?;
+        let document_ids = ordered_documents
+            .iter()
+            .map(|(external_doc_id, _)| external_doc_id.clone())
+            .collect::<Vec<_>>();
+        let doc_id_map = self
+            .build_doc_id_map()?
+            .extend_to_cover_document_order(&document_ids)?;
+        build_binary_doc_segment_from_documents(ordered_documents, doc_id_map)
+    }
+
+    fn ordered_documents(&self) -> Result<Vec<(String, Value)>, DocstoreError> {
+        Ok(match &self.source {
+            DocstoreSource::Empty => Vec::new(),
             DocstoreSource::DatasetPack { documents_path, .. } => {
-                let file = File::open(documents_path)?;
+                let file = open_read_no_symlinks(documents_path)?;
                 let reader = BufReader::new(file);
                 reader
                     .lines()
@@ -992,89 +1040,29 @@ impl Docstore {
                     .collect::<Result<Vec<_>, DocstoreError>>()?
             }
             DocstoreSource::Store { segment } => segment.ordered_documents()?,
-        };
-
-        let document_ids = ordered_documents
-            .iter()
-            .map(|(external_doc_id, _)| external_doc_id.clone())
-            .collect::<Vec<_>>();
-        let doc_id_map = self
-            .build_doc_id_map()?
-            .extend_to_cover_document_order(&document_ids)?;
-        let active_bindings = doc_id_map.bindings_for_external_doc_ids_sorted(&document_ids)?;
-        let documents_by_external_id = ordered_documents.into_iter().collect::<HashMap<_, _>>();
-        let mut records = Vec::new();
-        let mut payload_offset = 0u64;
-        let mut metadata_offset = 0u32;
-        let mut preview_offset = 0u32;
-
-        for binding in active_bindings {
-            let external_doc_id = binding.external_doc_id;
-            let wax_doc_id = binding.wax_doc_id;
-            let document = documents_by_external_id
-                .get(&external_doc_id)
-                .cloned()
-                .ok_or_else(|| {
-                    DocstoreError::InvalidDocument(format!(
-                        "missing document payload for {external_doc_id}"
-                    ))
-                })?;
-            let object = document.as_object().ok_or_else(|| {
-                DocstoreError::InvalidDocument("document line must be a json object".to_owned())
-            })?;
-            let payload = serde_json::to_vec(&document)?;
-            let metadata = object
-                .get("metadata")
-                .cloned()
-                .unwrap_or_else(|| Value::Object(Default::default()));
-            let metadata_bytes = serde_json::to_vec(&metadata)?;
-            let preview = object
-                .get("text")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned);
-            let preview_length = preview.as_ref().map(|value| value.len()).unwrap_or(0);
-            let metadata_length = checked_section_u32(metadata_bytes.len(), "metadata length")?;
-            let preview_length = checked_section_u32(preview_length, "preview length")?;
-
-            records.push(DocSegmentRecord {
-                row: DocRow {
-                    doc_id: wax_doc_id,
-                    timestamp_ms: object
-                        .get("timestamp_ms")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                    flags: 0,
-                    payload_offset,
-                    payload_length: payload.len() as u64,
-                    metadata_ref: SectionRef::new(metadata_offset, metadata_length),
-                    preview_ref: SectionRef::new(preview_offset, preview_length),
-                },
-                payload,
-                metadata,
-                preview,
-            });
-
-            payload_offset += records.last().expect("record").payload.len() as u64;
-            metadata_offset = metadata_offset
-                .checked_add(metadata_length)
-                .ok_or_else(|| {
-                    DocstoreError::InvalidDocument("metadata offset overflow".to_owned())
-                })?;
-            preview_offset = preview_offset.checked_add(preview_length).ok_or_else(|| {
-                DocstoreError::InvalidDocument("preview offset overflow".to_owned())
-            })?;
-        }
-
-        Ok(BinaryDocSegment {
-            doc_id_map,
-            records,
         })
     }
 
     pub fn publish_to_store(&self, store_path: &Path) -> Result<OpenedStore, DocstoreError> {
-        let prepared = self.prepare_segment_for_store(store_path)?;
-        wax_v2_core::publish_segment(store_path, prepared.descriptor, &prepared.object_bytes)
-            .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))
+        let opened = wax_v2_core::open_store(store_path)
+            .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))?;
+        let expected_generation = opened.manifest.generation;
+        let segment = if let Some(persisted_map) =
+            load_persisted_doc_id_map_from_opened_store(store_path, &opened)?
+        {
+            self.build_binary_doc_segment_with_doc_id_map(persisted_map)?
+        } else {
+            self.build_binary_doc_segment()?
+        };
+        let object_bytes = segment.encode()?;
+        let prepared = PendingSegmentWrite {
+            descriptor: pending_doc_segment_descriptor(&segment)?,
+            object_bytes,
+        };
+        wax_v2_core::publish_segments_with_precondition(store_path, vec![prepared], |manifest| {
+            ensure_store_generation_unchanged(manifest.generation, expected_generation)
+        })
+        .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))
     }
 
     pub fn prepare_segment_for_store(
@@ -1088,7 +1076,7 @@ impl Docstore {
             self.build_binary_doc_segment()?
         };
         let object_bytes = segment.encode()?;
-        let descriptor = pending_doc_segment_descriptor(&segment);
+        let descriptor = pending_doc_segment_descriptor(&segment)?;
         Ok(PendingSegmentWrite {
             descriptor,
             object_bytes,
@@ -1100,11 +1088,14 @@ impl Docstore {
         doc_id_map: DocIdMap,
     ) -> Result<BinaryDocSegment, DocstoreError> {
         match &self.source {
+            DocstoreSource::Empty => {
+                build_binary_doc_segment_from_documents(Vec::new(), doc_id_map)
+            }
             DocstoreSource::DatasetPack {
                 documents_path,
                 offset_index: _,
             } => {
-                let file = File::open(documents_path)?;
+                let file = open_read_no_symlinks(documents_path)?;
                 let reader = BufReader::new(file);
                 let ordered_documents = reader
                     .lines()
@@ -1158,25 +1149,286 @@ pub fn validate_store_segment_against_dataset_pack(
     mount_root: &Path,
     manifest: &DatasetPackManifest,
 ) -> Result<(), DocstoreError> {
-    let store_path = mount_root.join("store.wax");
+    let store_path = store_path_from_manifest(mount_root, manifest)?;
+    validate_store_segment_against_dataset_pack_with_store_path(&store_path, mount_root, manifest)
+}
+
+pub fn validate_store_segment_against_dataset_pack_with_store_path(
+    store_path: &Path,
+    mount_root: &Path,
+    manifest: &DatasetPackManifest,
+) -> Result<(), DocstoreError> {
     if !store_path.exists() {
         return Ok(());
     }
 
-    let opened = wax_v2_core::open_store(&store_path)
+    let opened = wax_v2_core::open_store(store_path)
         .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))?;
-    let Some(descriptor) = opened
+    let Some(descriptor) = active_doc_descriptor(&opened) else {
+        return Ok(());
+    };
+
+    let store_docstore = Docstore::open_store_segment(store_path, descriptor)?;
+    validate_store_docstore_against_dataset_pack(mount_root, manifest, &store_docstore)
+}
+
+pub fn validate_store_doc_descriptor_against_dataset_pack(
+    store_path: &Path,
+    descriptor: &SegmentDescriptor,
+    mount_root: &Path,
+    manifest: &DatasetPackManifest,
+) -> Result<(), DocstoreError> {
+    let store_docstore = Docstore::open_store_segment(store_path, descriptor)?;
+    validate_store_docstore_against_dataset_pack(mount_root, manifest, &store_docstore)
+}
+
+pub fn load_dataset_ordered_documents(
+    mount_root: &Path,
+    manifest: &DatasetPackManifest,
+) -> Result<Vec<(String, Value)>, DocstoreError> {
+    Docstore::open_dataset_pack(mount_root, manifest)?.ordered_documents()
+}
+
+pub fn load_store_ordered_documents(
+    store_path: &Path,
+    descriptor: &SegmentDescriptor,
+) -> Result<Vec<(String, Value)>, DocstoreError> {
+    Docstore::open_store_segment(store_path, descriptor)?.ordered_documents()
+}
+
+pub fn order_document_ids_for_store(
+    store_path: &Path,
+    document_ids: &[String],
+) -> Result<Vec<String>, DocstoreError> {
+    let doc_id_map = load_persisted_doc_id_map_from_store(store_path)?.unwrap_or_else(|| {
+        DocIdMap::from_bindings(Vec::new()).expect("empty doc id map should be valid")
+    });
+    Ok(doc_id_map
+        .extend_to_cover_document_order(document_ids)?
+        .bindings_for_external_doc_ids_sorted(document_ids)?
+        .into_iter()
+        .map(|binding| binding.external_doc_id)
+        .collect())
+}
+
+pub fn load_store_document_ids(store_path: &Path) -> Result<Option<Vec<String>>, DocstoreError> {
+    if !store_path.exists() {
+        return Ok(None);
+    }
+    let opened = wax_v2_core::open_store(store_path)
+        .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))?;
+    let Some(descriptor) = active_doc_descriptor(&opened) else {
+        return Ok(None);
+    };
+    let store_docstore = Docstore::open_store_segment(store_path, descriptor)?;
+    store_docstore.load_document_ids().map(Some)
+}
+
+fn active_doc_descriptor(opened: &OpenedStore) -> Option<&SegmentDescriptor> {
+    opened
         .manifest
         .segments
         .iter()
         .filter(|segment| segment.family == SegmentKind::Doc)
         .max_by_key(|segment| (segment.segment_generation, segment.object_offset))
-    else {
-        return Ok(());
-    };
+}
 
-    let store_docstore = Docstore::open_store_segment(&store_path, descriptor)?;
-    validate_store_docstore_against_dataset_pack(mount_root, manifest, &store_docstore)
+fn store_path_from_manifest(
+    mount_root: &Path,
+    manifest: &DatasetPackManifest,
+) -> Result<PathBuf, DocstoreError> {
+    manifest
+        .files
+        .iter()
+        .find(|file| file.kind == "store")
+        .or_else(|| {
+            manifest
+                .files
+                .iter()
+                .find(|file| file.kind == "prebuilt_store")
+        })
+        .map(|file| manifest_file_path(mount_root, file))
+        .unwrap_or_else(|| Ok(mount_root.join("store.wax")))
+}
+
+fn manifest_file_path(
+    mount_root: &Path,
+    file: &wax_bench_model::ManifestFile,
+) -> Result<PathBuf, DocstoreError> {
+    let path = Path::new(&file.path);
+    if path.is_absolute()
+        || !path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(DocstoreError::InvalidDocument(format!(
+            "manifest {} path {} must stay within dataset root",
+            file.kind, file.path
+        )));
+    }
+    root_confined_path(mount_root, path, &file.kind)
+}
+
+fn root_confined_path(
+    mount_root: &Path,
+    path: &Path,
+    kind: &str,
+) -> Result<PathBuf, DocstoreError> {
+    if matches!(kind, "store" | "prebuilt_store")
+        && is_stable_fd_table_root(mount_root)
+        && is_single_numeric_path_component(path)
+    {
+        return Ok(mount_root.join(path));
+    }
+    if is_linux_proc_self_fd_root(mount_root) {
+        reject_symlink_components(mount_root, path, kind)?;
+        return Ok(mount_root.join(path));
+    }
+    let Ok(root) = mount_root.canonicalize() else {
+        return Ok(mount_root.join(path));
+    };
+    reject_symlink_components(&root, path, kind)?;
+    let candidate = root.join(path);
+    if candidate.exists() {
+        let canonical = candidate.canonicalize()?;
+        if !canonical.starts_with(&root) {
+            return Err(DocstoreError::InvalidDocument(format!(
+                "manifest {kind} path {} resolves outside dataset root {}",
+                candidate.display(),
+                root.display()
+            )));
+        }
+        return Ok(canonical);
+    }
+    let mut ancestor = candidate.parent();
+    while let Some(path) = ancestor {
+        if path.exists() {
+            let canonical = path.canonicalize()?;
+            if !canonical.starts_with(&root) {
+                return Err(DocstoreError::InvalidDocument(format!(
+                    "manifest {kind} ancestor {} resolves outside dataset root {}",
+                    path.display(),
+                    root.display()
+                )));
+            }
+            return Ok(candidate);
+        }
+        ancestor = path.parent();
+    }
+    if !candidate.starts_with(&root) {
+        return Err(DocstoreError::InvalidDocument(format!(
+            "manifest {kind} path {} is outside dataset root {}",
+            candidate.display(),
+            root.display()
+        )));
+    }
+    Ok(candidate)
+}
+
+#[cfg(unix)]
+fn is_stable_fd_table_root(path: &Path) -> bool {
+    path_has_absolute_normal_components(path, stable_fd_table_components())
+}
+
+#[cfg(not(unix))]
+fn is_stable_fd_table_root(_path: &Path) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn stable_fd_table_components() -> &'static [&'static str] {
+    &["proc", "self", "fd"]
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn stable_fd_table_components() -> &'static [&'static str] {
+    &["dev", "fd"]
+}
+
+#[cfg(unix)]
+fn path_has_absolute_normal_components(path: &Path, expected_components: &[&str]) -> bool {
+    let mut components = path.components();
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return false;
+    }
+    for expected in expected_components {
+        match components.next() {
+            Some(Component::Normal(component)) if component == *expected => {}
+            _ => return false,
+        }
+    }
+    components.next().is_none()
+}
+
+fn is_single_numeric_path_component(path: &Path) -> bool {
+    let mut components = path.components();
+    let is_numeric = match components.next() {
+        Some(Component::Normal(component)) => component.to_str().is_some_and(|value| {
+            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+        }),
+        _ => false,
+    };
+    is_numeric && components.next().is_none()
+}
+
+#[cfg(target_os = "linux")]
+fn is_linux_proc_self_fd_root(path: &Path) -> bool {
+    let mut components = path.components();
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return false;
+    }
+    for expected in ["proc", "self", "fd"] {
+        match components.next() {
+            Some(Component::Normal(component)) if component == expected => {}
+            _ => return false,
+        }
+    }
+    let has_valid_fd = match components.next() {
+        Some(Component::Normal(fd)) => fd
+            .to_str()
+            .is_some_and(|fd| !fd.is_empty() && fd.bytes().all(|byte| byte.is_ascii_digit())),
+        _ => false,
+    };
+    has_valid_fd && components.next().is_none()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_linux_proc_self_fd_root(_path: &Path) -> bool {
+    false
+}
+
+fn reject_symlink_components(root: &Path, path: &Path, kind: &str) -> Result<(), DocstoreError> {
+    let mut current = root.to_path_buf();
+    for component in path.components() {
+        let Component::Normal(component) = component else {
+            continue;
+        };
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(DocstoreError::InvalidDocument(format!(
+                    "manifest {kind} path {} contains a symlink component",
+                    current.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn ensure_store_generation_unchanged(
+    actual_generation: u64,
+    expected_generation: u64,
+) -> Result<(), CoreError> {
+    if actual_generation != expected_generation {
+        return Err(CoreError::PublishPreconditionFailed(format!(
+            "store generation changed during doc publish: expected {expected_generation}, found {actual_generation}"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_store_docstore_against_dataset_pack(
@@ -1188,7 +1440,8 @@ fn validate_store_docstore_against_dataset_pack(
         .files
         .iter()
         .find(|file| file.kind == "documents")
-        .map(|file| mount_root.join(&file.path))
+        .map(|file| manifest_file_path(mount_root, file))
+        .transpose()?
         .is_some_and(|path| path.exists());
     if !documents_exist {
         return Ok(());
@@ -1202,7 +1455,10 @@ fn validate_store_docstore_against_dataset_pack(
 
     let dataset_doc_ids = dataset_docstore.load_document_ids()?;
     let store_doc_ids = store_docstore.load_document_ids()?;
-    if dataset_doc_ids != store_doc_ids {
+    if dataset_doc_ids.len() != store_doc_ids.len()
+        || dataset_doc_ids.iter().collect::<HashSet<_>>()
+            != store_doc_ids.iter().collect::<HashSet<_>>()
+    {
         return Err(DocstoreError::InvalidDocument(
             "store doc segment does not match mounted dataset document ids".to_owned(),
         ));
@@ -1307,6 +1563,13 @@ fn load_persisted_doc_id_map_from_store(
     }
     let opened = wax_v2_core::open_store(store_path)
         .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))?;
+    load_persisted_doc_id_map_from_opened_store(store_path, &opened)
+}
+
+fn load_persisted_doc_id_map_from_opened_store(
+    store_path: &Path,
+    opened: &OpenedStore,
+) -> Result<Option<DocIdMap>, DocstoreError> {
     let Some(descriptor) = opened
         .manifest
         .segments
@@ -1323,7 +1586,7 @@ fn load_persisted_doc_id_map_from_store(
 }
 
 pub fn load_document_ids_from_documents(path: &Path) -> Result<Vec<String>, DocstoreError> {
-    let file = File::open(path)?;
+    let file = open_read_no_symlinks(path)?;
     let reader = BufReader::new(file);
     reader
         .lines()
@@ -1349,7 +1612,7 @@ pub fn prepare_raw_documents_segment(
     });
     let segment = build_binary_doc_segment_from_documents(ordered_documents, doc_id_map)?;
     let object_bytes = segment.encode()?;
-    let descriptor = pending_doc_segment_descriptor(&segment);
+    let descriptor = pending_doc_segment_descriptor(&segment)?;
     Ok(PendingSegmentWrite {
         descriptor,
         object_bytes,
@@ -1371,7 +1634,7 @@ pub fn parse_document_id<'a>(line: &'a str, context: &str) -> Result<Cow<'a, str
 fn load_document_offset_index(
     path: &Path,
 ) -> Result<HashMap<String, DocumentOffsetEntry>, DocstoreError> {
-    let file = File::open(path)?;
+    let file = open_read_no_symlinks(path)?;
     let reader = BufReader::new(file);
     let mut index = HashMap::new();
 
@@ -1406,7 +1669,7 @@ fn load_documents_by_id_from_offsets(
     offset_index: &HashMap<String, DocumentOffsetEntry>,
     target_doc_ids: &[String],
 ) -> Result<HashMap<String, Value>, DocstoreError> {
-    let mut file = File::open(path)?;
+    let mut file = open_read_no_symlinks(path)?;
     let file_length = file.metadata()?.len();
     let mut documents = HashMap::new();
 
@@ -1472,6 +1735,11 @@ fn validate_document_offset_entry(
         ))
     })?;
     Ok(())
+}
+
+fn open_read_no_symlinks(path: &Path) -> Result<File, DocstoreError> {
+    wax_v2_core::open_file_read_no_symlinks(path)
+        .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1624,7 +1892,9 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     checksum
 }
 
-fn pending_doc_segment_descriptor(segment: &BinaryDocSegment) -> PendingSegmentDescriptor {
+fn pending_doc_segment_descriptor(
+    segment: &BinaryDocSegment,
+) -> Result<PendingSegmentDescriptor, DocstoreError> {
     let doc_id_start = segment
         .records
         .first()
@@ -1633,7 +1903,12 @@ fn pending_doc_segment_descriptor(segment: &BinaryDocSegment) -> PendingSegmentD
     let doc_id_end_exclusive = segment
         .records
         .last()
-        .map(|record| record.row.doc_id + 1)
+        .map(|record| {
+            record.row.doc_id.checked_add(1).ok_or_else(|| {
+                DocstoreError::InvalidDocument("wax_doc_id space exhausted".to_owned())
+            })
+        })
+        .transpose()?
         .unwrap_or(0);
     let min_timestamp_ms = segment
         .records
@@ -1653,7 +1928,7 @@ fn pending_doc_segment_descriptor(segment: &BinaryDocSegment) -> PendingSegmentD
         .filter(|record| record.row.is_tombstone())
         .count() as u64;
 
-    PendingSegmentDescriptor {
+    Ok(PendingSegmentDescriptor {
         family: SegmentKind::Doc,
         family_version: 1,
         flags: 0,
@@ -1665,7 +1940,7 @@ fn pending_doc_segment_descriptor(segment: &BinaryDocSegment) -> PendingSegmentD
         tombstoned_items,
         backend_id: 0,
         backend_aux: 0,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1676,8 +1951,8 @@ mod tests {
     use tempfile::tempdir;
     use wax_bench_model::DatasetPackManifest;
     use wax_v2_core::{
-        create_empty_store, open_store, publish_segment, read_segment_object,
-        PendingSegmentDescriptor, SegmentKind,
+        create_empty_store, open_store, publish_segment, publish_segments_with_precondition,
+        read_segment_object, PendingSegmentDescriptor, PendingSegmentWrite, SegmentKind,
     };
 
     use crate::{
@@ -1899,6 +2174,25 @@ mod tests {
     }
 
     #[test]
+    fn open_dataset_pack_rejects_manifest_document_paths_outside_root() {
+        let temp_dir = tempdir().unwrap();
+        let mut manifest = test_manifest(true);
+        manifest
+            .files
+            .iter_mut()
+            .find(|file| file.kind == "documents")
+            .unwrap()
+            .path = "../outside.ndjson".to_owned();
+
+        let error = Docstore::open_dataset_pack(temp_dir.path(), &manifest).unwrap_err();
+
+        assert!(matches!(
+            error,
+            DocstoreError::InvalidDocument(message) if message.contains("must stay within dataset root")
+        ));
+    }
+
+    #[test]
     fn doc_id_map_assigns_numeric_ids_in_document_file_order() {
         let temp_dir = tempdir().unwrap();
         let docs_path = temp_dir.path().join("docs.ndjson");
@@ -1968,6 +2262,19 @@ mod tests {
 
         assert!(
             matches!(error, DocstoreError::InvalidDocument(message) if message.contains("duplicate"))
+        );
+    }
+
+    #[test]
+    fn doc_id_map_rejects_exhausted_wax_doc_id_space() {
+        let map = DocIdMap::from_bindings(vec![DocIdBinding::new(u64::MAX, "doc-max")]).unwrap();
+
+        let error = map
+            .extend_to_cover_document_order(&["doc-max".to_owned(), "doc-new".to_owned()])
+            .unwrap_err();
+
+        assert!(
+            matches!(error, DocstoreError::InvalidDocument(message) if message.contains("exhausted"))
         );
     }
 
@@ -2106,22 +2413,25 @@ mod tests {
         bytes[replaced..replaced + 7].copy_from_slice(b"doc-999");
         let checksum = sha256(&bytes[88..]);
         bytes[56..88].copy_from_slice(&checksum);
-        publish_segment(
+        publish_segments_with_precondition(
             &store_path,
-            PendingSegmentDescriptor {
-                family: SegmentKind::Doc,
-                family_version: descriptor.family_version,
-                flags: descriptor.flags,
-                doc_id_start: descriptor.doc_id_start,
-                doc_id_end_exclusive: descriptor.doc_id_end_exclusive,
-                min_timestamp_ms: descriptor.min_timestamp_ms,
-                max_timestamp_ms: descriptor.max_timestamp_ms,
-                live_items: descriptor.live_items,
-                tombstoned_items: descriptor.tombstoned_items,
-                backend_id: descriptor.backend_id,
-                backend_aux: descriptor.backend_aux,
-            },
-            &bytes,
+            vec![PendingSegmentWrite {
+                descriptor: PendingSegmentDescriptor {
+                    family: SegmentKind::Doc,
+                    family_version: descriptor.family_version,
+                    flags: descriptor.flags,
+                    doc_id_start: descriptor.doc_id_start,
+                    doc_id_end_exclusive: descriptor.doc_id_end_exclusive,
+                    min_timestamp_ms: descriptor.min_timestamp_ms,
+                    max_timestamp_ms: descriptor.max_timestamp_ms,
+                    live_items: descriptor.live_items,
+                    tombstoned_items: descriptor.tombstoned_items,
+                    backend_id: descriptor.backend_id,
+                    backend_aux: descriptor.backend_aux,
+                },
+                object_bytes: bytes,
+            }],
+            |_| Ok(()),
         )
         .unwrap();
         fs::remove_file(&docs_path).unwrap();
@@ -2132,6 +2442,12 @@ mod tests {
         assert_eq!(
             reopened.load_document_ids().unwrap(),
             vec!["doc-900", "doc-010"]
+        );
+        let error = reopened
+            .load_documents_by_id(&["doc-900".to_owned()])
+            .unwrap_err();
+        assert!(
+            matches!(error, DocstoreError::InvalidDocument(message) if message.contains("does not match binding doc-900"))
         );
     }
 
