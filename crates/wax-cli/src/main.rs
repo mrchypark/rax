@@ -273,10 +273,9 @@ fn mode_name(mode: CliSearchMode) -> &'static str {
 }
 
 fn read_query_vector(path: &std::path::Path) -> Result<Vec<f32>, String> {
-    let vector = serde_json::from_reader::<_, CliQueryVector>(
-        File::open(path).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let vector = serde_json::from_reader::<_, CliQueryVector>(BufReader::new(file))
+        .map_err(|error| error.to_string())?;
     let values = match vector {
         CliQueryVector::Values(values) => values,
         CliQueryVector::Object(object) => object.values,
