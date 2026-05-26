@@ -436,6 +436,14 @@ impl RuntimeStore {
         }
     }
 
+    pub fn open_or_create_at(path: &Path) -> Result<Self, RuntimeError> {
+        if path.exists() {
+            Self::open_existing_at(path)
+        } else {
+            Self::create_at(path)
+        }
+    }
+
     fn open_at_after_create_conflict(path: &Path) -> Result<Self, RuntimeError> {
         let mut last_error = None;
         for attempt in 0..MEMORY_OPEN_CREATE_RACE_ATTEMPTS {

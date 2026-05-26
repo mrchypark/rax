@@ -1,177 +1,93 @@
-use std::fs;
-use std::path::PathBuf;
-
 use serde_json::json;
 use tempfile::tempdir;
-use wax_bench_packer::{pack_dataset, PackRequest};
-use wax_v2_runtime::{NewDocument, RuntimeStore};
+use wax_bench_model::embed_text;
+use wax_v2_core::{open_store, read_segment_object, SegmentKind};
+use wax_v2_docstore::BinaryDocSegment;
 
-use wax_v2_broker::{SessionNewDocument, SessionSearchRequest, WaxBroker};
+use wax_v2_broker::{
+    SessionNewDocument, SessionNewDocumentVector, SessionSearchRequest, WaxBroker,
+};
 
 #[test]
-fn broker_session_reuses_open_store_across_multiple_text_searches() {
-    let dataset_dir = tempdir().unwrap();
-    let fixture_root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/bench/source/minimal");
-    pack_dataset(&PackRequest::new(
-        &fixture_root,
-        dataset_dir.path(),
-        "small",
-        "clean",
-    ))
-    .unwrap();
+fn broker_store_session_ingests_reopens_and_searches_raw_documents_without_dataset_manifest() {
+    let temp_dir = tempdir().unwrap();
+    let store_path = temp_dir.path().join("projection.wax");
 
     let mut broker = WaxBroker::default();
-    let session_id = broker.open_session(dataset_dir.path()).unwrap();
+    let session_id = broker.open_store_session(&store_path).unwrap();
+    let mut extra_fields = serde_json::Map::new();
+    extra_fields.insert("channel".to_owned(), json!("direct-api"));
+    extra_fields.insert("rank".to_owned(), json!(7));
 
-    let first = broker
-        .search(
+    broker
+        .ingest_documents(
             session_id,
-            SessionSearchRequest::text("rust benchmark")
-                .with_top_k(2)
-                .with_preview(true),
+            vec![SessionNewDocument {
+                doc_id: "caller-doc-42".to_owned(),
+                text: "direct projection raw token".to_owned(),
+                metadata: json!({"workspace":"product","kind":"note"}),
+                timestamp_ms: Some(1_714_567_890_123),
+                extra_fields,
+            }],
         )
         .unwrap();
-    let second = broker
-        .search(
-            session_id,
-            SessionSearchRequest::text("semantic latency").with_top_k(2),
-        )
-        .unwrap();
-
-    assert_eq!(first.hits[0].doc_id, "doc-001");
-    assert_eq!(
-        first.hits[0].preview.as_deref(),
-        Some("rust benchmark guide")
-    );
-    assert_eq!(second.hits[0].doc_id, "doc-002");
-
     broker.close_session(session_id).unwrap();
-}
 
-#[test]
-fn broker_session_imports_compatibility_snapshot_then_searches_without_sidecars() {
-    let dataset_dir = tempdir().unwrap();
-    let fixture_root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/bench/source/minimal");
-    let manifest = pack_dataset(&PackRequest::new(
-        &fixture_root,
-        dataset_dir.path(),
-        "small",
-        "clean",
-    ))
-    .unwrap();
-
-    let mut broker = WaxBroker::default();
-    let session_id = broker.open_session(dataset_dir.path()).unwrap();
-    let report = broker.import_compatibility_snapshot(session_id).unwrap();
-    assert_eq!(report.generation, 1);
-
-    for kind in [
-        "documents",
-        "document_offsets",
-        "text_postings",
-        "document_ids",
-        "document_vectors",
-        "document_vectors_preview_q8",
-    ] {
-        for file in manifest.files.iter().filter(|file| file.kind == kind) {
-            fs::remove_file(dataset_dir.path().join(&file.path)).unwrap();
-        }
-    }
-
+    let reopened_id = broker.open_store_session(&store_path).unwrap();
     let response = broker
         .search(
-            session_id,
-            SessionSearchRequest::text("rust benchmark")
-                .with_top_k(2)
+            reopened_id,
+            SessionSearchRequest::text("projection raw")
+                .with_top_k(1)
                 .with_preview(true),
         )
         .unwrap();
-    assert_eq!(response.hits[0].doc_id, "doc-001");
+
+    assert_eq!(response.hits[0].doc_id, "caller-doc-42");
     assert_eq!(
         response.hits[0].preview.as_deref(),
-        Some("rust benchmark guide")
+        Some("direct projection raw token")
     );
 
-    broker.close_session(session_id).unwrap();
+    let opened_store = open_store(&store_path).unwrap();
+    let doc_descriptor = opened_store
+        .manifest
+        .segments
+        .iter()
+        .filter(|segment| segment.family == SegmentKind::Doc)
+        .max_by_key(|segment| (segment.segment_generation, segment.object_offset))
+        .unwrap();
+    let doc_segment_bytes = read_segment_object(&store_path, doc_descriptor).unwrap();
+    let doc_segment = BinaryDocSegment::decode(&doc_segment_bytes).unwrap();
+    let caller_wax_doc_id = doc_segment.doc_id_map.wax_doc_id("caller-doc-42").unwrap();
+    let caller_payload = doc_segment
+        .records
+        .iter()
+        .find(|record| record.row.doc_id == caller_wax_doc_id)
+        .map(|record| serde_json::from_slice::<serde_json::Value>(&record.payload).unwrap())
+        .unwrap();
+
+    assert_eq!(caller_payload["doc_id"], json!("caller-doc-42"));
+    assert_eq!(caller_payload["text"], json!("direct projection raw token"));
+    assert_eq!(
+        caller_payload["metadata"],
+        json!({"workspace":"product","kind":"note"})
+    );
+    assert_eq!(caller_payload["timestamp_ms"], json!(1_714_567_890_123_u64));
+    assert_eq!(caller_payload["channel"], json!("direct-api"));
+    assert_eq!(caller_payload["rank"], json!(7));
+
+    broker.close_session(reopened_id).unwrap();
 }
 
 #[test]
-fn broker_session_searches_raw_prepared_store_without_sidecars() {
-    let dataset_dir = tempdir().unwrap();
-    let fixture_root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/bench/source/minimal");
-    let manifest = pack_dataset(&PackRequest::new(
-        &fixture_root,
-        dataset_dir.path(),
-        "small",
-        "clean",
-    ))
-    .unwrap();
-
-    let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
-    runtime
-        .writer()
-        .unwrap()
-        .publish_raw_documents(vec![
-            NewDocument::new("doc-001", "rust benchmark guide")
-                .with_metadata(json!({"kind":"guide","workspace":"prod"})),
-            NewDocument::new("doc-002", "semantic latency checklist")
-                .with_metadata(json!({"kind":"checklist","workspace":"prod"})),
-        ])
-        .unwrap();
-    runtime.close().unwrap();
-
-    for kind in ["documents", "document_offsets", "text_postings"] {
-        for file in manifest.files.iter().filter(|file| file.kind == kind) {
-            fs::remove_file(dataset_dir.path().join(&file.path)).unwrap();
-        }
-    }
+fn broker_store_session_search_refreshes_documents_published_by_another_session() {
+    let temp_dir = tempdir().unwrap();
+    let store_path = temp_dir.path().join("projection-refresh.wax");
 
     let mut broker = WaxBroker::default();
-    let session_id = broker.open_session(dataset_dir.path()).unwrap();
-    let response = broker
-        .search(
-            session_id,
-            SessionSearchRequest::text("rust benchmark")
-                .with_top_k(2)
-                .with_preview(true),
-        )
-        .unwrap();
-    assert_eq!(response.hits[0].doc_id, "doc-001");
-    assert_eq!(
-        response.hits[0].preview.as_deref(),
-        Some("rust benchmark guide")
-    );
-
-    broker.close_session(session_id).unwrap();
-}
-
-#[test]
-fn broker_session_search_refreshes_documents_published_by_another_session() {
-    let dataset_dir = tempdir().unwrap();
-    let fixture_root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/bench/source/minimal");
-    pack_dataset(&PackRequest::new(
-        &fixture_root,
-        dataset_dir.path(),
-        "small",
-        "clean",
-    ))
-    .unwrap();
-
-    let mut broker = WaxBroker::default();
-    let reader_id = broker.open_session(dataset_dir.path()).unwrap();
-    let writer_id = broker.open_session(dataset_dir.path()).unwrap();
-
-    let first = broker
-        .search(
-            reader_id,
-            SessionSearchRequest::text("rust benchmark").with_top_k(1),
-        )
-        .unwrap();
-    assert_eq!(first.hits[0].doc_id, "doc-001");
+    let reader_id = broker.open_store_session(&store_path).unwrap();
+    let writer_id = broker.open_store_session(&store_path).unwrap();
 
     broker
         .ingest_documents(
@@ -202,4 +118,80 @@ fn broker_session_search_refreshes_documents_published_by_another_session() {
 
     broker.close_session(reader_id).unwrap();
     broker.close_session(writer_id).unwrap();
+}
+
+#[test]
+fn broker_store_session_ingests_vectors_and_searches_direct_store() {
+    let temp_dir = tempdir().unwrap();
+    let store_path = temp_dir.path().join("projection-vectors.wax");
+
+    let mut broker = WaxBroker::default();
+    let session_id = broker.open_store_session(&store_path).unwrap();
+    broker
+        .ingest_documents(
+            session_id,
+            vec![
+                SessionNewDocument {
+                    doc_id: "vec-doc-1".to_owned(),
+                    text: "direct vector rust guide".to_owned(),
+                    metadata: json!({"kind":"guide"}),
+                    timestamp_ms: None,
+                    extra_fields: Default::default(),
+                },
+                SessionNewDocument {
+                    doc_id: "vec-doc-2".to_owned(),
+                    text: "direct semantic latency checklist".to_owned(),
+                    metadata: json!({"kind":"checklist"}),
+                    timestamp_ms: None,
+                    extra_fields: Default::default(),
+                },
+            ],
+        )
+        .unwrap();
+    broker
+        .ingest_vectors(
+            session_id,
+            vec![
+                SessionNewDocumentVector {
+                    doc_id: "vec-doc-1".to_owned(),
+                    values: embed_text("direct vector rust guide", 384),
+                },
+                SessionNewDocumentVector {
+                    doc_id: "vec-doc-2".to_owned(),
+                    values: embed_text("direct semantic latency checklist", 384),
+                },
+            ],
+        )
+        .unwrap();
+    broker.close_session(session_id).unwrap();
+
+    let reopened_id = broker.open_store_session(&store_path).unwrap();
+    let vector_response = broker
+        .search(
+            reopened_id,
+            SessionSearchRequest::vector(embed_text("direct semantic latency checklist", 384))
+                .with_top_k(1)
+                .with_preview(true),
+        )
+        .unwrap();
+    assert_eq!(vector_response.hits[0].doc_id, "vec-doc-2");
+    assert_eq!(
+        vector_response.hits[0].preview.as_deref(),
+        Some("direct semantic latency checklist")
+    );
+
+    let hybrid_response = broker
+        .search(
+            reopened_id,
+            SessionSearchRequest::hybrid(
+                "semantic latency",
+                embed_text("direct semantic latency checklist", 384),
+            )
+            .with_top_k(1)
+            .with_preview(true),
+        )
+        .unwrap();
+    assert_eq!(hybrid_response.hits[0].doc_id, "vec-doc-2");
+
+    broker.close_session(reopened_id).unwrap();
 }
