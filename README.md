@@ -44,11 +44,16 @@ cargo run -p wax-cli -- recall \
   --top-k 5
 ```
 
-`search --store` is the same product-memory path with explicit search naming:
+`recall` is the product-memory query path. It uses the memory facade and hybrid
+search over memories written by `remember`.
+
+`search --store` is the raw runtime search path. Use it for caller-owned
+projection stores populated with `wax ingest docs --store`; it preserves external
+document ids instead of generating `mem-*` ids:
 
 ```bash
 cargo run -p wax-cli -- search \
-  --store ~/.local/share/rax/agent.wax \
+  --store ~/.local/share/rax/projection.wax \
   --text "habit tracker" \
   --top-k 5 \
   --preview
@@ -88,11 +93,12 @@ After the JSON-RPC `initialize` request succeeds and the client sends
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"remember","arguments":{"store":"/home/alice/.local/share/rax-mcp/agent.wax","content":"The user is building a habit tracker in Rust."}}}
 ```
 
-## Use Lower-Level Ingest Commands
+## Use Raw Projection Stores
 
-The lower-level ingest commands are useful when you already have document ids or
-external vectors. These commands use a dataset root and are kept for migration
-and compatibility workflows.
+Raw projection stores are the product path when another system owns canonical
+records and wants Wax to own retrieval indexing. The caller supplies stable
+document ids, text, metadata, and optional timestamps; Wax stores those ids and
+returns them from search.
 
 Prepare raw documents as JSONL. Each row needs `doc_id` and `text`; `metadata`,
 `timestamp_ms`, and extra top-level fields are optional.
@@ -102,12 +108,12 @@ Prepare raw documents as JSONL. Each row needs `doc_id` and `text`; `metadata`,
 {"doc_id":"doc-2","text":"beta launch checklist","metadata":{"kind":"task"}}
 ```
 
-Ingest documents:
+Ingest documents into a direct `.wax` store. The store is created if it does not
+exist:
 
 ```bash
-cargo run -p wax-cli -- create --root fixtures/bench/minimal-dataset-pack
 cargo run -p wax-cli -- ingest docs \
-  --root fixtures/bench/minimal-dataset-pack \
+  --store ~/.local/share/rax/projection.wax \
   --input /tmp/docs.jsonl
 ```
 
@@ -115,31 +121,49 @@ Search text:
 
 ```bash
 cargo run -p wax-cli -- search \
-  --root fixtures/bench/minimal-dataset-pack \
+  --store ~/.local/share/rax/projection.wax \
   --text "launch checklist" \
   --top-k 5 \
   --preview
 ```
 
-Optionally ingest explicit vectors for existing document ids:
+Optionally ingest explicit vectors for existing document ids. The vector input
+must cover the current document set; publish documents first. Each `values`
+array must contain 384 floats, matching the product store embedding profile.
+Rows have this shape:
 
-```jsonl
-{"doc_id":"doc-1","values":[0.1,0.2,0.3]}
-{"doc_id":"doc-2","values":[0.2,0.1,0.4]}
+```text
+{"doc_id":"doc-1","values":[384 floats]}
 ```
 
 ```bash
 cargo run -p wax-cli -- ingest vectors \
-  --root fixtures/bench/minimal-dataset-pack \
+  --store ~/.local/share/rax/projection.wax \
   --input /tmp/vectors.jsonl
 ```
 
-For legacy dataset-pack inputs, create the store and publish a compatibility
-snapshot from a dataset root:
+Search with an external query vector when the caller owns embeddings:
+the query file can be either a 384-float JSON array or an object with a single
+`values` field containing 384 floats.
 
 ```bash
-cargo run -p wax-cli -- create --root fixtures/bench/minimal-dataset-pack
-cargo run -p wax-cli -- import-compat --root fixtures/bench/minimal-dataset-pack
+cargo run -p wax-cli -- search \
+  --store ~/.local/share/rax/projection.wax \
+  --mode vector \
+  --vector-input /tmp/query-vector.json \
+  --top-k 5 \
+  --preview
+```
+
+Hybrid search accepts both `--text` and `--vector-input`:
+
+```bash
+cargo run -p wax-cli -- search \
+  --store ~/.local/share/rax/projection.wax \
+  --mode hybrid \
+  --text "launch checklist" \
+  --vector-input /tmp/query-vector.json \
+  --top-k 5
 ```
 
 ## Use The Benchmark Harness
@@ -181,8 +205,8 @@ cargo run -p wax-bench-cli -- query \
 
 ## Current Scope
 
-The runtime supports store creation, raw document ingest, explicit vector ingest,
-text search, vector-backed runtime paths, compatibility import, broker/session
-APIs, and an MCP-compatible in-process surface. The benchmark harness validates
-dataset packing, runner lifecycle metrics, search quality summaries, vector mode
+The product surface supports direct `.wax` store creation, raw document ingest,
+explicit vector ingest, text/vector/hybrid search, broker store sessions, and an
+MCP-compatible in-process surface. The benchmark harness validates dataset
+packing, runner lifecycle metrics, search quality summaries, vector mode
 profiling, and artifact reduction.

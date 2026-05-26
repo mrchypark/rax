@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 use wax_v2_runtime::{
     Memory, MemorySearchOptions, NewDocument, NewDocumentVector, RuntimeSearchMode,
@@ -20,16 +20,12 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Create {
-        #[arg(long)]
-        root: PathBuf,
+        #[arg(long, help = "Direct .wax product store file")]
+        store: PathBuf,
     },
     Ingest {
         #[command(subcommand)]
         command: IngestCommand,
-    },
-    ImportCompat {
-        #[arg(long)]
-        root: PathBuf,
     },
     Remember {
         #[arg(long)]
@@ -46,12 +42,17 @@ enum Command {
         preview: bool,
     },
     Search {
-        #[arg(long)]
-        root: Option<PathBuf>,
-        #[arg(long)]
-        store: Option<PathBuf>,
-        #[arg(long)]
-        text: String,
+        #[arg(long, help = "Direct .wax product store file")]
+        store: PathBuf,
+        #[arg(long, help = "Text query for raw runtime text search")]
+        text: Option<String>,
+        #[arg(long, value_enum, default_value_t = CliSearchMode::Text)]
+        mode: CliSearchMode,
+        #[arg(
+            long,
+            help = "JSON file containing a query vector array or {\"values\": [...]}"
+        )]
+        vector_input: Option<PathBuf>,
         #[arg(long, default_value_t = 5)]
         top_k: usize,
         #[arg(long, default_value_t = false)]
@@ -59,18 +60,25 @@ enum Command {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliSearchMode {
+    Text,
+    Vector,
+    Hybrid,
+}
+
 #[derive(Debug, Subcommand)]
 enum IngestCommand {
     Docs {
-        #[arg(long)]
-        root: PathBuf,
-        #[arg(long)]
+        #[arg(long, help = "Direct .wax product store file")]
+        store: PathBuf,
+        #[arg(long, help = "JSONL raw document input")]
         input: PathBuf,
     },
     Vectors {
-        #[arg(long)]
-        root: PathBuf,
-        #[arg(long)]
+        #[arg(long, help = "Direct .wax product store file")]
+        store: PathBuf,
+        #[arg(long, help = "JSONL explicit vector input for existing documents")]
         input: PathBuf,
     },
 }
@@ -93,18 +101,31 @@ struct CliNewDocumentVector {
     values: Vec<f32>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum CliQueryVector {
+    Values(Vec<f32>),
+    Object(CliQueryVectorObject),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CliQueryVectorObject {
+    values: Vec<f32>,
+}
+
 fn main() -> Result<(), String> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Create { root } => {
-            let mut runtime = RuntimeStore::create(&root).map_err(|error| error.to_string())?;
+        Command::Create { store } => {
+            let mut runtime =
+                RuntimeStore::open_or_create_at(&store).map_err(|error| error.to_string())?;
             runtime.close().map_err(|error| error.to_string())?;
             Ok(())
         }
         Command::Ingest { command } => match command {
-            IngestCommand::Docs { root, input } => {
-                let mut runtime = RuntimeStore::open(&root).map_err(|error| error.to_string())?;
+            IngestCommand::Docs { store, input } => {
                 let documents = read_jsonl::<CliNewDocument>(&input)?
                     .into_iter()
                     .map(|document| {
@@ -119,6 +140,8 @@ fn main() -> Result<(), String> {
                         runtime_document
                     })
                     .collect::<Vec<_>>();
+                let mut runtime =
+                    RuntimeStore::open_or_create_at(&store).map_err(|error| error.to_string())?;
                 let report = runtime
                     .writer()
                     .map_err(|error| error.to_string())?
@@ -128,12 +151,12 @@ fn main() -> Result<(), String> {
                 runtime.close().map_err(|error| error.to_string())?;
                 Ok(())
             }
-            IngestCommand::Vectors { root, input } => {
-                let mut runtime = RuntimeStore::open(&root).map_err(|error| error.to_string())?;
+            IngestCommand::Vectors { store, input } => {
                 let vectors = read_jsonl::<CliNewDocumentVector>(&input)?
                     .into_iter()
                     .map(|vector| NewDocumentVector::new(vector.doc_id, vector.values))
                     .collect::<Vec<_>>();
+                let mut runtime = open_existing_runtime_store_for_vectors(&store)?;
                 let report = runtime
                     .writer()
                     .map_err(|error| error.to_string())?
@@ -144,17 +167,6 @@ fn main() -> Result<(), String> {
                 Ok(())
             }
         },
-        Command::ImportCompat { root } => {
-            let mut runtime = RuntimeStore::open(&root).map_err(|error| error.to_string())?;
-            let report = runtime
-                .writer()
-                .map_err(|error| error.to_string())?
-                .import_compatibility_snapshot()
-                .map_err(|error| error.to_string())?;
-            println!("{}", render_publish_report(&report)?);
-            runtime.close().map_err(|error| error.to_string())?;
-            Ok(())
-        }
         Command::Remember { store, text } => {
             let mut memory = Memory::open(&store).map_err(|error| error.to_string())?;
             let doc_id = memory.remember(text).map_err(|error| error.to_string())?;
@@ -189,49 +201,102 @@ fn main() -> Result<(), String> {
             Ok(())
         }
         Command::Search {
-            root,
             store,
             text,
+            mode,
+            vector_input,
             top_k,
             preview,
-        } => match (root, store) {
-            (Some(_), Some(_)) => Err("search accepts exactly one of --root or --store".to_owned()),
-            (None, None) => Err("search requires --root or --store".to_owned()),
-            (None, Some(store)) => {
-                let mut memory =
-                    Memory::open_existing_read_only(&store).map_err(|error| error.to_string())?;
-                let response = memory
-                    .search_with_options(
-                        text,
-                        MemorySearchOptions {
-                            mode: RuntimeSearchMode::Hybrid,
-                            top_k,
-                            include_preview: preview,
-                        },
-                    )
-                    .map_err(|error| error.to_string())?;
-                println!("{}", render_hits(response.hits)?);
-                memory.close().map_err(|error| error.to_string())?;
-                Ok(())
-            }
-            (Some(root), None) => {
-                let mut runtime =
-                    RuntimeStore::open_read_only(&root).map_err(|error| error.to_string())?;
-                let response = runtime
-                    .search(RuntimeSearchRequest {
-                        mode: RuntimeSearchMode::Text,
-                        text_query: Some(text),
-                        vector_query: None,
-                        top_k,
-                        include_preview: preview,
-                    })
-                    .map_err(|error| error.to_string())?;
-                println!("{}", render_hits(response.hits)?);
-                runtime.close().map_err(|error| error.to_string())?;
-                Ok(())
-            }
-        },
+        } => {
+            let mut runtime = RuntimeStore::open_existing_read_only_at(&store)
+                .map_err(|error| error.to_string())?;
+            let request = build_search_request(mode, text, vector_input, top_k, preview)?;
+            let response = runtime.search(request).map_err(|error| error.to_string())?;
+            println!("{}", render_hits(response.hits)?);
+            runtime.close().map_err(|error| error.to_string())?;
+            Ok(())
+        }
     }
+}
+
+fn build_search_request(
+    mode: CliSearchMode,
+    text: Option<String>,
+    vector_input: Option<PathBuf>,
+    top_k: usize,
+    include_preview: bool,
+) -> Result<RuntimeSearchRequest, String> {
+    let runtime_mode = match mode {
+        CliSearchMode::Text => RuntimeSearchMode::Text,
+        CliSearchMode::Vector => RuntimeSearchMode::Vector,
+        CliSearchMode::Hybrid => RuntimeSearchMode::Hybrid,
+    };
+    let text_query = match mode {
+        CliSearchMode::Text | CliSearchMode::Hybrid => {
+            Some(text.ok_or_else(|| format!("search --mode {} requires --text", mode_name(mode)))?)
+        }
+        CliSearchMode::Vector => {
+            if text.is_some() {
+                return Err("search --mode vector does not accept --text".to_owned());
+            }
+            None
+        }
+    };
+    let vector_query = match mode {
+        CliSearchMode::Text => {
+            if vector_input.is_some() {
+                return Err("search --mode text does not accept --vector-input".to_owned());
+            }
+            None
+        }
+        CliSearchMode::Vector | CliSearchMode::Hybrid => {
+            Some(read_query_vector(&vector_input.ok_or_else(|| {
+                format!("search --mode {} requires --vector-input", mode_name(mode))
+            })?)?)
+        }
+    };
+    Ok(RuntimeSearchRequest {
+        mode: runtime_mode,
+        text_query,
+        vector_query,
+        top_k,
+        include_preview,
+    })
+}
+
+fn mode_name(mode: CliSearchMode) -> &'static str {
+    match mode {
+        CliSearchMode::Text => "text",
+        CliSearchMode::Vector => "vector",
+        CliSearchMode::Hybrid => "hybrid",
+    }
+}
+
+fn read_query_vector(path: &std::path::Path) -> Result<Vec<f32>, String> {
+    let vector = serde_json::from_reader::<_, CliQueryVector>(
+        File::open(path).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let values = match vector {
+        CliQueryVector::Values(values) => values,
+        CliQueryVector::Object(object) => object.values,
+    };
+    if values.is_empty() {
+        return Err("query vector must contain at least one value".to_owned());
+    }
+    Ok(values)
+}
+
+fn open_existing_runtime_store_for_vectors(
+    store: &std::path::Path,
+) -> Result<RuntimeStore, String> {
+    if !store.exists() {
+        return Err(format!(
+            "store file {} does not exist; run ingest docs first",
+            store.display()
+        ));
+    }
+    RuntimeStore::open_existing_at(store).map_err(|error| error.to_string())
 }
 
 fn render_hits(hits: Vec<wax_v2_runtime::RuntimeSearchHit>) -> Result<String, String> {

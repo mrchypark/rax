@@ -93,17 +93,14 @@ pub enum McpRequest {
         top_k: usize,
         include_preview: bool,
     },
-    OpenSession {
-        root: String,
+    OpenStoreSession {
+        store: String,
     },
     SearchText {
         session_id: u64,
         query: String,
         top_k: usize,
         include_preview: bool,
-    },
-    ImportCompatibilitySnapshot {
-        session_id: u64,
     },
     IngestDocuments {
         session_id: u64,
@@ -129,10 +126,6 @@ pub enum McpResponse {
     },
     SearchResults {
         hits: Vec<McpSearchHit>,
-    },
-    CompatibilitySnapshotImported {
-        generation: u64,
-        published_families: Vec<String>,
     },
     RawIngested {
         generation: u64,
@@ -194,7 +187,7 @@ pub struct WaxMcpSurface {
     broker: WaxBroker,
     allowed_root: Option<PathBuf>,
     allowed_root_dir: Option<AllowedRootDir>,
-    allow_raw_sessions: bool,
+    allow_store_sessions: bool,
 }
 
 impl Default for WaxMcpSurface {
@@ -206,7 +199,7 @@ impl Default for WaxMcpSurface {
                 .as_deref()
                 .and_then(|root| open_allowed_root_dir(root).ok())
                 .filter(|dir| validate_allowed_root_security(dir).is_ok()),
-            allow_raw_sessions: false,
+            allow_store_sessions: false,
         }
     }
 }
@@ -235,17 +228,17 @@ impl WaxMcpSurface {
             broker: WaxBroker::default(),
             allowed_root_dir: Some(allowed_root_dir),
             allowed_root: Some(allowed_root),
-            allow_raw_sessions: false,
+            allow_store_sessions: false,
         })
     }
 
-    /// Enables the legacy raw dataset-session request variants for trusted in-process callers.
+    /// Enables direct store-session request variants for trusted in-process callers.
     ///
     /// The stdio server does not expose these variants as tools. They are kept for benchmark
-    /// contract tests and internal integration surfaces that already trust the dataset root.
-    pub fn with_allowed_root_and_raw_sessions(root: &Path) -> Result<Self, McpError> {
+    /// contract tests and internal integration surfaces that already trust the store root.
+    pub fn with_allowed_root_and_store_sessions(root: &Path) -> Result<Self, McpError> {
         let mut surface = Self::with_allowed_root(root)?;
-        surface.allow_raw_sessions = true;
+        surface.allow_store_sessions = true;
         Ok(surface)
     }
 
@@ -380,10 +373,13 @@ impl WaxMcpSurface {
                     hits: map_runtime_hits(response.hits),
                 })
             }
-            McpRequest::OpenSession { root } => {
-                self.require_raw_sessions()?;
-                let root = self.authorized_root(&root)?;
-                let session_id = self.broker.open_session(&root).map_err(broker_error)?;
+            McpRequest::OpenStoreSession { store } => {
+                self.require_store_sessions()?;
+                let store = self.authorized_store_path(&store)?;
+                let session_id = self
+                    .broker
+                    .open_store_session(&store)
+                    .map_err(broker_error)?;
                 Ok(McpResponse::SessionOpened {
                     session_id: session_id.as_u64(),
                 })
@@ -394,7 +390,7 @@ impl WaxMcpSurface {
                 top_k,
                 include_preview,
             } => {
-                self.require_raw_sessions()?;
+                self.require_store_sessions()?;
                 validate_top_k(top_k)?;
                 let response = self
                     .broker
@@ -409,30 +405,11 @@ impl WaxMcpSurface {
                     hits: map_runtime_hits(response.hits),
                 })
             }
-            McpRequest::ImportCompatibilitySnapshot { session_id } => {
-                self.require_raw_sessions()?;
-                let report = self
-                    .broker
-                    .import_compatibility_snapshot(wax_v2_broker::SessionId::from_u64(session_id))
-                    .map_err(broker_error)?;
-                Ok(McpResponse::CompatibilitySnapshotImported {
-                    generation: report.generation,
-                    published_families: report
-                        .published_families
-                        .into_iter()
-                        .map(|family| match family {
-                            wax_v2_broker::BrokerPublishFamily::Doc => "doc".to_owned(),
-                            wax_v2_broker::BrokerPublishFamily::Text => "text".to_owned(),
-                            wax_v2_broker::BrokerPublishFamily::Vector => "vector".to_owned(),
-                        })
-                        .collect(),
-                })
-            }
             McpRequest::IngestDocuments {
                 session_id,
                 documents,
             } => {
-                self.require_raw_sessions()?;
+                self.require_store_sessions()?;
                 let report = self
                     .broker
                     .ingest_documents(
@@ -466,7 +443,7 @@ impl WaxMcpSurface {
                 session_id,
                 vectors,
             } => {
-                self.require_raw_sessions()?;
+                self.require_store_sessions()?;
                 let report = self
                     .broker
                     .ingest_vectors(
@@ -494,7 +471,7 @@ impl WaxMcpSurface {
                 })
             }
             McpRequest::CloseSession { session_id } => {
-                self.require_raw_sessions()?;
+                self.require_store_sessions()?;
                 self.broker
                     .close_session(wax_v2_broker::SessionId::from_u64(session_id))
                     .map_err(broker_error)?;
@@ -503,39 +480,22 @@ impl WaxMcpSurface {
         }
     }
 
-    fn require_raw_sessions(&self) -> Result<(), McpError> {
-        if self.allow_raw_sessions {
+    fn require_store_sessions(&self) -> Result<(), McpError> {
+        if self.allow_store_sessions {
             return Ok(());
         }
         Err(McpError {
             code: McpErrorCode::InvalidRequest,
-            message: "raw dataset session requests are disabled on the untrusted MCP surface"
+            message: "raw store session requests are disabled on the untrusted MCP surface"
                 .to_owned(),
         })
     }
 
-    fn authorized_root(&self, root: &str) -> Result<PathBuf, McpError> {
-        let root = Path::new(root).canonicalize().map_err(|error| McpError {
-            code: McpErrorCode::InvalidRequest,
-            message: error.to_string(),
-        })?;
-        let Some(allowed_root) = &self.allowed_root else {
-            return Err(McpError {
-                code: McpErrorCode::InvalidRequest,
-                message: "MCP surface has no allowed root".to_owned(),
-            });
-        };
-        if !root.starts_with(allowed_root) {
-            return Err(McpError {
-                code: McpErrorCode::InvalidRequest,
-                message: format!(
-                    "session root {} is outside allowed root {}",
-                    root.display(),
-                    allowed_root.display()
-                ),
-            });
-        }
-        Ok(root)
+    fn authorized_store_path(&self, path: &str) -> Result<PathBuf, McpError> {
+        let store = self.authorized_store_with_retry(path, true, AuthorizedStoreLock::Exclusive)?;
+        let store_path = store.store_path();
+        store.verify_runtime_path_identity()?;
+        Ok(store_path)
     }
 
     fn authorized_store(
@@ -1948,7 +1908,7 @@ mod tests {
 
     #[test]
     fn mcp_response_round_trips_as_transport_ready_json() {
-        let response = McpResponse::CompatibilitySnapshotImported {
+        let response = McpResponse::RawIngested {
             generation: 3,
             published_families: vec!["doc".to_owned(), "text".to_owned(), "vector".to_owned()],
         };
@@ -2357,18 +2317,19 @@ mod tests {
     }
 
     #[test]
-    fn mcp_surface_without_allowed_root_rejects_open_session() {
+    fn mcp_surface_without_allowed_root_rejects_open_store_session() {
         let mut surface = WaxMcpSurface {
             broker: WaxBroker::default(),
             allowed_root: None,
             allowed_root_dir: None,
-            allow_raw_sessions: true,
+            allow_store_sessions: true,
         };
 
         let error = surface
-            .handle(McpRequest::OpenSession {
-                root: std::env::current_dir()
+            .handle(McpRequest::OpenStoreSession {
+                store: std::env::current_dir()
                     .unwrap()
+                    .join("projection.wax")
                     .to_string_lossy()
                     .into_owned(),
             })
@@ -2379,18 +2340,22 @@ mod tests {
     }
 
     #[test]
-    fn mcp_surface_disables_raw_sessions_by_default() {
+    fn mcp_surface_disables_store_sessions_by_default() {
         let root = private_tempdir();
         let mut surface = WaxMcpSurface::with_allowed_root(root.path()).unwrap();
 
         let error = surface
-            .handle(McpRequest::OpenSession {
-                root: root.path().to_string_lossy().into_owned(),
+            .handle(McpRequest::OpenStoreSession {
+                store: root
+                    .path()
+                    .join("projection.wax")
+                    .to_string_lossy()
+                    .into_owned(),
             })
             .unwrap_err();
 
         assert_eq!(error.code(), &McpErrorCode::InvalidRequest);
-        assert!(error.message().contains("raw dataset session requests"));
+        assert!(error.message().contains("raw store session requests"));
     }
 
     #[cfg(target_os = "linux")]

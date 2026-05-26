@@ -662,14 +662,14 @@ pub fn create_empty_store_and_open(path: &Path) -> Result<std::fs::File, CoreErr
         .and_then(|()| run_create_empty_store_pre_publish_hook())
         .and_then(|()| publish_temporary_store_file(&temp));
     match result {
-        Ok(mut file) => {
+        Ok(file) => {
             if let Err(error) = remove_failed_created_store_file(&temp, Some(&temp_identity)) {
                 let _ = remove_published_target_file(&temp, &temp_identity);
                 return Err(error);
             }
             #[cfg(target_os = "macos")]
-            {
-                file = match open_leaf_at(
+            let mut file = {
+                let reopened_file = match open_leaf_at(
                     &temp.parent,
                     &temp.target_name,
                     SecureOpenMode::ReadWrite,
@@ -680,14 +680,24 @@ pub fn create_empty_store_and_open(path: &Path) -> Result<std::fs::File, CoreErr
                         return Err(error);
                     }
                 };
-                let actual_identity = file_identity_from_file(&file)?;
+                drop(file);
+                let actual_identity = match file_identity_from_file(&reopened_file) {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        let _ = remove_published_target_file(&temp, &temp_identity);
+                        return Err(CoreError::from(error));
+                    }
+                };
                 if !file_identities_match(&actual_identity, &temp_identity) {
                     let _ = remove_published_target_file(&temp, &temp_identity);
                     return Err(CoreError::InvalidManifest(
                         "published store target identity changed before final open".to_owned(),
                     ));
                 }
-            }
+                reopened_file
+            };
+            #[cfg(not(target_os = "macos"))]
+            let mut file = file;
             if let Err(error) = file.seek(SeekFrom::Start(0)) {
                 let _ = remove_published_target_file(&temp, &temp_identity);
                 return Err(CoreError::from(error));

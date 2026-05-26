@@ -1,42 +1,40 @@
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
 
 use tempfile::tempdir;
 use wax_bench_model::embed_text;
-use wax_bench_packer::{pack_dataset, PackRequest};
+use wax_bench_model::ManifestFile;
+use wax_bench_packer::{pack_adhoc_dataset, AdhocPackRequest};
 use wax_v2_docstore::Docstore;
-use wax_v2_runtime::RuntimeStore;
 
 use wax_v2_mcp::{McpRequest, McpResponse, WaxMcpSurface};
 
 #[test]
 fn mcp_surface_ingests_documents_and_vectors_through_explicit_raw_requests() {
-    let dataset_dir = tempdir().unwrap();
+    let store_dir = tempdir().unwrap();
     #[cfg(unix)]
     {
-        let mut permissions = fs::metadata(dataset_dir.path()).unwrap().permissions();
+        let mut permissions = fs::metadata(store_dir.path()).unwrap().permissions();
         permissions.set_mode(0o700);
-        fs::set_permissions(dataset_dir.path(), permissions).unwrap();
+        fs::set_permissions(store_dir.path(), permissions).unwrap();
     }
-    let fixture_root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/bench/source/minimal");
-    let manifest = pack_dataset(&PackRequest::new(
-        &fixture_root,
-        dataset_dir.path(),
+    let source_dir = tempdir().unwrap();
+    let manifest_dir = tempdir().unwrap();
+    let docs_path = source_dir.path().join("docs.ndjson");
+    fs::write(&docs_path, "{\"doc_id\":\"seed-001\",\"text\":\"seed\"}\n").unwrap();
+    let mut manifest = pack_adhoc_dataset(&AdhocPackRequest::new(
+        &docs_path,
+        manifest_dir.path(),
         "small",
-        "clean",
     ))
     .unwrap();
 
-    let mut runtime = RuntimeStore::create(dataset_dir.path()).unwrap();
-    runtime.close().unwrap();
-
-    let mut mcp = WaxMcpSurface::with_allowed_root_and_raw_sessions(dataset_dir.path()).unwrap();
+    let store_path = store_dir.path().join("projection.wax");
+    let mut mcp = WaxMcpSurface::with_allowed_root_and_store_sessions(store_dir.path()).unwrap();
     let open = mcp
-        .handle(McpRequest::OpenSession {
-            root: dataset_dir.path().display().to_string(),
+        .handle(McpRequest::OpenStoreSession {
+            store: store_path.display().to_string(),
         })
         .unwrap();
     let session_id = match open {
@@ -87,7 +85,15 @@ fn mcp_surface_ingests_documents_and_vectors_through_explicit_raw_requests() {
         }
         other => panic!("unexpected doc ingest response: {other:?}"),
     }
-    let docstore = Docstore::open(dataset_dir.path(), &manifest).unwrap();
+    manifest.files = vec![ManifestFile {
+        path: "projection.wax".to_owned(),
+        kind: "store".to_owned(),
+        format: "wax".to_owned(),
+        record_count: 3,
+        checksum: "runtime".to_owned(),
+    }];
+    let docstore =
+        Docstore::open_with_store_path(store_dir.path(), &manifest, &store_path).unwrap();
     let documents = docstore
         .load_documents_by_id(&["doc-001".to_owned()])
         .unwrap();
@@ -126,20 +132,6 @@ fn mcp_surface_ingests_documents_and_vectors_through_explicit_raw_requests() {
             assert_eq!(published_families, vec!["vector".to_owned()]);
         }
         other => panic!("unexpected vector ingest response: {other:?}"),
-    }
-
-    for kind in [
-        "documents",
-        "document_offsets",
-        "text_postings",
-        "document_ids",
-        "document_vectors",
-        "document_vectors_preview_q8",
-        "query_vectors",
-    ] {
-        for file in manifest.files.iter().filter(|file| file.kind == kind) {
-            fs::remove_file(dataset_dir.path().join(&file.path)).unwrap();
-        }
     }
 
     let search = mcp

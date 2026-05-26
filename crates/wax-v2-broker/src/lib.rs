@@ -50,9 +50,11 @@ pub struct SessionNewDocumentVector {
     pub values: Vec<f32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SessionSearchRequest {
-    text_query: String,
+    mode: RuntimeSearchMode,
+    text_query: Option<String>,
+    vector_query: Option<Vec<f32>>,
     top_k: usize,
     include_preview: bool,
 }
@@ -60,7 +62,29 @@ pub struct SessionSearchRequest {
 impl SessionSearchRequest {
     pub fn text(text_query: impl Into<String>) -> Self {
         Self {
-            text_query: text_query.into(),
+            mode: RuntimeSearchMode::Text,
+            text_query: Some(text_query.into()),
+            vector_query: None,
+            top_k: 5,
+            include_preview: false,
+        }
+    }
+
+    pub fn vector(vector_query: Vec<f32>) -> Self {
+        Self {
+            mode: RuntimeSearchMode::Vector,
+            text_query: None,
+            vector_query: Some(vector_query),
+            top_k: 5,
+            include_preview: false,
+        }
+    }
+
+    pub fn hybrid(text_query: impl Into<String>, vector_query: Vec<f32>) -> Self {
+        Self {
+            mode: RuntimeSearchMode::Hybrid,
+            text_query: Some(text_query.into()),
+            vector_query: Some(vector_query),
             top_k: 5,
             include_preview: false,
         }
@@ -124,18 +148,14 @@ impl WaxBroker {
         }
     }
 
-    pub fn open_session(&mut self, root: &Path) -> Result<SessionId, BrokerError> {
+    pub fn open_store_session(&mut self, store_path: &Path) -> Result<SessionId, BrokerError> {
         if self.sessions.len() >= self.max_sessions {
             return Err(BrokerError::SessionLimitExceeded {
                 max_sessions: self.max_sessions,
             });
         }
 
-        let runtime = if root.join("store.wax").exists() {
-            RuntimeStore::open(root).map_err(runtime_error)?
-        } else {
-            RuntimeStore::create(root).map_err(runtime_error)?
-        };
+        let runtime = RuntimeStore::open_or_create_at(store_path).map_err(runtime_error)?;
         let session_id = SessionId(self.next_session_id);
         self.next_session_id = self
             .next_session_id
@@ -156,29 +176,13 @@ impl WaxBroker {
             .ok_or(BrokerError::SessionNotFound(session_id))?;
         runtime
             .search(RuntimeSearchRequest {
-                mode: RuntimeSearchMode::Text,
-                text_query: Some(request.text_query),
-                vector_query: None,
+                mode: request.mode,
+                text_query: request.text_query,
+                vector_query: request.vector_query,
                 top_k: request.top_k,
                 include_preview: request.include_preview,
             })
             .map_err(runtime_error)
-    }
-
-    pub fn import_compatibility_snapshot(
-        &mut self,
-        session_id: SessionId,
-    ) -> Result<SessionImportReport, BrokerError> {
-        let runtime = self
-            .sessions
-            .get_mut(&session_id)
-            .ok_or(BrokerError::SessionNotFound(session_id))?;
-        let report = runtime
-            .writer()
-            .map_err(runtime_error)?
-            .import_compatibility_snapshot()
-            .map_err(runtime_error)?;
-        Ok(map_publish_report(report))
     }
 
     pub fn ingest_documents(
@@ -278,7 +282,7 @@ mod tests {
     fn broker_rejects_new_sessions_after_configured_capacity() {
         let mut broker = WaxBroker::with_max_sessions(0);
 
-        let error = broker.open_session(Path::new("/unused")).unwrap_err();
+        let error = broker.open_store_session(Path::new("/unused")).unwrap_err();
 
         assert!(matches!(
             error,

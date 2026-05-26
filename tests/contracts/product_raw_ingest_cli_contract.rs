@@ -1,87 +1,73 @@
 use std::fs;
-use std::path::PathBuf;
 use std::process::Command;
 
 use tempfile::tempdir;
 use wax_bench_model::embed_text;
-use wax_bench_packer::{pack_dataset, PackRequest};
+use wax_bench_model::ManifestFile;
+use wax_bench_packer::{pack_adhoc_dataset, AdhocPackRequest};
 use wax_v2_docstore::Docstore;
 
 #[test]
-fn product_cli_ingests_documents_and_vectors_through_explicit_raw_commands() {
-    let dataset_dir = tempdir().unwrap();
-    let fixture_root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/bench/source/minimal");
-    let manifest = pack_dataset(&PackRequest::new(
-        &fixture_root,
-        dataset_dir.path(),
+fn product_cli_direct_store_raw_documents_round_trip_without_dataset_manifest() {
+    let store_dir = tempdir().unwrap();
+    let source_dir = tempdir().unwrap();
+    let manifest_dir = tempdir().unwrap();
+    let docs_path = source_dir.path().join("docs.ndjson");
+    fs::write(&docs_path, "{\"doc_id\":\"seed-001\",\"text\":\"seed\"}\n").unwrap();
+    let mut manifest = pack_adhoc_dataset(&AdhocPackRequest::new(
+        &docs_path,
+        manifest_dir.path(),
         "small",
-        "clean",
     ))
     .unwrap();
 
-    let docs_jsonl = dataset_dir.path().join("raw-docs.jsonl");
+    let store_path = store_dir.path().join("projection.wax");
+    let docs_jsonl = store_dir.path().join("projection-docs.jsonl");
     fs::write(
         &docs_jsonl,
         concat!(
-            "{\"doc_id\":\"doc-001\",\"text\":\"rust benchmark guide\",\"metadata\":{\"kind\":\"guide\",\"workspace\":\"prod\"}}\n",
-            "{\"doc_id\":\"doc-002\",\"text\":\"semantic latency checklist\",\"metadata\":{\"kind\":\"checklist\",\"workspace\":\"prod\"}}\n",
-            "{\"doc_id\":\"doc-003\",\"text\":\"hybrid search tuning notes\",\"metadata\":{\"kind\":\"notes\",\"workspace\":\"prod\"}}\n",
-        ),
-    )
-    .unwrap();
-    let vectors_jsonl = dataset_dir.path().join("raw-vectors.jsonl");
-    fs::write(
-        &vectors_jsonl,
-        format!(
-            "{}\n{}\n{}\n",
-            serde_json::json!({
-                "doc_id": "doc-001",
-                "values": embed_text("rust benchmark guide", 384),
-            }),
-            serde_json::json!({
-                "doc_id": "doc-002",
-                "values": embed_text("semantic latency checklist", 384),
-            }),
-            serde_json::json!({
-                "doc_id": "doc-003",
-                "values": embed_text("hybrid search tuning notes", 384),
-            }),
+            "{\"doc_id\":\"external-proj-42\",\"text\":\"projected alpha raw document\",",
+            "\"metadata\":{\"tenant\":\"external\",\"kind\":\"projection\"},",
+            "\"timestamp_ms\":1712345678000,\"source\":\"projection-store\"}\n",
         ),
     )
     .unwrap();
 
-    run_wax(&["create", "--root", dataset_dir.path().to_str().unwrap()]);
+    run_wax(&["create", "--store", store_path.to_str().unwrap()]);
     run_wax(&[
         "ingest",
         "docs",
-        "--root",
-        dataset_dir.path().to_str().unwrap(),
+        "--store",
+        store_path.to_str().unwrap(),
         "--input",
         docs_jsonl.to_str().unwrap(),
     ]);
-    run_wax(&[
-        "ingest",
-        "vectors",
-        "--root",
-        dataset_dir.path().to_str().unwrap(),
-        "--input",
-        vectors_jsonl.to_str().unwrap(),
-    ]);
 
-    for kind in [
-        "documents",
-        "document_offsets",
-        "text_postings",
-        "document_ids",
-        "document_vectors",
-        "document_vectors_preview_q8",
-        "query_vectors",
-    ] {
-        for file in manifest.files.iter().filter(|file| file.kind == kind) {
-            fs::remove_file(dataset_dir.path().join(&file.path)).unwrap();
-        }
-    }
+    manifest.files = vec![ManifestFile {
+        path: "projection.wax".to_owned(),
+        kind: "store".to_owned(),
+        format: "wax".to_owned(),
+        record_count: 1,
+        checksum: "runtime".to_owned(),
+    }];
+    let docstore =
+        Docstore::open_with_store_path(store_dir.path(), &manifest, &store_path).unwrap();
+    let documents = docstore
+        .load_documents_by_id(&["external-proj-42".to_owned()])
+        .unwrap();
+    let document = documents.get("external-proj-42").unwrap();
+    assert_eq!(
+        document.get("metadata"),
+        Some(&serde_json::json!({"tenant":"external","kind":"projection"}))
+    );
+    assert_eq!(
+        document.get("timestamp_ms"),
+        Some(&serde_json::json!(1712345678000_u64))
+    );
+    assert_eq!(
+        document.get("source"),
+        Some(&serde_json::json!("projection-store"))
+    );
 
     let search = Command::new("cargo")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -91,12 +77,12 @@ fn product_cli_ingests_documents_and_vectors_through_explicit_raw_commands() {
             "wax-cli",
             "--",
             "search",
-            "--root",
-            dataset_dir.path().to_str().unwrap(),
+            "--store",
+            store_path.to_str().unwrap(),
             "--text",
-            "rust benchmark",
+            "projected alpha",
             "--top-k",
-            "2",
+            "1",
             "--preview",
         ])
         .output()
@@ -109,67 +95,349 @@ fn product_cli_ingests_documents_and_vectors_through_explicit_raw_commands() {
         String::from_utf8_lossy(&search.stderr)
     );
     let stdout = String::from_utf8(search.stdout).unwrap();
-    assert!(stdout.contains("\"doc_id\": \"doc-001\""));
-    assert!(stdout.contains("\"preview\": \"rust benchmark guide\""));
+    assert!(stdout.contains("\"doc_id\": \"external-proj-42\""));
+    assert!(stdout.contains("\"preview\": \"projected alpha raw document\""));
 }
 
 #[test]
-fn product_cli_docs_ingest_preserves_unknown_top_level_document_fields() {
-    let dataset_dir = tempdir().unwrap();
-    let fixture_root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/bench/source/minimal");
-    let manifest = pack_dataset(&PackRequest::new(
-        &fixture_root,
-        dataset_dir.path(),
-        "small",
-        "clean",
-    ))
-    .unwrap();
-
-    let docs_jsonl = dataset_dir.path().join("raw-docs-extra.jsonl");
+fn product_cli_direct_store_docs_ingest_creates_missing_store() {
+    let store_dir = tempdir().unwrap();
+    let store_path = store_dir.path().join("projection-create-on-ingest.wax");
+    let docs_jsonl = store_dir.path().join("projection-docs-create.jsonl");
     fs::write(
         &docs_jsonl,
-        concat!(
-            "{\"doc_id\":\"doc-001\",\"text\":\"rust benchmark guide\",",
-            "\"metadata\":{\"kind\":\"guide\"},\"priority\":\"high\"}\n",
-        ),
+        "{\"doc_id\":\"fact:fact-index\",\"text\":\"recent decisions runtime projection\"}\n",
     )
     .unwrap();
 
-    run_wax(&["create", "--root", dataset_dir.path().to_str().unwrap()]);
     run_wax(&[
         "ingest",
         "docs",
-        "--root",
-        dataset_dir.path().to_str().unwrap(),
+        "--store",
+        store_path.to_str().unwrap(),
         "--input",
         docs_jsonl.to_str().unwrap(),
     ]);
 
-    let docstore = Docstore::open(dataset_dir.path(), &manifest).unwrap();
-    let documents = docstore
-        .load_documents_by_id(&["doc-001".to_owned()])
+    let search = Command::new("cargo")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args([
+            "run",
+            "-p",
+            "wax-cli",
+            "--",
+            "search",
+            "--store",
+            store_path.to_str().unwrap(),
+            "--text",
+            "recent decisions",
+            "--top-k",
+            "1",
+            "--preview",
+        ])
+        .output()
         .unwrap();
 
-    assert_eq!(
-        documents
-            .get("doc-001")
-            .and_then(|document| document.get("priority")),
-        Some(&serde_json::json!("high"))
+    assert!(
+        search.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&search.stdout),
+        String::from_utf8_lossy(&search.stderr)
+    );
+    let stdout = String::from_utf8(search.stdout).unwrap();
+    assert!(stdout.contains("\"doc_id\": \"fact:fact-index\""));
+    assert!(stdout.contains("\"preview\": \"recent decisions runtime projection\""));
+}
+
+#[test]
+fn product_cli_direct_store_searches_with_external_query_vector() {
+    let store_dir = tempdir().unwrap();
+    let store_path = store_dir.path().join("projection-vector.wax");
+    let docs_jsonl = store_dir.path().join("projection-vector-docs.jsonl");
+    fs::write(
+        &docs_jsonl,
+        concat!(
+            "{\"doc_id\":\"vec-doc-1\",\"text\":\"vector search rust guide\"}\n",
+            "{\"doc_id\":\"vec-doc-2\",\"text\":\"semantic latency checklist\"}\n",
+        ),
+    )
+    .unwrap();
+    let vectors_jsonl = store_dir.path().join("projection-vectors.jsonl");
+    fs::write(
+        &vectors_jsonl,
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "doc_id": "vec-doc-1",
+                "values": embed_text("vector search rust guide", 384),
+            }),
+            serde_json::json!({
+                "doc_id": "vec-doc-2",
+                "values": embed_text("semantic latency checklist", 384),
+            }),
+        ),
+    )
+    .unwrap();
+    let query_vector = store_dir.path().join("query-vector.json");
+    fs::write(
+        &query_vector,
+        serde_json::json!({
+            "values": embed_text("semantic latency checklist", 384),
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    run_wax(&[
+        "ingest",
+        "docs",
+        "--store",
+        store_path.to_str().unwrap(),
+        "--input",
+        docs_jsonl.to_str().unwrap(),
+    ]);
+    run_wax(&[
+        "ingest",
+        "vectors",
+        "--store",
+        store_path.to_str().unwrap(),
+        "--input",
+        vectors_jsonl.to_str().unwrap(),
+    ]);
+
+    let search = Command::new("cargo")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args([
+            "run",
+            "-p",
+            "wax-cli",
+            "--",
+            "search",
+            "--store",
+            store_path.to_str().unwrap(),
+            "--mode",
+            "vector",
+            "--vector-input",
+            query_vector.to_str().unwrap(),
+            "--top-k",
+            "1",
+            "--preview",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        search.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&search.stdout),
+        String::from_utf8_lossy(&search.stderr)
+    );
+    let stdout = String::from_utf8(search.stdout).unwrap();
+    assert!(stdout.contains("\"doc_id\": \"vec-doc-2\""));
+    assert!(stdout.contains("\"preview\": \"semantic latency checklist\""));
+
+    let hybrid_search = Command::new("cargo")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args([
+            "run",
+            "-p",
+            "wax-cli",
+            "--",
+            "search",
+            "--store",
+            store_path.to_str().unwrap(),
+            "--mode",
+            "hybrid",
+            "--text",
+            "semantic latency",
+            "--vector-input",
+            query_vector.to_str().unwrap(),
+            "--top-k",
+            "1",
+            "--preview",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        hybrid_search.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&hybrid_search.stdout),
+        String::from_utf8_lossy(&hybrid_search.stderr)
+    );
+    let stdout = String::from_utf8(hybrid_search.stdout).unwrap();
+    assert!(stdout.contains("\"doc_id\": \"vec-doc-2\""));
+    assert!(stdout.contains("\"preview\": \"semantic latency checklist\""));
+}
+
+#[test]
+fn product_cli_docs_ingest_does_not_create_store_when_input_is_missing() {
+    let store_dir = tempdir().unwrap();
+    let store_path = store_dir.path().join("side-effect.wax");
+    let missing_input = store_dir.path().join("missing-docs.jsonl");
+
+    let output = Command::new("cargo")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args([
+            "run",
+            "-p",
+            "wax-cli",
+            "--",
+            "ingest",
+            "docs",
+            "--store",
+            store_path.to_str().unwrap(),
+            "--input",
+            missing_input.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        !store_path.exists(),
+        "failed docs ingest should not create {}",
+        store_path.display()
     );
 }
 
+#[test]
+fn product_cli_search_rejects_ignored_mode_inputs() {
+    let store_dir = tempdir().unwrap();
+    let store_path = store_dir.path().join("projection-search-args.wax");
+    let docs_jsonl = store_dir.path().join("projection-docs.jsonl");
+    fs::write(
+        &docs_jsonl,
+        "{\"doc_id\":\"arg-doc-1\",\"text\":\"argument validation target\"}\n",
+    )
+    .unwrap();
+    let query_vector = store_dir.path().join("query-vector.json");
+    fs::write(
+        &query_vector,
+        serde_json::json!({
+            "values": embed_text("argument validation target", 384),
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    run_wax(&[
+        "ingest",
+        "docs",
+        "--store",
+        store_path.to_str().unwrap(),
+        "--input",
+        docs_jsonl.to_str().unwrap(),
+    ]);
+
+    let text_with_vector = wax_output(&[
+        "search",
+        "--store",
+        store_path.to_str().unwrap(),
+        "--mode",
+        "text",
+        "--text",
+        "argument validation",
+        "--vector-input",
+        query_vector.to_str().unwrap(),
+    ]);
+    assert!(!text_with_vector.status.success());
+    assert!(String::from_utf8_lossy(&text_with_vector.stderr)
+        .contains("search --mode text does not accept --vector-input"));
+
+    let vector_with_text = wax_output(&[
+        "search",
+        "--store",
+        store_path.to_str().unwrap(),
+        "--mode",
+        "vector",
+        "--text",
+        "argument validation",
+        "--vector-input",
+        query_vector.to_str().unwrap(),
+    ]);
+    assert!(!vector_with_text.status.success());
+    assert!(String::from_utf8_lossy(&vector_with_text.stderr)
+        .contains("search --mode vector does not accept --text"));
+}
+
+#[test]
+fn product_cli_query_vector_object_rejects_unknown_fields() {
+    let store_dir = tempdir().unwrap();
+    let store_path = store_dir.path().join("projection-strict-query.wax");
+    let docs_jsonl = store_dir.path().join("projection-docs.jsonl");
+    fs::write(
+        &docs_jsonl,
+        "{\"doc_id\":\"strict-doc-1\",\"text\":\"strict query target\"}\n",
+    )
+    .unwrap();
+    let vectors_jsonl = store_dir.path().join("projection-vectors.jsonl");
+    fs::write(
+        &vectors_jsonl,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "doc_id": "strict-doc-1",
+                "values": embed_text("strict query target", 384),
+            }),
+        ),
+    )
+    .unwrap();
+    let ambiguous_query_vector = store_dir.path().join("ambiguous-query-vector.json");
+    fs::write(
+        &ambiguous_query_vector,
+        serde_json::json!({
+            "doc_id": "strict-doc-1",
+            "values": embed_text("strict query target", 384),
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    run_wax(&[
+        "ingest",
+        "docs",
+        "--store",
+        store_path.to_str().unwrap(),
+        "--input",
+        docs_jsonl.to_str().unwrap(),
+    ]);
+    run_wax(&[
+        "ingest",
+        "vectors",
+        "--store",
+        store_path.to_str().unwrap(),
+        "--input",
+        vectors_jsonl.to_str().unwrap(),
+    ]);
+
+    let output = wax_output(&[
+        "search",
+        "--store",
+        store_path.to_str().unwrap(),
+        "--mode",
+        "vector",
+        "--vector-input",
+        ambiguous_query_vector.to_str().unwrap(),
+    ]);
+    assert!(!output.status.success());
+}
+
 fn run_wax(args: &[&str]) {
-    let output = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args(["run", "-p", "wax-cli", "--"])
-        .args(args)
-        .output()
-        .unwrap();
+    let output = wax_output(args);
     assert!(
         output.status.success(),
         "stdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn wax_output(args: &[&str]) -> std::process::Output {
+    Command::new("cargo")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args(["run", "-p", "wax-cli", "--"])
+        .args(args)
+        .output()
+        .unwrap()
 }

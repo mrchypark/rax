@@ -1,40 +1,23 @@
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
 use std::process::Command;
 
-use serde_json::json;
 use tempfile::tempdir;
-use wax_bench_packer::{pack_dataset, PackRequest};
 use wax_v2_core::open_store;
-use wax_v2_runtime::{NewDocument, RuntimeStore};
 
 #[test]
 fn product_cli_remembers_and_recalls_from_single_wax_file() {
     let store_dir = tempdir().unwrap();
     let store_path = store_dir.path().join("agent.wax");
 
-    let remember = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-cli",
-            "--",
-            "remember",
-            "--store",
-            store_path.to_str().unwrap(),
-            "The user is building a habit tracker in Rust",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        remember.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&remember.stdout),
-        String::from_utf8_lossy(&remember.stderr)
-    );
+    let remember = wax_output(&[
+        "remember",
+        "--store",
+        store_path.to_str().unwrap(),
+        "The user is building a habit tracker in Rust",
+    ]);
+    assert_success(&remember);
     assert!(store_path.exists());
     assert_eq!(
         store_dir_entries(&store_dir),
@@ -42,55 +25,29 @@ fn product_cli_remembers_and_recalls_from_single_wax_file() {
         "product memory must keep the user-visible store as a single .wax file"
     );
 
-    let recall = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-cli",
-            "--",
-            "recall",
-            "--store",
-            store_path.to_str().unwrap(),
-            "What is the user building?",
-            "--top-k",
-            "3",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        recall.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&recall.stdout),
-        String::from_utf8_lossy(&recall.stderr)
-    );
+    let recall = wax_output(&[
+        "recall",
+        "--store",
+        store_path.to_str().unwrap(),
+        "What is the user building?",
+        "--top-k",
+        "3",
+    ]);
+    assert_success(&recall);
     let stdout = String::from_utf8(recall.stdout).unwrap();
     assert!(stdout.contains("\"doc_id\": \"mem-0000000000000001\""));
     assert!(stdout.contains("\"preview\": \"The user is building a habit tracker in Rust\""));
 
-    let recall_without_preview = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-cli",
-            "--",
-            "recall",
-            "--store",
-            store_path.to_str().unwrap(),
-            "What is the user building?",
-            "--top-k",
-            "3",
-            "--no-preview",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        recall_without_preview.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&recall_without_preview.stdout),
-        String::from_utf8_lossy(&recall_without_preview.stderr)
-    );
+    let recall_without_preview = wax_output(&[
+        "recall",
+        "--store",
+        store_path.to_str().unwrap(),
+        "What is the user building?",
+        "--top-k",
+        "3",
+        "--no-preview",
+    ]);
+    assert_success(&recall_without_preview);
     let stdout = String::from_utf8(recall_without_preview.stdout).unwrap();
     assert!(stdout.contains("\"doc_id\": \"mem-0000000000000001\""));
     assert!(stdout.contains("\"preview\": null"));
@@ -99,6 +56,67 @@ fn product_cli_remembers_and_recalls_from_single_wax_file() {
         vec!["agent.wax".to_owned()],
         "recall must not create lock or sidecar files next to the product store"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn product_cli_recalls_from_read_only_single_wax_file() {
+    let store_dir = tempdir().unwrap();
+    let store_path = store_dir.path().join("agent.wax");
+
+    let remember = wax_output(&[
+        "remember",
+        "--store",
+        store_path.to_str().unwrap(),
+        "The user stores read-only memories",
+    ]);
+    assert_success(&remember);
+
+    let mut permissions = fs::metadata(&store_path).unwrap().permissions();
+    permissions.set_mode(0o400);
+    fs::set_permissions(&store_path, permissions).unwrap();
+
+    let recall = wax_output(&[
+        "recall",
+        "--store",
+        store_path.to_str().unwrap(),
+        "What does the user store?",
+        "--top-k",
+        "1",
+        "--no-preview",
+    ]);
+
+    let mut permissions = fs::metadata(&store_path).unwrap().permissions();
+    permissions.set_mode(0o600);
+    fs::set_permissions(&store_path, permissions).unwrap();
+
+    assert_success(&recall);
+    let stdout = String::from_utf8(recall.stdout).unwrap();
+    assert!(stdout.contains("\"doc_id\": \"mem-0000000000000001\""));
+    assert!(stdout.contains("\"preview\": null"));
+}
+
+#[test]
+fn product_cli_create_targets_direct_store_file() {
+    let store_dir = tempdir().unwrap();
+    let store_path = store_dir.path().join("agent.wax");
+
+    let output = wax_output(&["create", "--store", store_path.to_str().unwrap()]);
+    assert_success(&output);
+
+    assert!(store_path.exists());
+    let opened = open_store(&store_path).unwrap();
+    assert_eq!(opened.manifest.generation, 0);
+    assert_eq!(store_dir_entries(&store_dir), vec!["agent.wax".to_owned()]);
+}
+
+#[test]
+fn product_cli_rejects_removed_root_flag() {
+    let store_dir = tempdir().unwrap();
+    let output = wax_output(&["create", "--root", store_dir.path().to_str().unwrap()]);
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--root'"));
 }
 
 fn store_dir_entries(store_dir: &tempfile::TempDir) -> Vec<String> {
@@ -110,290 +128,20 @@ fn store_dir_entries(store_dir: &tempfile::TempDir) -> Vec<String> {
     entries
 }
 
-#[cfg(unix)]
-#[test]
-fn product_cli_recalls_from_read_only_single_wax_file() {
-    let store_dir = tempdir().unwrap();
-    let store_path = store_dir.path().join("agent.wax");
-
-    let remember = Command::new("cargo")
+fn wax_output(args: &[&str]) -> std::process::Output {
+    Command::new("cargo")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-cli",
-            "--",
-            "remember",
-            "--store",
-            store_path.to_str().unwrap(),
-            "The user stores read-only memories",
-        ])
+        .args(["run", "-p", "wax-cli", "--"])
+        .args(args)
         .output()
-        .unwrap();
-    assert!(
-        remember.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&remember.stdout),
-        String::from_utf8_lossy(&remember.stderr)
-    );
-
-    let mut permissions = fs::metadata(&store_path).unwrap().permissions();
-    permissions.set_mode(0o400);
-    fs::set_permissions(&store_path, permissions).unwrap();
-
-    let recall = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-cli",
-            "--",
-            "recall",
-            "--store",
-            store_path.to_str().unwrap(),
-            "What does the user store?",
-            "--top-k",
-            "1",
-            "--no-preview",
-        ])
-        .output()
-        .unwrap();
-
-    let mut permissions = fs::metadata(&store_path).unwrap().permissions();
-    permissions.set_mode(0o600);
-    fs::set_permissions(&store_path, permissions).unwrap();
-
-    assert!(
-        recall.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&recall.stdout),
-        String::from_utf8_lossy(&recall.stderr)
-    );
-    let stdout = String::from_utf8(recall.stdout).unwrap();
-    assert!(stdout.contains("\"doc_id\": \"mem-0000000000000001\""));
-    assert!(stdout.contains("\"preview\": null"));
+        .unwrap()
 }
 
-#[test]
-fn product_cli_creates_store_when_create_targets_dataset_root() {
-    let dataset_dir = tempdir().unwrap();
-    let fixture_root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/bench/source/minimal");
-    pack_dataset(&PackRequest::new(
-        &fixture_root,
-        dataset_dir.path(),
-        "small",
-        "clean",
-    ))
-    .unwrap();
-
-    let output = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-cli",
-            "--",
-            "create",
-            "--root",
-            dataset_dir.path().to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-
+fn assert_success(output: &std::process::Output) {
     assert!(
         output.status.success(),
         "stdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let store_path = dataset_dir.path().join("store.wax");
-    assert!(store_path.exists());
-    let opened = open_store(&store_path).unwrap();
-    assert_eq!(opened.manifest.generation, 0);
-}
-
-#[test]
-fn product_cli_imports_compatibility_snapshot_before_text_search() {
-    let dataset_dir = tempdir().unwrap();
-    let fixture_root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/bench/source/minimal");
-    let manifest = pack_dataset(&PackRequest::new(
-        &fixture_root,
-        dataset_dir.path(),
-        "small",
-        "clean",
-    ))
-    .unwrap();
-
-    let create = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-cli",
-            "--",
-            "create",
-            "--root",
-            dataset_dir.path().to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        create.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&create.stdout),
-        String::from_utf8_lossy(&create.stderr)
-    );
-
-    let import = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-cli",
-            "--",
-            "import-compat",
-            "--root",
-            dataset_dir.path().to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        import.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&import.stdout),
-        String::from_utf8_lossy(&import.stderr)
-    );
-
-    for kind in [
-        "documents",
-        "document_offsets",
-        "text_postings",
-        "document_ids",
-        "document_vectors",
-        "document_vectors_preview_q8",
-    ] {
-        for file in manifest.files.iter().filter(|file| file.kind == kind) {
-            fs::remove_file(dataset_dir.path().join(&file.path)).unwrap();
-        }
-    }
-
-    let search = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-cli",
-            "--",
-            "search",
-            "--root",
-            dataset_dir.path().to_str().unwrap(),
-            "--text",
-            "rust benchmark",
-            "--top-k",
-            "2",
-            "--preview",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        search.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&search.stdout),
-        String::from_utf8_lossy(&search.stderr)
-    );
-    let stdout = String::from_utf8(search.stdout).unwrap();
-    assert!(stdout.contains("\"doc_id\": \"doc-001\""));
-    assert!(stdout.contains("\"preview\": \"rust benchmark guide\""));
-}
-
-#[test]
-fn product_cli_searches_text_from_raw_prepared_store_after_sidecar_removal() {
-    let dataset_dir = tempdir().unwrap();
-    let fixture_root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/bench/source/minimal");
-    let manifest = pack_dataset(&PackRequest::new(
-        &fixture_root,
-        dataset_dir.path(),
-        "small",
-        "clean",
-    ))
-    .unwrap();
-
-    let create = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-cli",
-            "--",
-            "create",
-            "--root",
-            dataset_dir.path().to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        create.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&create.stdout),
-        String::from_utf8_lossy(&create.stderr)
-    );
-
-    let mut runtime = RuntimeStore::open(dataset_dir.path()).unwrap();
-    runtime
-        .writer()
-        .unwrap()
-        .publish_raw_documents(vec![
-            NewDocument::new("doc-001", "rust benchmark guide")
-                .with_metadata(json!({"kind":"guide","workspace":"prod"})),
-            NewDocument::new("doc-002", "semantic latency checklist")
-                .with_metadata(json!({"kind":"checklist","workspace":"prod"})),
-        ])
-        .unwrap();
-    runtime.close().unwrap();
-
-    for kind in ["documents", "document_offsets", "text_postings"] {
-        for file in manifest.files.iter().filter(|file| file.kind == kind) {
-            fs::remove_file(dataset_dir.path().join(&file.path)).unwrap();
-        }
-    }
-    #[cfg(unix)]
-    {
-        let store_path = dataset_dir.path().join("store.wax");
-        let mut permissions = fs::metadata(&store_path).unwrap().permissions();
-        permissions.set_mode(0o444);
-        fs::set_permissions(&store_path, permissions).unwrap();
-    }
-
-    let search = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-cli",
-            "--",
-            "search",
-            "--root",
-            dataset_dir.path().to_str().unwrap(),
-            "--text",
-            "rust benchmark",
-            "--top-k",
-            "2",
-            "--preview",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        search.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&search.stdout),
-        String::from_utf8_lossy(&search.stderr)
-    );
-    let stdout = String::from_utf8(search.stdout).unwrap();
-    assert!(stdout.contains("\"doc_id\": \"doc-001\""));
-    assert!(stdout.contains("\"preview\": \"rust benchmark guide\""));
 }
