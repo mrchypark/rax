@@ -283,6 +283,9 @@ fn read_query_vector(path: &std::path::Path) -> Result<Vec<f32>, String> {
     if values.is_empty() {
         return Err("query vector must contain at least one value".to_owned());
     }
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err("query vector must contain only finite float values".to_owned());
+    }
     Ok(values)
 }
 

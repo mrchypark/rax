@@ -375,11 +375,20 @@ impl WaxMcpSurface {
             }
             McpRequest::OpenStoreSession { store } => {
                 self.require_store_sessions()?;
-                let store = self.authorized_store_path(&store)?;
-                let session_id = self
-                    .broker
-                    .open_store_session(&store)
-                    .map_err(broker_error)?;
+                let store =
+                    self.authorized_store_with_retry(&store, true, AuthorizedStoreLock::Exclusive)?;
+                let store_path = store.store_path();
+                store.verify_runtime_path_identity()?;
+                run_before_runtime_open_hook();
+                store.verify_runtime_path_identity()?;
+                let session_id = match self.broker.open_store_session(&store_path) {
+                    Ok(session_id) => session_id,
+                    Err(error) => return Err(broker_error(error)),
+                };
+                if let Err(error) = store.verify_runtime_path_identity() {
+                    let _ = self.broker.close_session(session_id);
+                    return Err(error);
+                }
                 Ok(McpResponse::SessionOpened {
                     session_id: session_id.as_u64(),
                 })
@@ -489,13 +498,6 @@ impl WaxMcpSurface {
             message: "raw store session requests are disabled on the untrusted MCP surface"
                 .to_owned(),
         })
-    }
-
-    fn authorized_store_path(&self, path: &str) -> Result<PathBuf, McpError> {
-        let store = self.authorized_store_with_retry(path, true, AuthorizedStoreLock::Exclusive)?;
-        let store_path = store.store_path();
-        store.verify_runtime_path_identity()?;
-        Ok(store_path)
     }
 
     fn authorized_store(
@@ -2498,6 +2500,39 @@ mod tests {
             .unwrap();
         replacement_memory.close().unwrap();
         assert!(response.hits.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mcp_surface_open_store_session_rejects_leaf_replacement_after_authorization() {
+        let root = private_tempdir();
+        let store = root.path().join("projection.wax");
+        let original = root.path().join("original-authorized.wax");
+        let replacement = root.path().join("replacement.wax");
+        wax_v2_core::create_empty_store(&store).unwrap();
+        wax_v2_core::create_empty_store(&replacement).unwrap();
+        let mut surface = WaxMcpSurface::with_allowed_root_and_store_sessions(root.path()).unwrap();
+
+        super::set_before_runtime_open_hook({
+            let store = store.clone();
+            let original = original.clone();
+            let replacement = replacement.clone();
+            move || {
+                fs::rename(&store, &original).unwrap();
+                fs::rename(&replacement, &store).unwrap();
+            }
+        });
+
+        let error = surface
+            .handle(McpRequest::OpenStoreSession {
+                store: store.to_string_lossy().into_owned(),
+            })
+            .unwrap_err();
+
+        assert_eq!(error.code(), &McpErrorCode::InvalidRequest);
+        assert!(error
+            .message()
+            .contains("authorized MCP store file changed"));
     }
 
     #[test]
