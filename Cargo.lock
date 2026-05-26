@@ -826,7 +826,7 @@ dependencies = [
 
 [[package]]
 name = "rax"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1218,7 +1218,7 @@ dependencies = [
 
 [[package]]
 name = "wax-bench-artifacts"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1229,7 +1229,7 @@ dependencies = [
 
 [[package]]
 name = "wax-bench-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "serde_json",
@@ -1244,11 +1244,11 @@ dependencies = [
 
 [[package]]
 name = "wax-bench-metrics"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "wax-bench-model"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "strum",
@@ -1256,7 +1256,7 @@ dependencies = [
 
 [[package]]
 name = "wax-bench-packer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "hnsw_rs",
@@ -1268,7 +1268,7 @@ dependencies = [
 
 [[package]]
 name = "wax-bench-reducer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1278,7 +1278,7 @@ dependencies = [
 
 [[package]]
 name = "wax-bench-runner"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "wax-bench-metrics",
  "wax-bench-model",
@@ -1286,7 +1286,7 @@ dependencies = [
 
 [[package]]
 name = "wax-bench-text-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "serde",
@@ -1302,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "wax-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "serde",
@@ -1312,7 +1312,7 @@ dependencies = [
 
 [[package]]
 name = "wax-v2-broker"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
  "wax-v2-runtime",
@@ -1320,7 +1320,7 @@ dependencies = [
 
 [[package]]
 name = "wax-v2-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
@@ -1334,7 +1334,7 @@ dependencies = [
 
 [[package]]
 name = "wax-v2-docstore"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1346,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "wax-v2-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
@@ -1364,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "wax-v2-multimodal"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fs2",
  "serde",
@@ -1375,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "wax-v2-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "serde_json",
@@ -1392,7 +1392,7 @@ dependencies = [
 
 [[package]]
 name = "wax-v2-search"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
  "wax-bench-model",
@@ -1402,7 +1402,7 @@ dependencies = [
 
 [[package]]
 name = "wax-v2-structured-memory"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fs2",
  "serde",
@@ -1412,7 +1412,7 @@ dependencies = [
 
 [[package]]
 name = "wax-v2-text"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1424,7 +1424,7 @@ dependencies = [
 
 [[package]]
 name = "wax-v2-vector"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "hnsw_rs",

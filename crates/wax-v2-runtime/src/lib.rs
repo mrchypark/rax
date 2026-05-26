@@ -4930,8 +4930,7 @@ mod tests {
             .manifest
             .segments
             .iter()
-            .filter(|segment| segment.family == SegmentKind::Vec)
-            .next_back()
+            .rfind(|segment| segment.family == SegmentKind::Vec)
             .unwrap();
         let bytes =
             map_segment_object(&dataset_dir.path().join("store.wax"), vector_segment).unwrap();
@@ -5045,8 +5044,7 @@ mod tests {
             .manifest
             .segments
             .iter()
-            .filter(|segment| segment.family == SegmentKind::Vec)
-            .next_back()
+            .rfind(|segment| segment.family == SegmentKind::Vec)
             .unwrap();
         let bytes =
             map_segment_object(&dataset_dir.path().join("store.wax"), vector_segment).unwrap();
