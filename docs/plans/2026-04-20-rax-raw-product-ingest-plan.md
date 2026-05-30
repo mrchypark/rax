@@ -4,7 +4,7 @@
 
 **Goal:** Replace compatibility-pack product writes with a true raw-ingest path that accepts product-facing inputs, derives publishable segments inside Wax-owned crates, and commits one manifest generation per ingest session.
 
-**Architecture:** Keep the completed staged roadmap intact and build a follow-on write path on top of it. Start with raw document ingest plus store-owned doc-id authority, then move text and vector builders behind the same ingest session, and only then expose final-looking product ingest verbs in `wax-cli`, broker, and MCP.
+**Architecture:** Keep the completed staged roadmap intact and build a follow-on write path on top of it. Start with raw document ingest plus store-owned doc-id authority, then move text and vector builders behind the same ingest session, and only then expose final-looking product ingest verbs in `wax-cli` and broker sessions.
 
 **Tech Stack:** Rust workspace crates, cargo tests, staged Wax v2 engine/runtime crates, existing benchmark harness
 
@@ -97,7 +97,6 @@
 **Files:**
 - Modify: `tests/contracts/product_cli_contract.rs`
 - Modify: `tests/contracts/broker_session_contract.rs`
-- Modify: `tests/contracts/mcp_surface_contract.rs`
 - Create: `tests/contracts/raw_compat_equivalence_contract.rs`
 - Modify: `crates/wax-v2-runtime/src/lib.rs`
 - Modify: compatibility-bridge code as needed
@@ -115,15 +114,13 @@
 **Files:**
 - Modify: `crates/wax-cli/src/main.rs`
 - Modify: `crates/wax-v2-broker/src/lib.rs`
-- Modify: `crates/wax-v2-mcp/src/lib.rs`
 - Create: `tests/contracts/product_raw_ingest_cli_contract.rs`
-- Create: `tests/contracts/mcp_raw_ingest_contract.rs`
 - Modify: `docs/todos/2026-04-20-rax-raw-product-ingest-todo.md`
 
-- [x] Step 1: Add failing contract tests for `wax ingest ...` and for broker/MCP raw-ingest requests.
+- [x] Step 1: Add failing contract tests for `wax ingest ...` and broker raw-ingest requests.
 - [x] Step 2: Expose product-facing raw ingest verbs and requests only after the runtime builders and session commit path exist.
 - [x] Step 3: Keep `import-compat` available but clearly legacy for benchmark and fixture workflows.
-- [x] Step 4: Run the targeted CLI, broker, and MCP tests plus `cargo test --workspace --quiet`.
+- [x] Step 4: Run the targeted CLI and broker tests plus `cargo test --workspace --quiet`.
 
 ## Chunk 8: Compatibility Bridge Convergence
 
@@ -154,7 +151,7 @@
 - Tasks 3 and 4 are now complete via `NewDocument`, `publish_raw_documents`, raw `Doc` segment preparation in docstore, and raw `Txt` segment preparation in text.
 - Task 5 is now complete via `NewDocumentVector`, `publish_raw_vectors`, raw `Vec` segment preparation in vector, and a runtime vector-load path that no longer requires compatibility `query_vectors` sidecars.
 - Task 6 is now complete via runtime-level raw-versus-compatibility equivalence, product read-surface equivalence coverage, and fresh targeted verification.
-- Task 7 is now complete: `wax ingest docs`, `wax ingest vectors`, matching broker/MCP raw mutation requests, and a fresh workspace run all pass once verification uses a workspace-local `TMPDIR` instead of the exhausted system temp volume.
+- Task 7 is now complete: `wax ingest docs`, `wax ingest vectors`, matching broker raw mutation requests, and a fresh workspace run all pass once verification uses a workspace-local `TMPDIR` instead of the exhausted system temp volume.
 - Task 8 is now complete: raw full-snapshot publish exists as a shared runtime primitive, `import_compatibility_snapshot` delegates through that same one-generation raw snapshot path, and the remaining compatibility-only logic is limited to dataset-pack translation into raw inputs.
 - There is no remaining unchecked item in the current raw product-ingest follow-on roadmap.
 
@@ -164,5 +161,5 @@
 - Keep `publish_raw_snapshot` as the explicit full-replacement primitive; use `publish_raw_documents` only for incremental document updates against existing raw store documents.
 - Guard raw document and vector publication with store-generation or document-segment preconditions from the state that was actually validated.
 - Refresh long-lived runtime, broker, structured-memory, and multimodal sessions before read operations that can be affected by another handle's write.
-- Keep MCP session roots constrained to a configured allowed root, and preserve unknown top-level raw document fields through MCP and broker boundaries.
+- MCP support has since been removed entirely; preserve unknown top-level raw document fields through broker boundaries.
 - Fall back to exact-flat vector search when HNSW sidecars are declared but missing, including explicit HNSW mode.

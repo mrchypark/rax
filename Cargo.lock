@@ -843,7 +843,6 @@ dependencies = [
  "wax-v2-broker",
  "wax-v2-core",
  "wax-v2-docstore",
- "wax-v2-mcp",
  "wax-v2-multimodal",
  "wax-v2-runtime",
  "wax-v2-structured-memory",
@@ -1342,24 +1341,6 @@ dependencies = [
  "tempfile",
  "wax-bench-model",
  "wax-v2-core",
-]
-
-[[package]]
-name = "wax-v2-mcp"
-version = "0.2.0"
-dependencies = [
- "cap-fs-ext",
- "cap-std",
- "fs2",
- "libc",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "wax-v2-broker",
- "wax-v2-core",
- "wax-v2-runtime",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

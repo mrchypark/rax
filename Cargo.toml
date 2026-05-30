@@ -10,7 +10,6 @@ members = [
   "crates/wax-v2-broker",
   "crates/wax-v2-core",
   "crates/wax-v2-docstore",
-  "crates/wax-v2-mcp",
   "crates/wax-v2-multimodal",
   "crates/wax-v2-runtime",
   "crates/wax-v2-search",
@@ -45,7 +44,6 @@ wax-v2-core = { path = "crates/wax-v2-core" }
 wax-v2-docstore = { path = "crates/wax-v2-docstore" }
 wax-v2-broker = { path = "crates/wax-v2-broker" }
 wax-v2-runtime = { path = "crates/wax-v2-runtime" }
-wax-v2-mcp = { path = "crates/wax-v2-mcp" }
 wax-v2-multimodal = { path = "crates/wax-v2-multimodal" }
 wax-v2-structured-memory = { path = "crates/wax-v2-structured-memory" }
 wax-v2-text = { path = "crates/wax-v2-text" }
@@ -124,10 +122,6 @@ name = "broker_session_contract"
 path = "tests/contracts/broker_session_contract.rs"
 
 [[test]]
-name = "mcp_surface_contract"
-path = "tests/contracts/mcp_surface_contract.rs"
-
-[[test]]
 name = "structured_memory_contract"
 path = "tests/contracts/structured_memory_contract.rs"
 
@@ -170,10 +164,6 @@ path = "tests/contracts/raw_compat_equivalence_contract.rs"
 [[test]]
 name = "product_raw_ingest_cli_contract"
 path = "tests/contracts/product_raw_ingest_cli_contract.rs"
-
-[[test]]
-name = "mcp_raw_ingest_contract"
-path = "tests/contracts/mcp_raw_ingest_contract.rs"
 
 [[test]]
 name = "raw_compat_publish_semantics_contract"
