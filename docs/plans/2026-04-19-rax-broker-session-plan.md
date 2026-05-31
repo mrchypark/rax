@@ -4,7 +4,12 @@
 
 **Goal:** Add the first broker/session model on top of `wax-v2-runtime` so product callers can hold a durable session boundary without coupling directly to benchmark-era request files or one-shot CLI orchestration.
 
-**Architecture:** Introduce a small broker-facing crate or module that owns session lifecycle, store handle reuse, and future request routing. Keep it above `wax-v2-runtime` and below later MCP integration.
+**Architecture:** Introduce a small broker-facing crate or module that owns session lifecycle, store handle reuse, and future request routing. Keep it above `wax-v2-runtime`; there is no current MCP integration layer.
+
+**Current status note, 2026-05-29:** This plan records the first broker slice.
+The current broker surface includes raw `ingest_documents` and `ingest_vectors`
+session methods above `NewDocument` and `NewDocumentVector`, not only the
+historical compatibility bridge.
 
 **Tech Stack:** Rust workspace crates, cargo tests, staged Wax v2 engine crates
 
@@ -25,20 +30,21 @@
 
 ## Chunk 2: Compatibility-Aware Write Entry
 
-### Task 2: Route the current compatibility import path through the session boundary
+### Task 2: Route the historical compatibility import path through the session boundary
 
 **Files:**
 - Modify: same broker/session crate and supporting docs only as needed
 
 - [x] Step 1: Add a failing test for session-driven compatibility import followed by search.
 - [x] Step 2: Expose a session-level compatibility import action that delegates to `wax-v2-runtime`.
-- [x] Step 3: Keep the naming explicit that this is current compatibility import, not final raw ingest or structured memory mutation.
+- [x] Step 3: Keep the naming explicit that this is compatibility import, not final raw ingest or structured memory mutation.
 - [x] Step 4: Run `cargo test --workspace --quiet`.
 
 ## Notes
 
-- The first broker/session slice should focus on lifecycle and boundary ownership, not network transport or MCP protocol details.
-- Session identity, concurrency, and pooling can stay local/in-process for this slice as long as the surface is reusable by a later daemon or MCP server.
+- The first broker/session slice should focus on lifecycle and boundary ownership, not network transport details.
+- Session identity, concurrency, and pooling can stay local/in-process for this slice as long as the surface is reusable by a later daemon.
 - Do not let benchmark runner concepts become the session contract.
 - The implemented crate is `wax-v2-broker`. It owns opaque `SessionId` values and a local in-process map of active `RuntimeStore` handles rather than pushing session identity into `wax-v2-runtime`.
-- The first broker search surface is intentionally text-only through `SessionSearchRequest::text(...)`; vector or hybrid broker search remains deferred until the runtime has a better public vector-input contract.
+- Historical first-slice note: the first broker search surface was intentionally text-only through `SessionSearchRequest::text(...)`.
+- Current surface note: `SessionSearchRequest` now supports text, vector, and hybrid modes, and raw document/vector ingest is exposed through `ingest_documents` and `ingest_vectors`.

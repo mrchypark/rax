@@ -53,7 +53,7 @@
 
 - [x] Add product-facing `ingest` CLI verbs after raw builders are real
 - [x] Add raw ingest requests to broker/session surface
-- [x] Add raw ingest requests to MCP surface
+- [x] Retire the earlier MCP raw-ingest surface from current product scope
 - [x] Keep `import-compat` as a legacy bridge rather than removing it immediately
 
 ## Phase H: Compatibility Bridge Convergence
@@ -77,12 +77,12 @@
 - [x] Recorded that runtime vector search must not depend on compatibility `query_vectors` sidecars once the caller already provides `vector_query`.
 - [x] Recorded that the latest persisted `Vec` segment is authoritative for preview presence and must not silently fall back to removed preview sidecars.
 - [x] Recorded that raw-versus-compatibility equivalence should compare runtime-observable behavior for the same corpus rather than overfitting to internal generation counts or legacy compatibility publication sequencing.
-- [x] Recorded that before product raw-ingest verbs exist, product-surface equivalence should be exercised by reading raw-prepared stores through the existing CLI, broker, and MCP read surfaces rather than waiting for future write-verb migration.
+- [x] Recorded that before product raw-ingest verbs exist, product-surface equivalence should be exercised by reading raw-prepared stores through the existing CLI and broker read surfaces rather than waiting for future write-verb migration.
 - [x] Recorded that the first product raw-ingest migration should stay family-explicit (`docs` and `vectors`) instead of inventing a generic ingest envelope before the runtime has a truly shared multi-family write contract.
 - [x] Recorded that the local temp-volume exhaustion was an environment-only verification blocker and that workspace-local `TMPDIR` reruns are the correct workaround while the convergence work continues.
 - [x] Recorded that family-explicit product verbs can remain stable while runtime adds a separate full-snapshot shared publish primitive for equivalence and compatibility-bridge convergence.
 - [x] Recorded that incremental product document ingest carries forward only active store `Doc` segments, not compatibility pack sidecars.
 - [x] Recorded that raw publication must use the same generation or document-segment identity for validation and final publish preconditions.
 - [x] Recorded that long-lived product sessions must refresh read state before serving reads after another handle may have written.
-- [x] Recorded that MCP roots are constrained by an allowed-root boundary and raw document unknown top-level fields must survive MCP and broker ingest.
+- [x] Recorded that MCP support has since been removed entirely and raw document unknown top-level fields must survive broker ingest.
 - [x] Recorded that explicit HNSW requests should fall back to exact-flat when declared sidecars are missing rather than failing lane load.

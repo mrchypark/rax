@@ -1,35 +1,37 @@
 # rax
 
 `rax` is a Rust workspace inspired by
-https://github.com/christopherkarani/Wax. The goal is to keep the Wax user model
-portable across platforms: one local memory store, no server, remember text, and
-recall it with hybrid local search. The product CLI/runtime store path is
-supported on Unix and Windows; the untrusted MCP store-file surface is
-intentionally narrower and documented below. It has two main surfaces:
+[Wax](https://github.com/christopherkarani/Wax). It keeps the core Wax user
+model local for CLI/runtime use: one `.wax` memory store, no server required,
+and local retrieval over text plus caller-provided vectors.
 
-- `wax`: the product-facing CLI for creating a store, ingesting documents or
-  vectors, and searching the store.
-- `wax-bench-cli`: the benchmark harness for packing fixtures, running
-  workloads, reducing artifacts, and producing reports.
+The repository has two main command-line surfaces:
 
-The repository is organized as a Cargo workspace. Runtime crates live under
-`crates/wax-v2-*`; benchmark crates live under `crates/wax-bench-*`.
+- `wax`: product CLI for local memory, raw document/vector ingest, and search.
+- `wax-bench-cli`: benchmark harness for packing datasets, running workloads,
+  reducing artifacts, and producing reports.
 
-## Build And Test
+Runtime crates live under `crates/wax-v2-*`; benchmark crates live under
+`crates/wax-bench-*`.
 
-```bash
-cargo build --workspace
-cargo test --workspace --all-targets
-cargo clippy --workspace --all-targets -- -D warnings
-```
+## Choose Your Path
 
-## Use The Product CLI Like Wax Memory
+| Path | Start here | Use when |
+| --- | --- | --- |
+| Memory CLI | [docs/usage.md](docs/usage.md#memory-cli-quick-start) | You want a single local `.wax` file for `remember` and `recall`. |
+| Raw projection store | [docs/usage.md](docs/usage.md#raw-projection-stores) | Another system owns document ids, metadata, and optional vectors. |
+| Benchmark harness | [docs/benchmarks/current-guide.md](docs/benchmarks/current-guide.md) | You need to pack fixtures, run workloads, reduce artifacts, or compare vector modes. |
 
-Remember text into a single `.wax` file. If the file does not exist, `wax`
-creates it.
+For a source-derived inventory of the current crate and API surface, see
+[docs/current-implementation.md](docs/current-implementation.md).
+
+## Quick Start
+
+Remember text into a local `.wax` file:
 
 ```bash
 install -d -m 700 ~/.local/share/rax
+
 cargo run -p wax-cli -- remember \
   --store ~/.local/share/rax/agent.wax \
   "The user is building a habit tracker in Rust."
@@ -44,169 +46,42 @@ cargo run -p wax-cli -- recall \
   --top-k 5
 ```
 
-`recall` is the product-memory query path. It uses the memory facade and hybrid
-search over memories written by `remember`.
-
-`search --store` is the raw runtime search path. Use it for caller-owned
-projection stores populated with `wax ingest docs --store`; it preserves external
-document ids instead of generating `mem-*` ids:
-
-```bash
-cargo run -p wax-cli -- search \
-  --store ~/.local/share/rax/projection.wax \
-  --text "habit tracker" \
-  --top-k 5 \
-  --preview
-```
-
-## Use The MCP Server
-
-`wax-mcp` exposes the same memory flow over stdio JSON-RPC tools on Linux:
-
-- `remember`
-- `recall`
-- `search`
-
-The CLI/runtime store path is cross-platform for Unix and Windows. The
-untrusted MCP store-file surface is intentionally Linux-only for now because it
-relies on fd-relative opening through `/proc/self/fd` to avoid symlink,
-hard-link, and path-swap races inside `WAX_MCP_ALLOWED_ROOT`. On non-Linux
-targets the server initializes without tool capabilities instead of exposing an
-unsafe partial implementation.
-
-Run it with a private allowed root for store paths. The directory must be owned
-by the server user and mode `0700` or stricter; do not use `/tmp` directly. The
-MCP product tools only accept a `.wax` store file directly under this trusted
-root; nested paths, symlink leaf paths, hard-linked files, and group/world
-readable store files are rejected. Unlike the product CLI/runtime path, MCP may
-create hidden `.wax-mcp-lock-*` coordination files inside the allowed root.
-
-```bash
-install -d -m 700 ~/.local/share/rax-mcp
-WAX_MCP_ALLOWED_ROOT=$HOME/.local/share/rax-mcp cargo run -p wax-v2-mcp --bin wax-mcp
-```
-
-After the JSON-RPC `initialize` request succeeds and the client sends
-`notifications/initialized`, this is a valid `tools/call` payload:
-
-```json
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"remember","arguments":{"store":"/home/alice/.local/share/rax-mcp/agent.wax","content":"The user is building a habit tracker in Rust."}}}
-```
-
-## Use Raw Projection Stores
-
-Raw projection stores are the product path when another system owns canonical
-records and wants Wax to own retrieval indexing. The caller supplies stable
-document ids, text, metadata, and optional timestamps; Wax stores those ids and
-returns them from search.
-
-Prepare raw documents as JSONL. Each row needs `doc_id` and `text`; `metadata`,
-`timestamp_ms`, and extra top-level fields are optional.
-
-```jsonl
-{"doc_id":"doc-1","text":"alpha product notes","metadata":{"kind":"note"}}
-{"doc_id":"doc-2","text":"beta launch checklist","metadata":{"kind":"task"}}
-```
-
-Ingest documents into a direct `.wax` store. The store is created if it does not
-exist:
-
-```bash
-cargo run -p wax-cli -- ingest docs \
-  --store ~/.local/share/rax/projection.wax \
-  --input /tmp/docs.jsonl
-```
-
-Search text:
-
-```bash
-cargo run -p wax-cli -- search \
-  --store ~/.local/share/rax/projection.wax \
-  --text "launch checklist" \
-  --top-k 5 \
-  --preview
-```
-
-Optionally ingest explicit vectors for existing document ids. The vector input
-must cover the current document set; publish documents first. Each `values`
-array must contain 384 floats, matching the product store embedding profile.
-Rows have this shape:
+The current product CLI commands are:
 
 ```text
-{"doc_id":"doc-1","values":[384 floats]}
+create
+remember
+recall
+ingest docs
+ingest vectors
+search
 ```
+
+There is no current `import-compat` product CLI command.
+
+## Build And Test
 
 ```bash
-cargo run -p wax-cli -- ingest vectors \
-  --store ~/.local/share/rax/projection.wax \
-  --input /tmp/vectors.jsonl
+cargo build --workspace
+cargo test --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Search with an external query vector when the caller owns embeddings:
-the query file can be either a 384-float JSON array or an object with a single
-`values` field containing 384 floats.
+## Current Constraints
 
-```bash
-cargo run -p wax-cli -- search \
-  --store ~/.local/share/rax/projection.wax \
-  --mode vector \
-  --vector-input /tmp/query-vector.json \
-  --top-k 5 \
-  --preview
-```
+- There is no current `import-compat` product CLI command.
+- Product vector and hybrid search require explicit caller-provided query
+  vectors; `rax` does not generate hidden embeddings.
+- There is no MCP crate, stdio server, or tool surface in the current build.
 
-Hybrid search accepts both `--text` and `--vector-input`:
+## Documentation
 
-```bash
-cargo run -p wax-cli -- search \
-  --store ~/.local/share/rax/projection.wax \
-  --mode hybrid \
-  --text "launch checklist" \
-  --vector-input /tmp/query-vector.json \
-  --top-k 5
-```
-
-## Use The Benchmark Harness
-
-Pack a source fixture:
-
-```bash
-cargo run -p wax-bench-cli -- pack \
-  --source fixtures/bench/source/minimal \
-  --out /tmp/rax-pack \
-  --tier small \
-  --variant clean
-```
-
-Run a workload:
-
-```bash
-cargo run -p wax-bench-cli -- run \
-  --dataset /tmp/rax-pack \
-  --workload ttfq_text \
-  --sample-count 5 \
-  --artifact-dir /tmp/rax-artifacts
-```
-
-Reduce artifacts:
-
-```bash
-cargo run -p wax-bench-cli -- reduce --input /tmp/rax-artifacts
-```
-
-Query a packed dataset directly:
-
-```bash
-cargo run -p wax-bench-cli -- query \
-  --dataset /tmp/rax-pack \
-  --text "alpha" \
-  --top-k 5
-```
-
-## Current Scope
-
-The product surface supports direct `.wax` store creation, raw document ingest,
-explicit vector ingest, text/vector/hybrid search, broker store sessions, and an
-MCP-compatible in-process surface. The benchmark harness validates dataset
-packing, runner lifecycle metrics, search quality summaries, vector mode
-profiling, and artifact reduction.
+- [docs/usage.md](docs/usage.md): product CLI, raw stores, output formats,
+  limitations, and focused tests.
+- [docs/current-implementation.md](docs/current-implementation.md): current
+  source-derived implementation snapshot.
+- [docs/benchmarks/current-guide.md](docs/benchmarks/current-guide.md):
+  benchmark command matrix, workloads, artifacts, metrics, quality reports, and
+  comparison caveats.
+- [docs/specs](docs/specs), [docs/plans](docs/plans), and
+  [docs/todos](docs/todos): historical roadmap, design, and execution records.

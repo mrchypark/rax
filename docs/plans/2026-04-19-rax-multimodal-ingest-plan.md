@@ -37,7 +37,7 @@
 
 ## Notes
 
-- The first slice should prefer a dedicated `wax-v2-multimodal` crate rather than hiding media ingest in runtime, broker, or MCP layers.
+- The first slice should prefer a dedicated `wax-v2-multimodal` crate rather than hiding media ingest in runtime or broker layers.
 - Do not freeze the final binary media-segment format in this slice.
 - Do not promise embedding extraction, frame sampling, OCR, speech-to-text, or retrieval orchestration yet.
 - The first success condition is durable asset identity plus reopen-safe ingest, not complete multimodal search parity.

@@ -37,7 +37,7 @@
 
 ## Notes
 
-- Keep the first entity/fact API explicit enough that broker or MCP callers could adopt it later without reinterpreting generic bootstrap records.
+- Keep the first entity/fact API explicit enough that broker callers could adopt it later without reinterpreting generic bootstrap records.
 - Do not promise full bitemporal semantics, dedup hashes, or evidence span parity in this slice.
 - Reuse the bootstrap provenance and status fields instead of inventing a second hidden persistence path.
 - The implemented bootstrap entity layer uses reserved record predicates for kind and aliases inside the same `structured-memory.ndjson` file. This keeps persistence flat and explicit, but alias normalization, dedup hashes, entity-object value kinds, and graph traversal are still future work.

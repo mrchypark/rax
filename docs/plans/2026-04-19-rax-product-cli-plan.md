@@ -4,7 +4,11 @@
 
 **Goal:** Add the first product CLI separate from `wax-bench-cli`, backed by `wax-v2-runtime`, without leaking benchmark workload language into the user-facing command surface.
 
-**Architecture:** Introduce a dedicated product CLI crate that wraps `wax-v2-runtime` for create, compatibility import, and search. Keep `wax-bench-cli` unchanged as benchmark infrastructure.
+**Architecture:** Introduce a dedicated product CLI crate that wraps `wax-v2-runtime` for create, the historical compatibility bridge, and search. Keep `wax-bench-cli` unchanged as benchmark infrastructure.
+
+**Current status note, 2026-05-29:** This plan records the first CLI slice. The
+current `wax` commands are `create`, `remember`, `recall`, `ingest docs`,
+`ingest vectors`, and `search`; there is no current `import-compat` CLI command.
 
 **Tech Stack:** Rust workspace crates, `clap`, cargo tests, staged Wax v2 engine crates
 
@@ -42,4 +46,5 @@
 - Do not mix benchmark-only commands such as workload runners, packers, reducers, or matrix reports into the product CLI.
 - The first CLI slice should prefer stable nouns and verbs over short benchmark shorthands, even if the underlying implementation still depends on compatibility manifests and sidecars.
 - The package is `wax-cli` and the product binary name is `wax`, so the user-facing entry point is distinct from `wax-bench-cli` while the workspace package name stays explicit.
-- The first command surface stays intentionally narrow: `create`, `import-compat`, and text `search`. Vector or hybrid CLI search is still deferred until the runtime has a better public vector-input story than raw caller-provided embedding arrays.
+- Historical first-slice note: the first command surface was intentionally narrow around create, compatibility import, and text search.
+- Current command surface note: raw ingest and caller-vector search have since landed as `ingest docs`, `ingest vectors`, and `search --mode vector|hybrid`.

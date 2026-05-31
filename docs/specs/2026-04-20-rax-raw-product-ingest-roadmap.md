@@ -4,13 +4,26 @@ Status: Approved for follow-on execution
 Date: 2026-04-20  
 Scope: replace compatibility-pack writes with true product ingest while preserving the completed staged rax-to-wax roadmap and keeping the benchmark harness green
 
+## Current Status Note
+
+As of 2026-05-29, the product CLI has moved past the intermediate
+`import-compat` command described in parts of this historical roadmap. The
+current `wax` commands are `create`, `remember`, `recall`, `ingest docs`,
+`ingest vectors`, and `search`.
+
+The runtime raw-ingest product types are `NewDocument` and `NewDocumentVector`.
+The broker exposes raw `ingest_documents` and `ingest_vectors` session methods.
+MCP support has since been removed entirely; there is no MCP crate, stdio
+server, JSON-RPC tool surface, or trusted in-process MCP adapter in the current
+build.
+
 ## Summary
 
 The staged rax-to-wax roadmap is complete, but the public write path is still intentionally honest about being a bridge:
 
 - `RuntimeStoreWriter::import_compatibility_snapshot()` reads dataset-pack compatibility artifacts and publishes compatibility `Doc`/`Txt`/`Vec` segments into `store.wax`
-- `wax-cli` still exposes `import-compat` as the compatibility bridge alongside the new raw `wax ingest docs` and `wax ingest vectors` verbs
-- broker and MCP surfaces now expose raw document/vector writes, but compatibility import still remains as the broadest bridge path
+- historically, `wax-cli` exposed `import-compat` as a compatibility bridge; the current product CLI no longer exposes that command
+- broker sessions expose raw document/vector writes; the earlier MCP work is now retired
 
 That was the right staged endpoint because it gave `rax` a real core, product-facing read surfaces, and stable engine crates without pretending raw product ingest already existed.
 
@@ -28,12 +41,12 @@ Post-completion review hardening:
 
 ## Current Boundary
 
-Today the runtime, CLI, broker, and MCP layers still depend on compatibility-pack shapes underneath:
+At the start of this roadmap, the runtime, CLI, and broker layers still depended on compatibility-pack shapes underneath:
 
 - `wax-v2-runtime` still reads the dataset-pack `manifest.json`, and compatibility import remains one of its write paths
 - `wax-v2-docstore` still retains a compatibility fallback around dataset-pack documents
 - `wax-v2-text` and `wax-v2-vector` can still translate compatibility dataset artifacts into publishable bridge segments
-- `wax-cli` exposes `create`, `import-compat`, raw `ingest docs`, raw `ingest vectors`, and text `search`
+- `wax-cli` exposed `create`, `import-compat`, raw `ingest docs`, raw `ingest vectors`, and text `search` during the intermediate migration
 
 This means `rax` already has a real storage substrate, but not a real product ingest substrate.
 
@@ -151,7 +164,7 @@ Compatibility import should eventually call the same builder logic after transla
 
 ### 4. Ingest Sessions Publish A Single Generation
 
-The current compatibility import path appends three immutable family publishes in sequence. The follow-on ingest path should instead:
+The compatibility import path at the start of this roadmap appended three immutable family publishes in sequence. The follow-on ingest path should instead:
 
 1. open an ingest session
 2. accumulate or spill builder state safely
@@ -162,7 +175,7 @@ This keeps the manifest contract honest and makes later partial-family ingest ex
 
 ### 5. Product Surfaces Shift Only After Builders Exist
 
-`wax-cli`, broker, and MCP should not expose final-looking ingest verbs until:
+`wax-cli` and broker should not expose final-looking ingest verbs until:
 
 - raw document ingest exists
 - doc-id authority is store-owned
@@ -206,7 +219,7 @@ Slice B handoff status:
 - define Wax-owned raw document ingest request types in `wax-v2-runtime`
 - add the first failing runtime contract tests for raw document ingest
 - add the first document-to-segment builder path under Wax-owned crates
-- keep current compatibility import intact
+- keep compatibility import intact as a bridge
 
 This slice deliberately couples contract definition with the first real builder so the public shape is immediately validated by executable behavior.
 
@@ -262,20 +275,19 @@ Slice F handoff status:
 ### Slice G: Product Surface Migration
 
 - add `wax ingest`-style product CLI verbs only after the raw builder path exists
-- add raw ingest requests to broker and MCP surfaces
-- keep `import-compat` available but clearly legacy on product surfaces
+- add raw ingest requests to broker/session surfaces
+- keep compatibility import as an internal bridge, not as the long-term product CLI path
 
 Slice G handoff status:
 
 - `wax-cli` now exposes explicit family-based raw ingest commands as `wax ingest docs` and `wax ingest vectors`
 - `wax-v2-broker` now exposes raw document and raw vector ingest requests above the existing session boundary
-- `wax-v2-mcp` now exposes transport-ready `IngestDocuments` and `IngestVectors` requests plus `RawIngested` responses
+- the former MCP raw-ingest work has been retired from the current build
 - the first product raw-ingest migration keeps family boundaries explicit rather than inventing a generic multi-family envelope before the runtime actually has one
 - `publish_raw_documents` is now incremental only against active store-owned raw document segments; it does not silently merge compatibility pack sidecars into product ingest state when the store has no `Doc` segment yet
 - long-lived runtime, broker, structured-memory, and multimodal sessions now refresh read state before serving reads that may otherwise observe stale data after another session writes
-- the MCP surface now requires an allowed root and preserves unknown flattened top-level document payload fields through broker raw ingest
-- `import-compat` remains available as the explicit legacy bridge alongside the new raw product-ingest surface
-- targeted CLI and MCP raw-ingest contracts are green, and fresh full-workspace verification is also green when `cargo test --workspace --quiet` runs under a workspace-local `TMPDIR`
+- compatibility import remains as a runtime bridge for benchmark-pack translation, but there is no current `import-compat` product CLI command
+- targeted CLI and broker raw-ingest contracts are green, and fresh full-workspace verification is also green when `cargo test --workspace --quiet` runs under a workspace-local `TMPDIR`
 
 ### Slice H: Compatibility Bridge De-Emphasis
 
@@ -313,7 +325,7 @@ Slice H handoff status:
 - Benchmark coverage remains mandatory, but the target is shared builder verification rather than permanent compatibility-only publication logic.
 - Product raw document ingest now treats the active store `Doc` segment as the only carry-forward source. Compatibility pack documents remain a bridge input for explicit compatibility import or full-snapshot equivalence, not an implicit merge source for incremental product writes.
 - Store publication paths now use generation or document-segment preconditions around merge, validation, and publish so concurrent writers fail closed instead of clobbering unseen updates.
-- MCP session roots are now fail-closed to a configured allowed root; arbitrary filesystem roots are no longer part of the transport-ready surface.
+- The former MCP root-boundary work is retired with the MCP surface; arbitrary MCP filesystem roots are no longer a product concern.
 - Missing HNSW sidecar files now fall back to exact-flat even when HNSW mode is explicitly requested, matching runtime search fallback behavior instead of failing during lane load.
 
 ## Verification Strategy

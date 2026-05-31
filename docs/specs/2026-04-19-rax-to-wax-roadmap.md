@@ -44,7 +44,7 @@ Today `rax` does not contain:
 - append-friendly write and commit flow
 - snapshot-isolated read generations
 - a durable docstore separate from benchmark fixtures
-- product API, broker, or MCP surface
+- product API or broker surface
 
 ## Goals
 
@@ -58,7 +58,7 @@ Today `rax` does not contain:
 ### Later Goals
 
 - product CLI and runtime API
-- broker and MCP surface
+- broker surface
 - structured memory parity
 - multimodal parity
 
@@ -102,7 +102,7 @@ Pros:
 
 - aligns with existing architecture docs
 - keeps benchmark infrastructure useful
-- creates a stable substrate for API, CLI, and MCP work
+- creates a stable substrate for API, CLI, and broker work
 
 Cons:
 
@@ -160,7 +160,7 @@ Write support will evolve in this order:
 
 ### 5. Product Surface
 
-Public runtime API, CLI, broker, and MCP should be added only after the core container can:
+Public runtime API, CLI, and broker should be added only after the core container can:
 
 - create a store
 - open a store
@@ -231,15 +231,14 @@ Slice C handoff status:
 - benchmark callers no longer directly depend on benchmark fixture layout for doc/text/vector runtime reads; remaining compatibility inputs such as `query_vectors` and HNSW graph files now sit behind engine crate boundaries instead
 - `wax-v2-runtime` now exists as the first product-facing Rust facade and currently exposes create/open/search/close plus a write-session boundary over the staged core, docstore, text, vector, and search crates
 - the first runtime write surface is intentionally compatibility-scoped: `RuntimeStoreWriter::import_compatibility_snapshot` publishes compatibility `Doc`/`Txt`/`Vec` segments from the current dataset-pack inputs into `store.wax`
-- `wax-cli` now exists as the first product CLI crate, shipping a `wax` binary with `create`, `import-compat`, and text `search` commands backed by `wax-v2-runtime`
+- historically, `wax-cli` first existed as the product CLI crate with `create`, `import-compat`, and text `search` commands backed by `wax-v2-runtime`
 - the first product CLI intentionally keeps compatibility import explicit and does not surface benchmark pack/run/reduce workflows or pretend to offer final raw ingest
-- `wax-v2-broker` now exists as the first broker/session crate and owns opaque session ids plus in-process `RuntimeStore` reuse for text search, compatibility import, and close
-- the first broker/session surface is intentionally local and text-first, so it stays reusable for later daemon or MCP transport without prematurely freezing vector-input or concurrency policy
-- `wax-v2-mcp` now exists as the first MCP-compatible crate and exposes transport-ready request/response enums for session open, text search, compatibility import, and close over `wax-v2-broker`
-- the first MCP slice deliberately stops short of a real network server or daemon, but it now has a stable enough tool boundary for later transport work
+- historically, `wax-v2-broker` first existed as the broker/session crate with opaque session ids plus in-process `RuntimeStore` reuse for text search, compatibility import, and close
+- the first broker/session surface was intentionally local and text-first, so it stayed reusable for later daemon transport without prematurely freezing vector-input or concurrency policy
+- historically, `wax-v2-mcp` first existed as an MCP-compatible crate with transport-ready request/response enums for session open, text search, compatibility import, and close over `wax-v2-broker`; that MCP slice has since been removed from the current build
 - `wax-v2-structured-memory` now exists as the first bootstrap structured-memory crate with explicit `subject/predicate/value/status/provenance` records and a bootstrap `structured-memory.ndjson` persistence layer
 - the first structured-memory slice deliberately stops short of final Wax binary segment persistence and full upstream entity/fact parity, but it now gives deferred-parity work an explicit boundary instead of hiding structure inside document metadata
-- `wax-v2-structured-memory` now also exposes first explicit `StructuredEntity` and `StructuredFact` APIs above the same bootstrap persistence layer, so later broker or MCP callers no longer need to reinterpret generic bootstrap records to express entity or fact intent
+- `wax-v2-structured-memory` now also exposes first explicit `StructuredEntity` and `StructuredFact` APIs above the same bootstrap persistence layer, so broker callers no longer need to reinterpret generic bootstrap records to express entity or fact intent
 - the current entity bootstrap design deliberately remains flat: entity kind and aliases are still persisted as reserved bootstrap predicates inside `structured-memory.ndjson`, while alias normalization, graph traversal, bitemporal querying, evidence richness, and final binary-segment persistence remain future work
 - `wax-v2-multimodal` now exists as the first bootstrap multimodal crate with explicit asset descriptors, copied store-owned payloads, and a `multimodal-assets.ndjson` metadata file plus `multimodal-assets/` payload directory
 - the first multimodal ingest slice deliberately stops short of manifest-visible media segments, OCR, transcripts, embeddings, frame extraction, or retrieval orchestration, but it now gives later PhotoRAG and VideoRAG work a durable asset-ownership boundary
@@ -263,7 +262,7 @@ Slice C handoff status:
 
 - runtime API
 - product CLI
-- broker and MCP
+- broker
 
 ### Slice F: Deferred Parity
 
@@ -337,4 +336,11 @@ That distinction is now part of the roadmap and todo structure.
 
 The staged roadmap above is now complete and remains historically correct as written.
 
-The next product-write roadmap is tracked separately in `docs/specs/2026-04-20-rax-raw-product-ingest-roadmap.md`. That follow-on work does not reopen the staged checklist above; it starts from the completed runtime, CLI, broker, and MCP surfaces and replaces compatibility-pack writes with true raw product ingest.
+The next product-write roadmap is tracked separately in `docs/specs/2026-04-20-rax-raw-product-ingest-roadmap.md`. That follow-on work does not reopen the staged checklist above; it starts from the completed runtime, CLI, and broker surfaces and replaces compatibility-pack writes with true raw product ingest.
+
+Current status note, 2026-05-29: the historical first product surface above has
+since been superseded. The current `wax` CLI commands are `create`, `remember`,
+`recall`, `ingest docs`, `ingest vectors`, and `search`; there is no
+`import-compat` product CLI command. MCP support has since been removed
+entirely; there is no MCP crate, stdio server, JSON-RPC tool surface, or trusted
+in-process MCP adapter in the current build.

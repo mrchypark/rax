@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Start the first structured-memory slice above the completed runtime, CLI, broker, and MCP surfaces without pretending full upstream entity/fact parity already exists.
+**Goal:** Start the first structured-memory slice above the completed runtime, CLI, and broker surfaces without pretending full upstream entity/fact parity already exists.
 
 **Architecture:** Keep the first structured-memory boundary compatibility-light and local to Rust crates. Reuse the current durable core and product-surface stack, but define a new entity/fact-oriented layer explicitly instead of smuggling structure into existing document or search contracts.
 
@@ -39,6 +39,6 @@
 
 - The first structured-memory slice should not force final entity/fact schema choices too early.
 - Avoid encoding structured memory as hidden metadata blobs inside compatibility document rows.
-- Reuse the existing runtime/broker/MCP surfaces where helpful, but keep the structured-memory boundary explicit.
+- Reuse the existing runtime and broker surfaces where helpful, but keep the structured-memory boundary explicit.
 - The implemented crate is `wax-v2-structured-memory`, and the first persistence layer is an explicit bootstrap file `structured-memory.ndjson` in the store root rather than a final Wax binary segment format.
 - The first record shape is intentionally narrow: `subject`, `predicate`, `value`, explicit `status`, and explicit provenance `{source, asserted_at_ms}`. This is enough for bootstrap structured memory, but it is not yet full upstream entity/fact API parity.

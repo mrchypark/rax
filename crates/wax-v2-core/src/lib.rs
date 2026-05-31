@@ -1007,13 +1007,6 @@ fn temporary_store_name(file_name: &OsStr) -> OsString {
     ))
 }
 
-#[cfg(unix)]
-fn mcp_temporary_store_file_suffix(file_name: &OsStr) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(file_name.as_bytes().to_ascii_lowercase());
-    format!("-{:x}.tmp", hasher.finalize()).into_bytes()
-}
-
 fn publish_temporary_store_file(temp: &TemporaryStoreFile) -> Result<OpenOptionsFile, CoreError> {
     let expected_identity = file_identity_from_file(&temp.file)?;
     if !temporary_store_identity_matches(temp, &expected_identity) {
@@ -2290,7 +2283,6 @@ fn cleanup_temporary_store_links_at(
     name: &OsStr,
     target_stat: &libc::stat,
 ) -> Result<(), CoreError> {
-    let mcp_suffix = mcp_temporary_store_file_suffix(name);
     let allow_ascii_case_match =
         !directory_contains_exact_store_entry_at(parent, name, target_stat)?;
     let dir_fd = open_directory_cursor_fd_at(parent)?;
@@ -2308,12 +2300,8 @@ fn cleanup_temporary_store_links_at(
             break;
         }
         let entry_name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
-        if !is_recoverable_temporary_store_link(
-            entry_name,
-            name.as_bytes(),
-            &mcp_suffix,
-            allow_ascii_case_match,
-        ) {
+        if !is_recoverable_temporary_store_link(entry_name, name.as_bytes(), allow_ascii_case_match)
+        {
             continue;
         }
         let mut entry_name_nul = entry_name.to_vec();
@@ -2351,12 +2339,10 @@ fn cleanup_temporary_store_links_at(
 fn is_recoverable_temporary_store_link(
     entry_name: &[u8],
     target_name: &[u8],
-    mcp_suffix: &[u8],
     allow_ascii_case_match: bool,
 ) -> bool {
     entry_name != target_name
-        && (is_core_temporary_store_link(entry_name, target_name, allow_ascii_case_match)
-            || is_mcp_temporary_store_link(entry_name, mcp_suffix))
+        && is_core_temporary_store_link(entry_name, target_name, allow_ascii_case_match)
 }
 
 #[cfg(unix)]
@@ -2384,17 +2370,6 @@ fn is_core_temporary_store_link(
         return false;
     };
     is_pid_counter_suffix(suffix)
-}
-
-#[cfg(unix)]
-fn is_mcp_temporary_store_link(entry_name: &[u8], mcp_suffix: &[u8]) -> bool {
-    let Some(rest) = entry_name.strip_prefix(b".wax-mcp-create-") else {
-        return false;
-    };
-    let Some(middle) = rest.strip_suffix(mcp_suffix) else {
-        return false;
-    };
-    is_pid_counter_suffix(middle)
 }
 
 #[cfg(unix)]
@@ -3760,71 +3735,6 @@ mod tests {
 
         assert_eq!(opened.manifest.generation, 0);
         assert!(!leftover_temp.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn open_store_recovers_leftover_mcp_create_temp_hard_link() {
-        let temp_dir = tempdir().expect("tempdir");
-        let path = temp_dir.path().join("agent.wax");
-        create_empty_store(&path).expect("store should be created");
-        let suffix = String::from_utf8(crate::mcp_temporary_store_file_suffix(OsStr::new(
-            "agent.wax",
-        )))
-        .unwrap();
-        let leftover_temp = temp_dir
-            .path()
-            .join(format!(".wax-mcp-create-123-0{suffix}"));
-        std::fs::hard_link(&path, &leftover_temp).expect("leftover mcp temp link");
-
-        let opened = open_store(&path).expect("store should reopen after mcp temp cleanup");
-
-        assert_eq!(opened.manifest.generation, 0);
-        assert!(!leftover_temp.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn open_store_rejects_unmatched_mcp_create_hard_link() {
-        let temp_dir = tempdir().expect("tempdir");
-        let path = temp_dir.path().join("agent.wax");
-        create_empty_store(&path).expect("store should be created");
-        let leftover_temp = temp_dir.path().join(".wax-mcp-create-123-0-wrong-hash.tmp");
-        std::fs::hard_link(&path, &leftover_temp).expect("unmatched mcp temp link");
-
-        let error = open_store(&path).expect_err("unmatched temp link should be rejected");
-
-        assert!(matches!(
-            error,
-            CoreError::InvalidManifest(message)
-                if message == "store files and lock files must not be hard-linked"
-        ));
-        assert!(leftover_temp.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn open_store_rejects_nongenerated_mcp_create_hard_link() {
-        let temp_dir = tempdir().expect("tempdir");
-        let path = temp_dir.path().join("agent.wax");
-        create_empty_store(&path).expect("store should be created");
-        let suffix = String::from_utf8(crate::mcp_temporary_store_file_suffix(OsStr::new(
-            "agent.wax",
-        )))
-        .unwrap();
-        let leftover_temp = temp_dir
-            .path()
-            .join(format!(".wax-mcp-create-manual{suffix}"));
-        std::fs::hard_link(&path, &leftover_temp).expect("unmatched mcp temp link");
-
-        let error = open_store(&path).expect_err("nongenerated temp link should be rejected");
-
-        assert!(matches!(
-            error,
-            CoreError::InvalidManifest(message)
-                if message == "store files and lock files must not be hard-linked"
-        ));
-        assert!(leftover_temp.exists());
     }
 
     #[cfg(unix)]
