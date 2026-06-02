@@ -9,11 +9,11 @@ fi
 DATASET_DIR=$1
 ARTIFACT_ROOT=$2
 SAMPLE_COUNT=${3:-10}
-BIN=target/release/wax-bench-cli
+BIN=target/release/rax-bench-cli
 
 mkdir -p "$ARTIFACT_ROOT"
 
-cargo build --release -p wax-bench-cli
+cargo build --release -p rax-bench-cli
 
 for WORKLOAD in container_open materialize_vector ttfq_text ttfq_vector warm_text warm_vector warm_hybrid warm_hybrid_with_previews; do
   RUN_DIR="$ARTIFACT_ROOT/$WORKLOAD"

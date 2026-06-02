@@ -3,15 +3,15 @@ use std::fs;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use tempfile::tempdir;
-use wax_bench_metrics::{MemoryReading, MemorySampler, MetricCollector, MonotonicClock};
-use wax_bench_model::{
+use rax_bench_metrics::{MemoryReading, MemorySampler, MetricCollector, MonotonicClock};
+use rax_bench_model::{
     EnginePhase, EngineStats, MaterializationMode, MountRequest, OpenRequest, OpenResult,
-    SearchRequest, SearchResult, WaxEngine,
+    RaxEngine, SearchRequest, SearchResult,
 };
-use wax_bench_packer::PackRequest;
-use wax_bench_runner::{BenchmarkRunner, LifecycleEvent, RunRequest, Workload};
-use wax_bench_text_engine::PackedTextEngine;
+use rax_bench_packer::PackRequest;
+use rax_bench_runner::{BenchmarkRunner, LifecycleEvent, RunRequest, Workload};
+use rax_bench_text_engine::PackedTextEngine;
+use tempfile::tempdir;
 
 #[test]
 fn runner_lifecycle_emits_phases_in_order() {
@@ -20,7 +20,7 @@ fn runner_lifecycle_emits_phases_in_order() {
 
     let trace = runner
         .run(&RunRequest {
-            dataset_path: PathBuf::from("/tmp/wax-pack"),
+            dataset_path: PathBuf::from("/tmp/rax-pack"),
             workload: Workload::TtfqText,
             materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
         })
@@ -43,7 +43,7 @@ fn container_open_excludes_lane_materialization() {
 
     let trace = runner
         .run(&RunRequest {
-            dataset_path: PathBuf::from("/tmp/wax-pack"),
+            dataset_path: PathBuf::from("/tmp/rax-pack"),
             workload: Workload::ContainerOpen,
             materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
         })
@@ -63,7 +63,7 @@ fn materialize_vector_workload_only_materializes_vector_lane() {
 
     let trace = runner
         .run(&RunRequest {
-            dataset_path: PathBuf::from("/tmp/wax-pack"),
+            dataset_path: PathBuf::from("/tmp/rax-pack"),
             workload: Workload::MaterializeVector,
             materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
         })
@@ -95,7 +95,7 @@ fn materialize_vector_workload_records_vector_materialization_latency() {
     let measured = runner
         .run_with_metrics(
             &RunRequest {
-                dataset_path: PathBuf::from("/tmp/wax-pack"),
+                dataset_path: PathBuf::from("/tmp/rax-pack"),
                 workload: Workload::MaterializeVector,
                 materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
             },
@@ -120,7 +120,7 @@ fn forced_vector_lane_materialization_does_not_claim_materialize_vector_slice() 
     let measured = runner
         .run_with_metrics(
             &RunRequest {
-                dataset_path: PathBuf::from("/tmp/wax-pack"),
+                dataset_path: PathBuf::from("/tmp/rax-pack"),
                 workload: Workload::TtfqText,
                 materialization_mode: MaterializationMode::ForceVectorLane,
             },
@@ -143,7 +143,7 @@ fn forced_lane_materialization_does_not_inflate_container_open_metric() {
     let measured = runner
         .run_with_metrics(
             &RunRequest {
-                dataset_path: PathBuf::from("/tmp/wax-pack"),
+                dataset_path: PathBuf::from("/tmp/rax-pack"),
                 workload: Workload::ContainerOpen,
                 materialization_mode: MaterializationMode::ForceVectorLane,
             },
@@ -164,7 +164,7 @@ fn audit_mode_can_force_lane_materialization_before_first_query() {
 
     let trace = runner
         .run(&RunRequest {
-            dataset_path: PathBuf::from("/tmp/wax-pack"),
+            dataset_path: PathBuf::from("/tmp/rax-pack"),
             workload: Workload::TtfqText,
             materialization_mode: MaterializationMode::ForceTextLane,
         })
@@ -195,7 +195,7 @@ fn force_all_lanes_materializes_text_and_vector_before_search() {
 
     let trace = runner
         .run(&RunRequest {
-            dataset_path: PathBuf::from("/tmp/wax-pack"),
+            dataset_path: PathBuf::from("/tmp/rax-pack"),
             workload: Workload::TtfqText,
             materialization_mode: MaterializationMode::ForceAllLanes,
         })
@@ -228,7 +228,7 @@ fn vector_workload_executes_vector_first_query() {
 
     let trace = runner
         .run(&RunRequest {
-            dataset_path: PathBuf::from("/tmp/wax-pack"),
+            dataset_path: PathBuf::from("/tmp/rax-pack"),
             workload: Workload::TtfqVector,
             materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
         })
@@ -248,12 +248,12 @@ fn vector_workload_executes_vector_first_query() {
 #[test]
 fn benchmark_samples_use_fresh_engine_instances() {
     let request = RunRequest {
-        dataset_path: PathBuf::from("/tmp/wax-pack"),
+        dataset_path: PathBuf::from("/tmp/rax-pack"),
         workload: Workload::TtfqVector,
         materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
     };
 
-    let samples = wax_bench_runner::run_benchmark_samples_with_runner_factory(
+    let samples = rax_bench_runner::run_benchmark_samples_with_runner_factory(
         || BenchmarkRunner::new(FreshOnlyEngine::default()),
         &request,
         2,
@@ -271,7 +271,7 @@ fn warm_text_workload_warms_then_measures_text_search() {
 
     let trace = runner
         .run(&RunRequest {
-            dataset_path: PathBuf::from("/tmp/wax-pack"),
+            dataset_path: PathBuf::from("/tmp/rax-pack"),
             workload: Workload::WarmText,
             materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
         })
@@ -290,7 +290,7 @@ fn warm_vector_workload_warms_then_measures_vector_search() {
 
     let trace = runner
         .run(&RunRequest {
-            dataset_path: PathBuf::from("/tmp/wax-pack"),
+            dataset_path: PathBuf::from("/tmp/rax-pack"),
             workload: Workload::WarmVector,
             materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
         })
@@ -309,7 +309,7 @@ fn warm_hybrid_workload_warms_then_measures_hybrid_search() {
 
     let trace = runner
         .run(&RunRequest {
-            dataset_path: PathBuf::from("/tmp/wax-pack"),
+            dataset_path: PathBuf::from("/tmp/rax-pack"),
             workload: Workload::WarmHybrid,
             materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
         })
@@ -328,7 +328,7 @@ fn warm_hybrid_with_previews_workload_warms_then_measures_previewed_hybrid_searc
 
     let trace = runner
         .run(&RunRequest {
-            dataset_path: PathBuf::from("/tmp/wax-pack"),
+            dataset_path: PathBuf::from("/tmp/rax-pack"),
             workload: Workload::WarmHybridWithPreviews,
             materialization_mode: MaterializationMode::NoForcedLaneMaterialization,
         })
@@ -346,7 +346,7 @@ fn warm_hybrid_with_previews_workload_warms_then_measures_previewed_hybrid_searc
 #[test]
 fn runner_fails_open_when_real_core_store_is_present_but_invalid() {
     let dataset_dir = tempdir().unwrap();
-    wax_bench_packer::pack_dataset(&PackRequest::new(
+    rax_bench_packer::pack_dataset(&PackRequest::new(
         "fixtures/bench/source/minimal",
         dataset_dir.path(),
         "small",
@@ -354,8 +354,8 @@ fn runner_fails_open_when_real_core_store_is_present_but_invalid() {
     ))
     .unwrap();
     fs::write(
-        dataset_dir.path().join("store.wax"),
-        b"not-a-real-wax-store",
+        dataset_dir.path().join("store.rax"),
+        b"not-a-real-rax-store",
     )
     .unwrap();
 
@@ -383,7 +383,7 @@ struct FreshOnlyEngine {
     was_used: bool,
 }
 
-impl WaxEngine for RecordingEngine {
+impl RaxEngine for RecordingEngine {
     type Error = &'static str;
 
     fn mount(&mut self, request: MountRequest) -> Result<(), Self::Error> {
@@ -410,7 +410,7 @@ impl WaxEngine for RecordingEngine {
     }
 }
 
-impl WaxEngine for FreshOnlyEngine {
+impl RaxEngine for FreshOnlyEngine {
     type Error = &'static str;
 
     fn mount(&mut self, _request: MountRequest) -> Result<(), Self::Error> {
@@ -500,7 +500,7 @@ impl TimedEngine {
     }
 }
 
-impl WaxEngine for TimedEngine {
+impl RaxEngine for TimedEngine {
     type Error = &'static str;
 
     fn mount(&mut self, _request: MountRequest) -> Result<(), Self::Error> {

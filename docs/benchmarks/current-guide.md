@@ -1,8 +1,8 @@
 # Current Benchmark Guide
 
-This guide describes the current `wax-bench-cli` benchmark harness. It is a
-runbook for producing local artifacts and reports, not a claim that a particular
-machine's numbers are canonical.
+This guide describes the current legacy-named `rax-bench-cli` benchmark harness.
+It is a runbook for producing local `rax` artifacts and reports, not a claim
+that a particular machine's numbers are canonical.
 
 For the latest small smoke report generated while refreshing these docs, see
 [results/2026-05-29-current.md](results/2026-05-29-current.md).
@@ -23,7 +23,7 @@ For the latest small smoke report generated while refreshing these docs, see
 | `mode-compare-report` | Compare `exact_flat` and `hnsw` artifact roots. |
 | `replay` | Print the `cargo run` command stored in `run-manifest.json`. |
 
-Use `cargo run -p wax-bench-cli -- <command> --help` for exact options.
+Use `cargo run -p rax-bench-cli -- <command> --help` for exact options.
 
 ## Dataset Inputs
 
@@ -32,7 +32,7 @@ Fixture source directories live under `fixtures/bench/source/`.
 Pack the minimal fixture:
 
 ```bash
-cargo run -p wax-bench-cli -- pack \
+cargo run -p rax-bench-cli -- pack \
   --source fixtures/bench/source/minimal \
   --out /tmp/rax-pack \
   --tier small \
@@ -42,7 +42,7 @@ cargo run -p wax-bench-cli -- pack \
 Pack ad hoc documents:
 
 ```bash
-cargo run -p wax-bench-cli -- pack-adhoc \
+cargo run -p rax-bench-cli -- pack-adhoc \
   --docs /tmp/docs.ndjson \
   --out /tmp/rax-adhoc-pack \
   --tier small
@@ -70,17 +70,17 @@ Current workload ids:
 Run one workload:
 
 ```bash
-cargo run -p wax-bench-cli -- run \
+cargo run -p rax-bench-cli -- run \
   --dataset /tmp/rax-pack \
   --workload ttfq_text \
   --sample-count 10 \
   --artifact-dir /tmp/rax-artifacts/ttfq_text
 ```
 
-If `--artifact-dir` is omitted, `WAX_BENCH_ARTIFACT_DIR` is used. If neither is
+If `--artifact-dir` is omitted, `RAX_BENCH_ARTIFACT_DIR` is used. If neither is
 set, artifacts go to `artifacts/latest`.
 
-Set `WAX_BENCH_TEST_MODE=1` for deterministic test measurement plumbing. Do not
+Set `RAX_BENCH_TEST_MODE=1` for deterministic test measurement plumbing. Do not
 use that mode for performance claims.
 
 ## Vector Modes
@@ -97,7 +97,7 @@ Current vector modes:
 Example:
 
 ```bash
-cargo run -p wax-bench-cli -- run \
+cargo run -p rax-bench-cli -- run \
   --dataset /tmp/rax-pack \
   --workload warm_vector \
   --vector-mode exact_flat \
@@ -167,7 +167,7 @@ reduced-summary.json
 `run-manifest.json` stores file digests and replay configuration. Use it with:
 
 ```bash
-cargo run -p wax-bench-cli -- replay --input /tmp/rax-artifacts/ttfq_text
+cargo run -p rax-bench-cli -- replay --input /tmp/rax-artifacts/ttfq_text
 ```
 
 ## Metrics
@@ -189,7 +189,7 @@ unavailable when the sample count is too small.
 Run ranked results:
 
 ```bash
-cargo run -p wax-bench-cli -- query-batch \
+cargo run -p rax-bench-cli -- query-batch \
   --dataset /tmp/rax-pack \
   --query-set /tmp/rax-pack/queries/core.jsonl \
   --output /tmp/rax-results.json
@@ -198,7 +198,7 @@ cargo run -p wax-bench-cli -- query-batch \
 Compare against qrels:
 
 ```bash
-cargo run -p wax-bench-cli -- quality-report \
+cargo run -p rax-bench-cli -- quality-report \
   --query-set /tmp/rax-pack/queries/core.jsonl \
   --qrels /tmp/rax-pack/queries/core-qrels.jsonl \
   --results /tmp/rax-results.json \
@@ -213,7 +213,7 @@ qrels file provides enough judgment data.
 `reduce` accepts an optional baseline run directory:
 
 ```bash
-cargo run -p wax-bench-cli -- reduce \
+cargo run -p rax-bench-cli -- reduce \
   --input /tmp/rax-candidate/ttfq_vector \
   --baseline /tmp/rax-baseline/ttfq_vector
 ```

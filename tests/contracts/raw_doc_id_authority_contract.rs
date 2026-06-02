@@ -1,13 +1,13 @@
 use std::fs;
 
+use rax_bench_packer::{pack_adhoc_dataset, AdhocPackRequest};
+use rax_core::{open_store, read_segment_object, SegmentKind};
+use rax_docstore::{BinaryDocSegment, Docstore};
+use rax_runtime::RuntimeStore;
 use tempfile::tempdir;
-use wax_bench_packer::{pack_adhoc_dataset, AdhocPackRequest};
-use wax_v2_core::{open_store, read_segment_object, SegmentKind};
-use wax_v2_docstore::{BinaryDocSegment, Docstore};
-use wax_v2_runtime::RuntimeStore;
 
 #[test]
-fn compatibility_reimport_preserves_existing_wax_doc_ids_when_document_order_changes() {
+fn compatibility_reimport_preserves_existing_rax_doc_ids_when_document_order_changes() {
     let source_dir = tempdir().unwrap();
     let dataset_dir = tempdir().unwrap();
     let docs_path = source_dir.path().join("docs.ndjson");
@@ -61,11 +61,11 @@ fn compatibility_reimport_preserves_existing_wax_doc_ids_when_document_order_cha
 
     let reopened_docstore = Docstore::open(dataset_dir.path(), &manifest).unwrap();
     let doc_id_map = reopened_docstore.build_doc_id_map().unwrap();
-    assert_eq!(doc_id_map.wax_doc_id("doc-a"), Some(0));
-    assert_eq!(doc_id_map.wax_doc_id("doc-b"), Some(1));
-    assert_eq!(doc_id_map.wax_doc_id("doc-c"), Some(2));
+    assert_eq!(doc_id_map.rax_doc_id("doc-a"), Some(0));
+    assert_eq!(doc_id_map.rax_doc_id("doc-b"), Some(1));
+    assert_eq!(doc_id_map.rax_doc_id("doc-c"), Some(2));
 
-    let store_path = dataset_dir.path().join("store.wax");
+    let store_path = dataset_dir.path().join("store.rax");
     let opened = open_store(&store_path).unwrap();
     let latest_doc_descriptor = opened
         .manifest

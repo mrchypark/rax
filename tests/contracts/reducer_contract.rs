@@ -1,11 +1,11 @@
-use tempfile::tempdir;
-use wax_bench_artifacts::{
+use rax_bench_artifacts::{
     read_run_summary, write_run_bundle, MetricValue, RunSummaryArtifact, SampleArtifact,
     SampleMetricSlices,
 };
-use wax_bench_metrics::{CompilerOptimization, MemoryReading, SampleMetrics, ThermalState};
-use wax_bench_model::BenchmarkId;
-use wax_bench_reducer::{detect_fairness_mismatch, reduce_run_dir};
+use rax_bench_metrics::{CompilerOptimization, MemoryReading, SampleMetrics, ThermalState};
+use rax_bench_model::BenchmarkId;
+use rax_bench_reducer::{detect_fairness_mismatch, reduce_run_dir};
+use tempfile::tempdir;
 
 #[test]
 fn reducer_computes_percentiles_from_sample_bundle() {
@@ -14,7 +14,7 @@ fn reducer_computes_percentiles_from_sample_bundle() {
         run_dir.path(),
         "run-001",
         &BenchmarkId {
-            dataset_id: "knowledge-small-clean-v1".to_owned(),
+            dataset_id: "knowledge-small-clean".to_owned(),
             workload_id: "ttfq_text".to_owned(),
             sample_index: 0,
         },
@@ -110,7 +110,7 @@ fn reducer_preserves_unavailable_percentiles_for_empty_measurements() {
     let run_dir = tempdir().unwrap();
     let sample = SampleArtifact {
         benchmark_id: BenchmarkId {
-            dataset_id: "knowledge-small-clean-v1".to_owned(),
+            dataset_id: "knowledge-small-clean".to_owned(),
             workload_id: "ttfq_text".to_owned(),
             sample_index: 0,
         },
@@ -166,7 +166,7 @@ fn reducer_rejects_inconsistent_sample_bundle() {
         run_dir.path(),
         "run-001",
         &BenchmarkId {
-            dataset_id: "knowledge-small-clean-v1".to_owned(),
+            dataset_id: "knowledge-small-clean".to_owned(),
             workload_id: "ttfq_text".to_owned(),
             sample_index: 0,
         },

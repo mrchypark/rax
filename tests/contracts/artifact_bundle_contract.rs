@@ -1,15 +1,15 @@
 use std::fs;
 
-use wax_bench_artifacts::{
+use rax_bench_artifacts::{
     render_markdown_summary, MetricValue, RunSummaryArtifact, SampleArtifact, SampleMetricSlices,
 };
-use wax_bench_model::BenchmarkId;
+use rax_bench_model::BenchmarkId;
 
 #[test]
 fn sample_artifact_serializes_identity_and_explicit_missing_metrics() {
     let artifact = SampleArtifact {
         benchmark_id: BenchmarkId {
-            dataset_id: "knowledge-small-clean-v1".to_owned(),
+            dataset_id: "knowledge-small-clean".to_owned(),
             workload_id: "container_open".to_owned(),
             sample_index: 0,
         },
@@ -24,10 +24,7 @@ fn sample_artifact_serializes_identity_and_explicit_missing_metrics() {
     };
 
     let value = serde_json::to_value(&artifact).unwrap();
-    assert_eq!(
-        value["benchmark_id"]["dataset_id"],
-        "knowledge-small-clean-v1"
-    );
+    assert_eq!(value["benchmark_id"]["dataset_id"], "knowledge-small-clean");
     assert_eq!(value["metrics"]["container_open_ms"]["status"], "available");
     assert_eq!(value["metrics"]["total_ttfq_ms"]["status"], "unavailable");
     assert_eq!(value["metrics"]["search_latency_ms"]["value"], 0.9);
@@ -42,7 +39,7 @@ fn run_summary_matches_expected_fixture() {
     let summary = RunSummaryArtifact {
         run_id: "run-001".to_owned(),
         benchmark: BenchmarkId {
-            dataset_id: "knowledge-small-clean-v1".to_owned(),
+            dataset_id: "knowledge-small-clean".to_owned(),
             workload_id: "container_open".to_owned(),
             sample_index: 0,
         },

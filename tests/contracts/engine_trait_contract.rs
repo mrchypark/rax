@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use wax_bench_model::{
-    EnginePhase, EngineStats, MountRequest, OpenRequest, OpenResult, SearchRequest, SearchResult,
-    WaxEngine,
+use rax_bench_model::{
+    EnginePhase, EngineStats, MountRequest, OpenRequest, OpenResult, RaxEngine, SearchRequest,
+    SearchResult,
 };
 
 #[derive(Debug, Default)]
@@ -14,7 +14,7 @@ struct DummyEngine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DummyError;
 
-impl WaxEngine for DummyEngine {
+impl RaxEngine for DummyEngine {
     type Error = DummyError;
 
     fn mount(&mut self, request: MountRequest) -> Result<(), Self::Error> {
@@ -67,7 +67,7 @@ fn engine_trait_supports_runner_lifecycle_surface() {
 
     engine
         .mount(MountRequest {
-            store_path: PathBuf::from("/tmp/store.wax"),
+            store_path: PathBuf::from("/tmp/store.rax"),
         })
         .unwrap();
     let mounted_stats = engine.get_stats();
@@ -75,12 +75,12 @@ fn engine_trait_supports_runner_lifecycle_surface() {
     assert_eq!(mounted_stats.phase, EnginePhase::Mounted);
     assert_eq!(
         mounted_stats.last_mounted_path.as_deref(),
-        Some(std::path::Path::new("/tmp/store.wax"))
+        Some(std::path::Path::new("/tmp/store.rax"))
     );
 
     assert!(engine
         .mount(MountRequest {
-            store_path: PathBuf::from("/tmp/store.wax"),
+            store_path: PathBuf::from("/tmp/store.rax"),
         })
         .is_err());
     let mounted_stats_after_failed_mount = engine.get_stats();
@@ -109,12 +109,12 @@ fn engine_trait_supports_runner_lifecycle_surface() {
     assert_eq!(stats_after_failed_reopen.phase, EnginePhase::Open);
     assert_eq!(
         stats_after_failed_reopen.last_mounted_path.as_deref(),
-        Some(std::path::Path::new("/tmp/store.wax"))
+        Some(std::path::Path::new("/tmp/store.rax"))
     );
     assert_eq!(search.hits, vec!["cold open".to_owned()]);
     assert_eq!(stats.phase, EnginePhase::Open);
     assert_eq!(
         stats.last_mounted_path.as_deref(),
-        Some(std::path::Path::new("/tmp/store.wax"))
+        Some(std::path::Path::new("/tmp/store.rax"))
     );
 }

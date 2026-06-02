@@ -1,0 +1,15 @@
+[package]
+name = "rax-cli"
+version = "0.4.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "rax"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5.50", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+rax-runtime = { path = "../rax-runtime" }

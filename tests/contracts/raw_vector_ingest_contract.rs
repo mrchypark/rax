@@ -1,12 +1,12 @@
 use std::fs;
 
-use serde_json::json;
-use tempfile::tempdir;
-use wax_bench_model::embed_text;
-use wax_bench_packer::{pack_adhoc_dataset, AdhocPackRequest};
-use wax_v2_runtime::{
+use rax_bench_model::embed_text;
+use rax_bench_packer::{pack_adhoc_dataset, AdhocPackRequest};
+use rax_runtime::{
     NewDocument, RuntimePublishFamily, RuntimeSearchMode, RuntimeSearchRequest, RuntimeStore,
 };
+use serde_json::json;
+use tempfile::tempdir;
 
 #[test]
 fn runtime_store_preserves_text_and_serves_vector_search_when_raw_vectors_are_published_after_raw_documents(
@@ -43,11 +43,8 @@ fn runtime_store_preserves_text_and_serves_vector_search_when_raw_vectors_are_pu
         .writer()
         .unwrap()
         .publish_raw_vectors(vec![
-            wax_v2_runtime::NewDocumentVector::new(
-                "doc-001",
-                embed_text("rust benchmark guide", 384),
-            ),
-            wax_v2_runtime::NewDocumentVector::new(
+            rax_runtime::NewDocumentVector::new("doc-001", embed_text("rust benchmark guide", 384)),
+            rax_runtime::NewDocumentVector::new(
                 "doc-002",
                 embed_text("semantic latency checklist", 384),
             ),

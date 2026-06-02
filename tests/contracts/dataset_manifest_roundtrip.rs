@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use wax_bench_model::DatasetPackManifest;
-use wax_bench_packer::validate_manifest;
+use rax_bench_model::DatasetPackManifest;
+use rax_bench_packer::validate_manifest;
 
 #[test]
 fn dataset_manifest_round_trips_and_validates() {
@@ -15,7 +15,7 @@ fn dataset_manifest_round_trips_and_validates() {
 
     assert_eq!(rewritten, rewritten_again);
 
-    assert_eq!(reparsed.identity.dataset_id, "knowledge-small-clean-v1");
+    assert_eq!(reparsed.identity.dataset_id, "knowledge-small-clean");
     assert_eq!(reparsed.query_sets[0].query_count, 3);
     assert_eq!(
         reparsed.vector_profile.ann_index_backend.as_deref(),
@@ -33,20 +33,20 @@ fn dataset_manifest_round_trips_and_validates() {
 #[test]
 fn dataset_manifest_validation_rejects_duplicate_query_id() {
     let (mut manifest, _, manifest_root) = load_manifest();
-    manifest.query_sets.push(wax_bench_model::QuerySetEntry {
-        query_set_id: "knowledge-small-duplicate-v1".to_owned(),
+    manifest.query_sets.push(rax_bench_model::QuerySetEntry {
+        query_set_id: "knowledge-small-duplicate-current".to_owned(),
         path: "queries/duplicate.jsonl".to_owned(),
         ground_truth_path: "queries/duplicate-query-ground-truth.jsonl".to_owned(),
         qrels_path: None,
         query_count: 3,
         classes: vec!["keyword".to_owned()],
-        difficulty_distribution: wax_bench_model::DifficultyDistribution {
+        difficulty_distribution: rax_bench_model::DifficultyDistribution {
             easy: 3,
             medium: 0,
             hard: 0,
         },
     });
-    manifest.files.push(wax_bench_model::ManifestFile {
+    manifest.files.push(rax_bench_model::ManifestFile {
         path: "queries/duplicate-query-ground-truth.jsonl".to_owned(),
         kind: "ground_truth".to_owned(),
         format: "jsonl".to_owned(),
@@ -253,7 +253,7 @@ fn dataset_manifest_validation_rejects_disabled_vectors_with_nonzero_dimensions(
 #[test]
 fn dataset_manifest_validation_rejects_hnsw_sidecars_without_explicit_reproducibility_policy() {
     let (mut manifest, _, manifest_root) = load_manifest();
-    manifest.files.push(wax_bench_model::ManifestFile {
+    manifest.files.push(rax_bench_model::ManifestFile {
         path: "vector_hnsw.hnsw.graph".to_owned(),
         kind: "vector_hnsw_graph".to_owned(),
         format: "hnsw-rs-graph".to_owned(),
@@ -272,7 +272,7 @@ fn dataset_manifest_validation_rejects_hnsw_sidecars_without_explicit_reproducib
 #[test]
 fn dataset_manifest_validation_rejects_hnsw_sidecars_without_backend_label() {
     let (mut manifest, _, manifest_root) = load_manifest();
-    manifest.files.push(wax_bench_model::ManifestFile {
+    manifest.files.push(rax_bench_model::ManifestFile {
         path: "vector_hnsw.hnsw.graph".to_owned(),
         kind: "vector_hnsw_graph".to_owned(),
         format: "hnsw-rs-graph".to_owned(),
@@ -353,7 +353,7 @@ fn dataset_manifest_validation_rejects_invalid_compaction_state() {
     let (mut manifest, _, manifest_root) = load_manifest();
     manifest.dirty_profile.profile = "dirty_light".to_owned();
     manifest.identity.variant_id = "dirty_light".to_owned();
-    manifest.dirty_profile.base_dataset_id = Some("knowledge-small-clean-v1".to_owned());
+    manifest.dirty_profile.base_dataset_id = Some("knowledge-small-clean".to_owned());
     manifest.dirty_profile.delete_ratio = 0.1;
     manifest.dirty_profile.compaction_state = "unknown".to_owned();
     assert_eq!(
@@ -367,7 +367,7 @@ fn dataset_manifest_validation_rejects_invalid_compaction_state() {
 #[test]
 fn dataset_manifest_validation_rejects_missing_vector_payload_checksum() {
     let (mut manifest, _, manifest_root) = load_manifest();
-    manifest.files.push(wax_bench_model::ManifestFile {
+    manifest.files.push(rax_bench_model::ManifestFile {
         path: "vectors/doc-vectors.bin".to_owned(),
         kind: "document_vectors".to_owned(),
         format: "bin".to_owned(),

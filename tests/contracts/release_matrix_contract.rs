@@ -1,8 +1,8 @@
+use rax_bench_artifacts::write_run_bundle;
+use rax_bench_metrics::{CompilerOptimization, MemoryReading, SampleMetrics, ThermalState};
+use rax_bench_model::BenchmarkId;
+use rax_bench_reducer::{render_vector_lane_matrix_report, render_vector_mode_compare_report};
 use tempfile::tempdir;
-use wax_bench_artifacts::write_run_bundle;
-use wax_bench_metrics::{CompilerOptimization, MemoryReading, SampleMetrics, ThermalState};
-use wax_bench_model::BenchmarkId;
-use wax_bench_reducer::{render_vector_lane_matrix_report, render_vector_mode_compare_report};
 
 #[test]
 fn reducer_renders_vector_lane_matrix_for_release_artifacts() {
@@ -80,7 +80,7 @@ fn write_run(root: &std::path::Path, workload_id: &str, sample: SampleMetrics) {
         &run_dir,
         "run-001",
         &BenchmarkId {
-            dataset_id: "knowledge-large-clean-v1".to_owned(),
+            dataset_id: "knowledge-large-clean-current".to_owned(),
             workload_id: workload_id.to_owned(),
             sample_index: 0,
         },

@@ -1,9 +1,9 @@
 use std::fs;
 
-use tempfile::tempdir;
-use wax_v2_multimodal::{
+use rax_multimodal::{
     MultimodalAssetKind, MultimodalAssetQuery, MultimodalIngestSession, NewMultimodalAssetImport,
 };
+use tempfile::tempdir;
 
 #[test]
 fn multimodal_ingest_session_imports_image_asset_with_stable_descriptor() {

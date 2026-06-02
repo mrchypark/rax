@@ -1,0 +1,10 @@
+[package]
+name = "rax-search"
+version = "0.4.0"
+edition = "2021"
+
+[dependencies]
+serde_json = "1.0.145"
+rax-bench-model = { path = "../rax-bench-model" }
+rax-text = { path = "../rax-text" }
+rax-vector = { path = "../rax-vector" }

@@ -8,7 +8,8 @@ for execution history, but this page is the shorter reference for what exists no
 
 ## Product CLI
 
-The `wax-cli` package ships the `wax` product binary. Its current commands are:
+The `rax-cli` package ships the current `rax` product binary. Its current
+commands are:
 
 - `create`
 - `remember`
@@ -19,13 +20,13 @@ The `wax-cli` package ships the `wax` product binary. Its current commands are:
 
 There is no current `import-compat` product CLI command.
 
-`remember` and `recall` are the Wax-style memory facade. `ingest docs`,
+`remember` and `recall` are the `rax` memory facade. `ingest docs`,
 `ingest vectors`, and `search` are the raw projection-store path for callers that
 own document ids and, for vector search, caller-provided embeddings.
 
 ## Runtime
 
-The product raw-ingest types exposed by `wax-v2-runtime` are:
+The product raw-ingest types exposed by `rax-runtime` are:
 
 - `NewDocument`
 - `NewDocumentVector`
@@ -40,7 +41,7 @@ The runtime does not generate hidden embeddings.
 
 ## Broker
 
-`wax-v2-broker` owns in-process sessions over `RuntimeStore`. It currently exposes
+`rax-broker` owns in-process sessions over `RuntimeStore`. It currently exposes
 session search plus raw ingest operations:
 
 - `search`
@@ -54,11 +55,12 @@ Raw broker documents map to `NewDocument`; raw broker vectors map to
 
 There is no MCP crate, stdio server, JSON-RPC tool surface, or trusted
 in-process MCP adapter in the current build. Product access is through the
-`wax` CLI, `wax-v2-runtime`, and the in-process `wax-v2-broker` session surface.
+`rax` CLI, `rax-runtime`, and the in-process `rax-broker`
+session surface.
 
 ## Benchmark CLI
 
-The `wax-bench-cli` commands are:
+The `rax-bench-cli` commands are:
 
 - `pack`
 - `pack-adhoc`
@@ -81,15 +83,15 @@ Benchmark vector modes are:
 
 The benchmark runner also recognizes these environment variables:
 
-- `WAX_BENCH_TEST_MODE=1` selects deterministic test measurement plumbing.
-- `WAX_BENCH_ARTIFACT_DIR` supplies the default artifact directory when
+- `RAX_BENCH_TEST_MODE=1` selects deterministic test measurement plumbing.
+- `RAX_BENCH_ARTIFACT_DIR` supplies the default artifact directory when
   `run --artifact-dir` is omitted.
 
 ## Bootstrap And Parity Scope
 
 Structured memory currently has a bootstrap `structured-memory.ndjson` persistence
-layer with record, entity, and fact APIs. It is not final Wax binary structured
-memory parity.
+layer with record, entity, and fact APIs. It is not a final binary structured
+memory format.
 
 Multimodal support currently has asset import, copied store-owned payloads,
 `multimodal-assets.ndjson`, image-only typed read/query scaffolds, and video-only

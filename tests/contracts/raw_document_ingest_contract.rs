@@ -1,9 +1,9 @@
 use std::fs;
 
+use rax_bench_packer::{pack_adhoc_dataset, AdhocPackRequest};
+use rax_runtime::{NewDocument, RuntimeSearchMode, RuntimeSearchRequest, RuntimeStore};
 use serde_json::json;
 use tempfile::tempdir;
-use wax_bench_packer::{pack_adhoc_dataset, AdhocPackRequest};
-use wax_v2_runtime::{NewDocument, RuntimeSearchMode, RuntimeSearchRequest, RuntimeStore};
 
 #[test]
 fn raw_document_publish_supports_reopen_search_without_dataset_sidecars() {
@@ -40,8 +40,8 @@ fn raw_document_publish_supports_reopen_search_without_dataset_sidecars() {
     assert_eq!(
         report.published_families,
         vec![
-            wax_v2_runtime::RuntimePublishFamily::Doc,
-            wax_v2_runtime::RuntimePublishFamily::Text,
+            rax_runtime::RuntimePublishFamily::Doc,
+            rax_runtime::RuntimePublishFamily::Text,
         ]
     );
     runtime.close().unwrap();

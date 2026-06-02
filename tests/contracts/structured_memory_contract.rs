@@ -1,6 +1,6 @@
 use tempfile::tempdir;
 
-use wax_v2_structured_memory::{
+use rax_structured_memory::{
     NewStructuredEntity, NewStructuredFact, NewStructuredMemoryRecord, StructuredEntityQuery,
     StructuredFactQuery, StructuredMemoryQuery, StructuredMemorySession,
 };

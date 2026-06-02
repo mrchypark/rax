@@ -1,13 +1,13 @@
 {
-  "schema_version": "wax_dataset_pack_v1",
+  "schema_version": "rax_dataset_pack",
   "generated_at": "2026-03-30T00:00:00Z",
   "generator": {
-    "name": "wax-bench-packer",
+    "name": "rax-bench-packer",
     "version": "0.1.0"
   },
   "identity": {
-    "dataset_id": "knowledge-small-clean-v1",
-    "dataset_version": "v1",
+    "dataset_id": "knowledge-small-clean",
+    "dataset_version": "current",
     "dataset_family": "knowledge",
     "dataset_tier": "small",
     "variant_id": "clean",
@@ -125,7 +125,7 @@
   ],
   "query_sets": [
     {
-      "query_set_id": "knowledge-small-core-v1",
+      "query_set_id": "knowledge-small-core",
       "path": "queries/core.jsonl",
       "ground_truth_path": "queries/core-ground-truth.jsonl",
       "query_count": 3,

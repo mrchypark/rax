@@ -1,8 +1,8 @@
-use serde_json::{from_str, to_string};
-use strum::IntoEnumIterator;
-use wax_bench_model::{
+use rax_bench_model::{
     CacheState, ColdState, MaterializationMode, PreviewMode, QueryEmbeddingMode,
 };
+use serde_json::{from_str, to_string};
+use strum::IntoEnumIterator;
 
 #[test]
 fn benchmark_identity_enums_round_trip_with_stable_labels() {

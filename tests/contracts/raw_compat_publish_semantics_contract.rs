@@ -1,11 +1,11 @@
 use std::fs;
 
+use rax_bench_model::embed_text;
+use rax_bench_packer::{pack_adhoc_dataset, AdhocPackRequest};
+use rax_core::{open_store, SegmentKind};
+use rax_runtime::{NewDocument, NewDocumentVector, RuntimeStore};
 use serde_json::json;
 use tempfile::tempdir;
-use wax_bench_model::embed_text;
-use wax_bench_packer::{pack_adhoc_dataset, AdhocPackRequest};
-use wax_v2_core::{open_store, SegmentKind};
-use wax_v2_runtime::{NewDocument, NewDocumentVector, RuntimeStore};
 
 #[test]
 fn raw_full_snapshot_publish_matches_compatibility_import_semantics_for_equivalent_inputs() {
@@ -87,8 +87,8 @@ fn raw_full_snapshot_publish_matches_compatibility_import_semantics_for_equivale
 
     assert_eq!(compat_report, raw_report);
 
-    let compat_store = open_store(&compat_root.path().join("store.wax")).unwrap();
-    let raw_store = open_store(&raw_root.path().join("store.wax")).unwrap();
+    let compat_store = open_store(&compat_root.path().join("store.rax")).unwrap();
+    let raw_store = open_store(&raw_root.path().join("store.rax")).unwrap();
 
     assert_eq!(compat_store.manifest.generation, 1);
     assert_eq!(raw_store.manifest.generation, 1);
@@ -99,7 +99,7 @@ fn raw_full_snapshot_publish_matches_compatibility_import_semantics_for_equivale
 }
 
 fn semantic_segment_summary(
-    segments: &[wax_v2_core::SegmentDescriptor],
+    segments: &[rax_core::SegmentDescriptor],
 ) -> Vec<(SegmentKind, u64, u64, u64, u64, u64)> {
     let mut summary = segments
         .iter()
