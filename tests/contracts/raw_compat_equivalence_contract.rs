@@ -1,13 +1,13 @@
 use std::fs;
 
-use serde_json::json;
-use tempfile::tempdir;
-use wax_bench_model::embed_text;
-use wax_bench_packer::{pack_adhoc_dataset, AdhocPackRequest};
-use wax_v2_docstore::Docstore;
-use wax_v2_runtime::{
+use rax_bench_model::embed_text;
+use rax_bench_packer::{pack_adhoc_dataset, AdhocPackRequest};
+use rax_docstore::Docstore;
+use rax_runtime::{
     NewDocument, NewDocumentVector, RuntimeSearchMode, RuntimeSearchRequest, RuntimeStore,
 };
+use serde_json::json;
+use tempfile::tempdir;
 
 #[test]
 fn raw_and_compatibility_ingest_produce_equivalent_runtime_results_for_the_same_corpus() {
@@ -147,7 +147,7 @@ fn raw_and_compatibility_ingest_produce_equivalent_runtime_results_for_the_same_
     );
 }
 
-fn remove_sidecars(root: &std::path::Path, manifest: &wax_bench_model::DatasetPackManifest) {
+fn remove_sidecars(root: &std::path::Path, manifest: &rax_bench_model::DatasetPackManifest) {
     for kind in [
         "documents",
         "document_offsets",

@@ -1,7 +1,7 @@
 {
   "run_id": "run-001",
   "benchmark": {
-    "dataset_id": "knowledge-small-clean-v1",
+    "dataset_id": "knowledge-small-clean",
     "workload_id": "container_open",
     "sample_index": 0
   },

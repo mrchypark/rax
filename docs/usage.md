@@ -7,13 +7,13 @@ history, but this file is the practical usage entry point.
 ## Overview
 
 `rax` is a Rust workspace inspired by upstream Wax. The current product model is
-still local-first: one `.wax` store file, no server required for CLI use, and
+local-first: one `.rax` store file, no server required for CLI use, and
 local text/vector/hybrid retrieval.
 
 There are two command-line surfaces:
 
-- `wax`, from the `wax-cli` package, is the product CLI.
-- `wax-bench-cli` is the benchmark harness.
+- `rax`, from the `rax-cli` package, is the current `rax` product CLI.
+- `rax-bench-cli` is the current `rax` benchmark harness.
 
 For a code-derived inventory of crates and current scope, see
 [current-implementation.md](current-implementation.md).
@@ -36,7 +36,7 @@ TMPDIR=$PWD/.tmp cargo test --workspace --all-targets
 
 ## Product CLI Commands
 
-The current `wax` commands are:
+The current `rax` commands are:
 
 ```text
 create
@@ -51,14 +51,14 @@ There is no current `import-compat` product CLI command.
 
 ## Memory CLI Quick Start
 
-Use `remember` and `recall` when you want Wax-style memory with generated
+Use `remember` and `recall` when you want `rax` memory with generated
 `mem-*` document ids.
 
 ```bash
 install -d -m 700 ~/.local/share/rax
 
-cargo run -p wax-cli -- remember \
-  --store ~/.local/share/rax/agent.wax \
+cargo run -p rax-cli -- remember \
+  --store ~/.local/share/rax/agent.rax \
   "The user is building a habit tracker in Rust."
 ```
 
@@ -73,8 +73,8 @@ The command prints JSON:
 Recall from the same store:
 
 ```bash
-cargo run -p wax-cli -- recall \
-  --store ~/.local/share/rax/agent.wax \
+cargo run -p rax-cli -- recall \
+  --store ~/.local/share/rax/agent.rax \
   "What is the user building?" \
   --top-k 5
 ```
@@ -108,8 +108,8 @@ Optional fields:
 Ingest documents:
 
 ```bash
-cargo run -p wax-cli -- ingest docs \
-  --store ~/.local/share/rax/projection.wax \
+cargo run -p rax-cli -- ingest docs \
+  --store ~/.local/share/rax/projection.rax \
   --input /tmp/docs.jsonl
 ```
 
@@ -125,8 +125,8 @@ The command prints a publish report:
 Search text:
 
 ```bash
-cargo run -p wax-cli -- search \
-  --store ~/.local/share/rax/projection.wax \
+cargo run -p rax-cli -- search \
+  --store ~/.local/share/rax/projection.rax \
   --mode text \
   --text "launch checklist" \
   --top-k 5 \
@@ -157,8 +157,8 @@ row has a `doc_id` and a finite 384-float `values` array:
 ```
 
 ```bash
-cargo run -p wax-cli -- ingest vectors \
-  --store ~/.local/share/rax/projection.wax \
+cargo run -p rax-cli -- ingest vectors \
+  --store ~/.local/share/rax/projection.rax \
   --input /tmp/vectors.jsonl
 ```
 
@@ -170,8 +170,8 @@ documents; sparse partial vector updates are not a product guarantee.
 Text search requires `--text`:
 
 ```bash
-cargo run -p wax-cli -- search \
-  --store ~/.local/share/rax/projection.wax \
+cargo run -p rax-cli -- search \
+  --store ~/.local/share/rax/projection.rax \
   --mode text \
   --text "launch checklist"
 ```
@@ -179,8 +179,8 @@ cargo run -p wax-cli -- search \
 Vector search requires `--vector-input`:
 
 ```bash
-cargo run -p wax-cli -- search \
-  --store ~/.local/share/rax/projection.wax \
+cargo run -p rax-cli -- search \
+  --store ~/.local/share/rax/projection.rax \
   --mode vector \
   --vector-input /tmp/query-vector.json \
   --top-k 5 \
@@ -197,8 +197,8 @@ The query vector file can be either a JSON array or an object with a single
 Hybrid search requires both text and a query vector:
 
 ```bash
-cargo run -p wax-cli -- search \
-  --store ~/.local/share/rax/projection.wax \
+cargo run -p rax-cli -- search \
+  --store ~/.local/share/rax/projection.rax \
   --mode hybrid \
   --text "launch checklist" \
   --vector-input /tmp/query-vector.json \
@@ -215,7 +215,7 @@ includes previews by default; pass `--no-preview` to disable them.
 - No MCP crate, stdio server, JSON-RPC tool surface, or MCP-focused contract
   tests are part of the current build.
 - Structured memory currently uses bootstrap `structured-memory.ndjson`
-  persistence, not final Wax binary structured-memory parity.
+  persistence, not a final binary structured-memory format.
 - Multimodal support currently owns asset import and typed image/video read
   scaffolds, not OCR, captions, transcripts, embeddings, or retrieval parity.
 - Apple acceleration is an explicit capability/preference surface; execution

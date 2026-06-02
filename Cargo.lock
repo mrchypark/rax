@@ -409,6 +409,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs4"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e72ed92b67c146290f88e9c89d60ca163ea417a446f61ffd7b72df3e7f1dfd5"
+dependencies = [
+ "rustix",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -826,28 +836,233 @@ dependencies = [
 
 [[package]]
 name = "rax"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
+ "fs4",
+ "rax-bench-artifacts",
+ "rax-bench-metrics",
+ "rax-bench-model",
+ "rax-bench-packer",
+ "rax-bench-reducer",
+ "rax-bench-runner",
+ "rax-bench-text-engine",
+ "rax-broker",
+ "rax-core",
+ "rax-docstore",
+ "rax-multimodal",
+ "rax-runtime",
+ "rax-structured-memory",
+ "rax-text",
+ "rax-vector",
  "serde",
  "serde_json",
  "sha2",
  "strum",
  "tempfile",
- "wax-bench-artifacts",
- "wax-bench-metrics",
- "wax-bench-model",
- "wax-bench-packer",
- "wax-bench-reducer",
- "wax-bench-runner",
- "wax-bench-text-engine",
- "wax-v2-broker",
- "wax-v2-core",
- "wax-v2-docstore",
- "wax-v2-multimodal",
- "wax-v2-runtime",
- "wax-v2-structured-memory",
- "wax-v2-text",
- "wax-v2-vector",
+]
+
+[[package]]
+name = "rax-bench-artifacts"
+version = "0.4.0"
+dependencies = [
+ "rax-bench-metrics",
+ "rax-bench-model",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "rax-bench-cli"
+version = "0.4.0"
+dependencies = [
+ "clap",
+ "rax-bench-artifacts",
+ "rax-bench-metrics",
+ "rax-bench-model",
+ "rax-bench-packer",
+ "rax-bench-reducer",
+ "rax-bench-runner",
+ "rax-bench-text-engine",
+ "serde_json",
+]
+
+[[package]]
+name = "rax-bench-metrics"
+version = "0.4.0"
+
+[[package]]
+name = "rax-bench-model"
+version = "0.4.0"
+dependencies = [
+ "serde",
+ "strum",
+]
+
+[[package]]
+name = "rax-bench-packer"
+version = "0.4.0"
+dependencies = [
+ "bytemuck",
+ "hnsw_rs",
+ "rax-bench-model",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "rax-bench-reducer"
+version = "0.4.0"
+dependencies = [
+ "rax-bench-artifacts",
+ "rax-bench-model",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rax-bench-runner"
+version = "0.4.0"
+dependencies = [
+ "rax-bench-metrics",
+ "rax-bench-model",
+]
+
+[[package]]
+name = "rax-bench-text-engine"
+version = "0.4.0"
+dependencies = [
+ "bytemuck",
+ "rax-bench-model",
+ "rax-core",
+ "rax-docstore",
+ "rax-search",
+ "rax-text",
+ "rax-vector",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "rax-broker"
+version = "0.4.0"
+dependencies = [
+ "rax-runtime",
+ "serde_json",
+]
+
+[[package]]
+name = "rax-cli"
+version = "0.4.0"
+dependencies = [
+ "clap",
+ "rax-runtime",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rax-core"
+version = "0.4.0"
+dependencies = [
+ "cap-fs-ext",
+ "cap-std",
+ "fs2",
+ "libc",
+ "memmap2",
+ "sha2",
+ "tempfile",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rax-docstore"
+version = "0.4.0"
+dependencies = [
+ "rax-bench-model",
+ "rax-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "rax-multimodal"
+version = "0.4.0"
+dependencies = [
+ "fs2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "rax-runtime"
+version = "0.4.0"
+dependencies = [
+ "libc",
+ "rax-bench-model",
+ "rax-bench-packer",
+ "rax-core",
+ "rax-docstore",
+ "rax-search",
+ "rax-text",
+ "rax-vector",
+ "serde_json",
+ "tempfile",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rax-search"
+version = "0.4.0"
+dependencies = [
+ "rax-bench-model",
+ "rax-text",
+ "rax-vector",
+ "serde_json",
+]
+
+[[package]]
+name = "rax-structured-memory"
+version = "0.4.0"
+dependencies = [
+ "fs2",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "rax-text"
+version = "0.4.0"
+dependencies = [
+ "rax-bench-model",
+ "rax-core",
+ "rax-docstore",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "rax-vector"
+version = "0.4.0"
+dependencies = [
+ "bytemuck",
+ "hnsw_rs",
+ "memmap2",
+ "rax-bench-model",
+ "rax-core",
+ "rax-docstore",
+ "self_cell",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -1213,210 +1428,6 @@ dependencies = [
  "hashbrown 0.15.5",
  "indexmap",
  "semver",
-]
-
-[[package]]
-name = "wax-bench-artifacts"
-version = "0.3.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
- "wax-bench-metrics",
- "wax-bench-model",
-]
-
-[[package]]
-name = "wax-bench-cli"
-version = "0.3.0"
-dependencies = [
- "clap",
- "serde_json",
- "wax-bench-artifacts",
- "wax-bench-metrics",
- "wax-bench-model",
- "wax-bench-packer",
- "wax-bench-reducer",
- "wax-bench-runner",
- "wax-bench-text-engine",
-]
-
-[[package]]
-name = "wax-bench-metrics"
-version = "0.3.0"
-
-[[package]]
-name = "wax-bench-model"
-version = "0.3.0"
-dependencies = [
- "serde",
- "strum",
-]
-
-[[package]]
-name = "wax-bench-packer"
-version = "0.3.0"
-dependencies = [
- "bytemuck",
- "hnsw_rs",
- "serde",
- "serde_json",
- "sha2",
- "wax-bench-model",
-]
-
-[[package]]
-name = "wax-bench-reducer"
-version = "0.3.0"
-dependencies = [
- "serde",
- "serde_json",
- "wax-bench-artifacts",
- "wax-bench-model",
-]
-
-[[package]]
-name = "wax-bench-runner"
-version = "0.3.0"
-dependencies = [
- "wax-bench-metrics",
- "wax-bench-model",
-]
-
-[[package]]
-name = "wax-bench-text-engine"
-version = "0.3.0"
-dependencies = [
- "bytemuck",
- "serde",
- "serde_json",
- "sha2",
- "wax-bench-model",
- "wax-v2-core",
- "wax-v2-docstore",
- "wax-v2-search",
- "wax-v2-text",
- "wax-v2-vector",
-]
-
-[[package]]
-name = "wax-cli"
-version = "0.3.0"
-dependencies = [
- "clap",
- "serde",
- "serde_json",
- "wax-v2-runtime",
-]
-
-[[package]]
-name = "wax-v2-broker"
-version = "0.3.0"
-dependencies = [
- "serde_json",
- "wax-v2-runtime",
-]
-
-[[package]]
-name = "wax-v2-core"
-version = "0.3.0"
-dependencies = [
- "cap-fs-ext",
- "cap-std",
- "fs2",
- "libc",
- "memmap2",
- "sha2",
- "tempfile",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "wax-v2-docstore"
-version = "0.3.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "wax-bench-model",
- "wax-v2-core",
-]
-
-[[package]]
-name = "wax-v2-multimodal"
-version = "0.3.0"
-dependencies = [
- "fs2",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
-]
-
-[[package]]
-name = "wax-v2-runtime"
-version = "0.3.0"
-dependencies = [
- "libc",
- "serde_json",
- "tempfile",
- "wax-bench-model",
- "wax-bench-packer",
- "wax-v2-core",
- "wax-v2-docstore",
- "wax-v2-search",
- "wax-v2-text",
- "wax-v2-vector",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "wax-v2-search"
-version = "0.3.0"
-dependencies = [
- "serde_json",
- "wax-bench-model",
- "wax-v2-text",
- "wax-v2-vector",
-]
-
-[[package]]
-name = "wax-v2-structured-memory"
-version = "0.3.0"
-dependencies = [
- "fs2",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "wax-v2-text"
-version = "0.3.0"
-dependencies = [
- "serde",
- "serde_json",
- "tempfile",
- "wax-bench-model",
- "wax-v2-core",
- "wax-v2-docstore",
-]
-
-[[package]]
-name = "wax-v2-vector"
-version = "0.3.0"
-dependencies = [
- "bytemuck",
- "hnsw_rs",
- "memmap2",
- "self_cell",
- "serde",
- "serde_json",
- "tempfile",
- "wax-bench-model",
- "wax-v2-core",
- "wax-v2-docstore",
 ]
 
 [[package]]

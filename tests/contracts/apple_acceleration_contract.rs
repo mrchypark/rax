@@ -1,4 +1,4 @@
-use wax_v2_runtime::{
+use rax_runtime::{
     RuntimeAccelerationAvailability, RuntimeAccelerationPreference, RuntimeExecutionBackend,
     RuntimePlatformAccelerationFamily, RuntimeStore,
 };

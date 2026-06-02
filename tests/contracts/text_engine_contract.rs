@@ -1,13 +1,13 @@
 use std::fs;
 
+use rax_bench_model::{MountRequest, OpenRequest, RaxEngine, SearchRequest};
+use rax_bench_packer::{pack_dataset, PackRequest};
+use rax_bench_text_engine::{query_batch_ranked_results, query_text_preview, PackedTextEngine};
+use rax_core::create_empty_store;
+use rax_docstore::Docstore;
+use rax_runtime::{NewDocument, RuntimeStore};
+use rax_text::publish_compatibility_text_segment;
 use tempfile::tempdir;
-use wax_bench_model::{MountRequest, OpenRequest, SearchRequest, WaxEngine};
-use wax_bench_packer::{pack_dataset, PackRequest};
-use wax_bench_text_engine::{query_batch_ranked_results, query_text_preview, PackedTextEngine};
-use wax_v2_core::create_empty_store;
-use wax_v2_docstore::Docstore;
-use wax_v2_runtime::{NewDocument, RuntimeStore};
-use wax_v2_text::publish_compatibility_text_segment;
 
 #[test]
 fn packed_text_engine_materializes_text_lane_on_first_query() {
@@ -85,7 +85,7 @@ fn packed_text_engine_finds_first_text_query_across_multiple_query_sets() {
         source_dir.path().join("source.json"),
         r#"{
   "dataset_family": "knowledge",
-  "dataset_version": "v1",
+  "dataset_version": "current",
   "generated_at": "2026-03-30T00:00:00Z",
   "embedding_spec_id": "minilm-l6-384-f32-cosine",
   "embedding_model_version": "2026-03-15",
@@ -204,9 +204,9 @@ fn packed_text_engine_prefers_manifest_visible_text_segment_when_sidecar_is_miss
     ))
     .unwrap();
 
-    let store_path = dataset_dir.path().join("store.wax");
+    let store_path = dataset_dir.path().join("store.rax");
     create_empty_store(&store_path).unwrap();
-    let manifest: wax_bench_model::DatasetPackManifest = serde_json::from_str(
+    let manifest: rax_bench_model::DatasetPackManifest = serde_json::from_str(
         &fs::read_to_string(dataset_dir.path().join("manifest.json")).unwrap(),
     )
     .unwrap();
@@ -248,7 +248,7 @@ fn packed_text_engine_open_rejects_store_segments_that_do_not_match_mounted_pack
     ))
     .unwrap();
 
-    let store_path = dataset_dir.path().join("store.wax");
+    let store_path = dataset_dir.path().join("store.rax");
     create_empty_store(&store_path).unwrap();
     let dataset_docstore = Docstore::open_dataset_pack(dataset_dir.path(), &manifest).unwrap();
     dataset_docstore.publish_to_store(&store_path).unwrap();
@@ -296,7 +296,7 @@ fn query_text_preview_uses_manifest_visible_doc_segment_when_docs_sidecar_is_mis
     ))
     .unwrap();
 
-    let store_path = dataset_dir.path().join("store.wax");
+    let store_path = dataset_dir.path().join("store.rax");
     create_empty_store(&store_path).unwrap();
     let dataset_docstore = Docstore::open_dataset_pack(dataset_dir.path(), &manifest).unwrap();
     dataset_docstore.publish_to_store(&store_path).unwrap();
@@ -329,7 +329,7 @@ fn query_text_preview_rejects_store_segments_that_do_not_match_mounted_pack() {
     ))
     .unwrap();
 
-    let store_path = dataset_dir.path().join("store.wax");
+    let store_path = dataset_dir.path().join("store.rax");
     create_empty_store(&store_path).unwrap();
     let dataset_docstore = Docstore::open_dataset_pack(dataset_dir.path(), &manifest).unwrap();
     dataset_docstore.publish_to_store(&store_path).unwrap();
@@ -399,7 +399,7 @@ fn packed_text_engine_open_allows_text_queries_when_vectors_are_stale() {
         ),
     )
     .unwrap();
-    if let Some(path) = serde_json::from_str::<wax_bench_model::DatasetPackManifest>(
+    if let Some(path) = serde_json::from_str::<rax_bench_model::DatasetPackManifest>(
         &fs::read_to_string(dataset_dir.path().join("manifest.json")).unwrap(),
     )
     .unwrap()
@@ -461,7 +461,7 @@ fn query_batch_filtered_text_uses_active_store_doc_count_for_overfetch() {
     runtime.close().unwrap();
 
     fs::remove_file(dataset_dir.path().join("docs.ndjson")).unwrap();
-    let manifest: wax_bench_model::DatasetPackManifest = serde_json::from_str(
+    let manifest: rax_bench_model::DatasetPackManifest = serde_json::from_str(
         &fs::read_to_string(dataset_dir.path().join("manifest.json")).unwrap(),
     )
     .unwrap();
@@ -487,7 +487,7 @@ fn query_batch_filtered_text_uses_active_store_doc_count_for_overfetch() {
     let results = query_batch_ranked_results(
         dataset_dir.path(),
         &query_set_path,
-        wax_bench_model::VectorQueryMode::ExactFlat,
+        rax_bench_model::VectorQueryMode::ExactFlat,
     )
     .unwrap();
 
@@ -515,7 +515,7 @@ fn query_batch_returns_empty_hits_when_query_has_no_eligible_lanes() {
     let results = query_batch_ranked_results(
         dataset_dir.path(),
         &query_set_path,
-        wax_bench_model::VectorQueryMode::ExactFlat,
+        rax_bench_model::VectorQueryMode::ExactFlat,
     )
     .unwrap();
 

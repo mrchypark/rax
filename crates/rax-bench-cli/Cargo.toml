@@ -1,0 +1,16 @@
+[package]
+name = "rax-bench-cli"
+version = "0.4.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+clap = { version = "4.5.37", features = ["derive"] }
+serde_json = "1.0.145"
+rax-bench-artifacts = { path = "../rax-bench-artifacts" }
+rax-bench-metrics = { path = "../rax-bench-metrics" }
+rax-bench-packer = { path = "../rax-bench-packer" }
+rax-bench-reducer = { path = "../rax-bench-reducer" }
+rax-bench-model = { path = "../rax-bench-model" }
+rax-bench-runner = { path = "../rax-bench-runner" }
+rax-bench-text-engine = { path = "../rax-bench-text-engine" }

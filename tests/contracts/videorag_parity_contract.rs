@@ -1,10 +1,10 @@
 use std::fs;
 
-use tempfile::tempdir;
-use wax_v2_multimodal::{
+use rax_multimodal::{
     BootstrapVideoMetadata, MultimodalAssetKind, MultimodalIngestSession, NewMultimodalAssetImport,
     VideoAssetQuery,
 };
+use tempfile::tempdir;
 
 #[test]
 fn videorag_lists_only_video_assets_through_typed_video_api() {

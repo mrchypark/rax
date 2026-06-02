@@ -1,21 +1,21 @@
 use std::fmt::Write as _;
 use std::fs;
 
-use tempfile::tempdir;
-use wax_bench_model::{
-    DatasetPackManifest, MountRequest, OpenRequest, SearchRequest, VectorQueryMode, WaxEngine,
+use rax_bench_model::{
+    DatasetPackManifest, MountRequest, OpenRequest, RaxEngine, SearchRequest, VectorQueryMode,
 };
-use wax_bench_packer::{pack_dataset, PackRequest};
-use wax_bench_text_engine::{profile_first_vector_query, PackedTextEngine};
-use wax_v2_core::create_empty_store;
-use wax_v2_vector::publish_compatibility_vector_segment;
+use rax_bench_packer::{pack_dataset, PackRequest};
+use rax_bench_text_engine::{profile_first_vector_query, PackedTextEngine};
+use rax_core::create_empty_store;
+use rax_vector::publish_compatibility_vector_segment;
+use tempfile::tempdir;
 
 fn write_large_auto_source(source_dir: &std::path::Path, doc_count: usize) {
     fs::write(
         source_dir.join("source.json"),
         r#"{
   "dataset_family": "knowledge",
-  "dataset_version": "v1",
+  "dataset_version": "current",
   "generated_at": "2026-03-30T00:00:00Z",
   "embedding_spec_id": "minilm-l6-384-f32-cosine",
   "embedding_model_version": "2026-03-15",
@@ -115,7 +115,7 @@ fn packed_engine_finds_first_vector_query_across_multiple_query_vector_files() {
         source_dir.path().join("source.json"),
         r#"{
   "dataset_family": "knowledge",
-  "dataset_version": "v1",
+  "dataset_version": "current",
   "generated_at": "2026-03-30T00:00:00Z",
   "embedding_spec_id": "minilm-l6-384-f32-cosine",
   "embedding_model_version": "2026-03-15",
@@ -272,7 +272,7 @@ fn packed_engine_vector_query_rejects_store_vector_segment_that_does_not_match_m
     ))
     .unwrap();
 
-    let store_path = dataset_dir.path().join("store.wax");
+    let store_path = dataset_dir.path().join("store.rax");
     create_empty_store(&store_path).unwrap();
     publish_compatibility_vector_segment(dataset_dir.path(), &manifest, &store_path).unwrap();
     let document_vectors_path = manifest
@@ -315,7 +315,7 @@ fn profile_first_vector_query_rejects_store_vector_segment_that_does_not_match_m
     ))
     .unwrap();
 
-    let store_path = dataset_dir.path().join("store.wax");
+    let store_path = dataset_dir.path().join("store.rax");
     create_empty_store(&store_path).unwrap();
     publish_compatibility_vector_segment(dataset_dir.path(), &manifest, &store_path).unwrap();
     let document_vectors_path = manifest
@@ -346,7 +346,7 @@ fn packed_engine_prefers_manifest_visible_vector_segment_when_sidecars_are_missi
         "clean",
     ))
     .unwrap();
-    let store_path = dataset_dir.path().join("store.wax");
+    let store_path = dataset_dir.path().join("store.rax");
     create_empty_store(&store_path).unwrap();
     publish_compatibility_vector_segment(dataset_dir.path(), &manifest, &store_path).unwrap();
 
@@ -517,7 +517,7 @@ fn packed_engine_preserves_doc_id_tiebreak_for_equal_vector_scores() {
         source_dir.path().join("source.json"),
         r#"{
   "dataset_family": "knowledge",
-  "dataset_version": "v1",
+  "dataset_version": "current",
   "generated_at": "2026-03-30T00:00:00Z",
   "embedding_spec_id": "minilm-l6-384-f32-cosine",
   "embedding_model_version": "2026-03-15",
@@ -601,7 +601,7 @@ fn packed_engine_replaces_worse_hit_when_top_k_buffer_is_full() {
         source_dir.path().join("source.json"),
         r#"{
   "dataset_family": "knowledge",
-  "dataset_version": "v1",
+  "dataset_version": "current",
   "generated_at": "2026-03-30T00:00:00Z",
   "embedding_spec_id": "minilm-l6-384-f32-cosine",
   "embedding_model_version": "2026-03-15",

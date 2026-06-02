@@ -1,10 +1,10 @@
-use tempfile::tempdir;
-use wax_bench_artifacts::{
+use rax_bench_artifacts::{
     read_run_bundle, render_replay_command, write_run_bundle_with_replay_config,
     ArtifactBundleStatus, MetricValue, ReplayConfigArtifact,
 };
-use wax_bench_metrics::{CompilerOptimization, MemoryReading, SampleMetrics, ThermalState};
-use wax_bench_model::{BenchmarkId, MaterializationMode, VectorQueryMode};
+use rax_bench_metrics::{CompilerOptimization, MemoryReading, SampleMetrics, ThermalState};
+use rax_bench_model::{BenchmarkId, MaterializationMode, VectorQueryMode};
+use tempfile::tempdir;
 
 #[test]
 fn artifact_checksum_mismatch_is_detected() {
@@ -89,7 +89,7 @@ fn run_config_can_be_replayed_exactly() {
     assert_eq!(bundle.manifest.replay, replay);
     assert_eq!(
         render_replay_command(&bundle.manifest.replay).unwrap(),
-        "cargo run -p wax-bench-cli -- run --dataset fixtures/bench/out/minimal-pack --workload ttfq_text --sample-count 2 --vector-mode auto --artifact-dir /tmp/replayed-artifacts"
+        "cargo run -p rax-bench-cli -- run --dataset fixtures/bench/out/minimal-pack --workload ttfq_text --sample-count 2 --vector-mode auto --artifact-dir /tmp/replayed-artifacts"
     );
 }
 
@@ -116,7 +116,7 @@ fn zero_duration_ttfq_is_preserved_as_available() {
 
 fn benchmark_id() -> BenchmarkId {
     BenchmarkId {
-        dataset_id: "knowledge-small-clean-v1".to_owned(),
+        dataset_id: "knowledge-small-clean".to_owned(),
         workload_id: "ttfq_text".to_owned(),
         sample_index: 0,
     }

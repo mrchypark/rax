@@ -1,10 +1,10 @@
 use std::fs;
 
-use tempfile::tempdir;
-use wax_v2_multimodal::{
+use rax_multimodal::{
     BootstrapImageMetadata, MultimodalAssetKind, MultimodalIngestSession, NewMultimodalAssetImport,
     PhotoAssetQuery,
 };
+use tempfile::tempdir;
 
 #[test]
 fn photorag_lists_only_image_assets_through_typed_image_api() {

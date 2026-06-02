@@ -1,17 +1,21 @@
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::process::Command;
 
+use rax_core::open_store;
 use tempfile::tempdir;
-use wax_v2_core::open_store;
+
+#[path = "support/cargo.rs"]
+mod cargo_support;
+
+use cargo_support::rax_output;
 
 #[test]
-fn product_cli_remembers_and_recalls_from_single_wax_file() {
+fn product_cli_remembers_and_recalls_from_single_rax_file() {
     let store_dir = tempdir().unwrap();
-    let store_path = store_dir.path().join("agent.wax");
+    let store_path = store_dir.path().join("agent.rax");
 
-    let remember = wax_output(&[
+    let remember = rax_output(&[
         "remember",
         "--store",
         store_path.to_str().unwrap(),
@@ -21,11 +25,11 @@ fn product_cli_remembers_and_recalls_from_single_wax_file() {
     assert!(store_path.exists());
     assert_eq!(
         store_dir_entries(&store_dir),
-        vec!["agent.wax".to_owned()],
-        "product memory must keep the user-visible store as a single .wax file"
+        vec!["agent.rax".to_owned()],
+        "product memory must keep the user-visible store as a single .rax file"
     );
 
-    let recall = wax_output(&[
+    let recall = rax_output(&[
         "recall",
         "--store",
         store_path.to_str().unwrap(),
@@ -38,7 +42,7 @@ fn product_cli_remembers_and_recalls_from_single_wax_file() {
     assert!(stdout.contains("\"doc_id\": \"mem-0000000000000001\""));
     assert!(stdout.contains("\"preview\": \"The user is building a habit tracker in Rust\""));
 
-    let recall_without_preview = wax_output(&[
+    let recall_without_preview = rax_output(&[
         "recall",
         "--store",
         store_path.to_str().unwrap(),
@@ -53,18 +57,18 @@ fn product_cli_remembers_and_recalls_from_single_wax_file() {
     assert!(stdout.contains("\"preview\": null"));
     assert_eq!(
         store_dir_entries(&store_dir),
-        vec!["agent.wax".to_owned()],
+        vec!["agent.rax".to_owned()],
         "recall must not create lock or sidecar files next to the product store"
     );
 }
 
 #[cfg(unix)]
 #[test]
-fn product_cli_recalls_from_read_only_single_wax_file() {
+fn product_cli_recalls_from_read_only_single_rax_file() {
     let store_dir = tempdir().unwrap();
-    let store_path = store_dir.path().join("agent.wax");
+    let store_path = store_dir.path().join("agent.rax");
 
-    let remember = wax_output(&[
+    let remember = rax_output(&[
         "remember",
         "--store",
         store_path.to_str().unwrap(),
@@ -76,7 +80,7 @@ fn product_cli_recalls_from_read_only_single_wax_file() {
     permissions.set_mode(0o400);
     fs::set_permissions(&store_path, permissions).unwrap();
 
-    let recall = wax_output(&[
+    let recall = rax_output(&[
         "recall",
         "--store",
         store_path.to_str().unwrap(),
@@ -99,21 +103,21 @@ fn product_cli_recalls_from_read_only_single_wax_file() {
 #[test]
 fn product_cli_create_targets_direct_store_file() {
     let store_dir = tempdir().unwrap();
-    let store_path = store_dir.path().join("agent.wax");
+    let store_path = store_dir.path().join("agent.rax");
 
-    let output = wax_output(&["create", "--store", store_path.to_str().unwrap()]);
+    let output = rax_output(&["create", "--store", store_path.to_str().unwrap()]);
     assert_success(&output);
 
     assert!(store_path.exists());
     let opened = open_store(&store_path).unwrap();
     assert_eq!(opened.manifest.generation, 0);
-    assert_eq!(store_dir_entries(&store_dir), vec!["agent.wax".to_owned()]);
+    assert_eq!(store_dir_entries(&store_dir), vec!["agent.rax".to_owned()]);
 }
 
 #[test]
 fn product_cli_rejects_removed_root_flag() {
     let store_dir = tempdir().unwrap();
-    let output = wax_output(&["create", "--root", store_dir.path().to_str().unwrap()]);
+    let output = rax_output(&["create", "--root", store_dir.path().to_str().unwrap()]);
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--root'"));
@@ -126,15 +130,6 @@ fn store_dir_entries(store_dir: &tempfile::TempDir) -> Vec<String> {
         .collect::<Vec<_>>();
     entries.sort();
     entries
-}
-
-fn wax_output(args: &[&str]) -> std::process::Output {
-    Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args(["run", "-p", "wax-cli", "--"])
-        .args(args)
-        .output()
-        .unwrap()
 }
 
 fn assert_success(output: &std::process::Output) {

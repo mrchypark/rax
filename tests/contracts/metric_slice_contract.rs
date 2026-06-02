@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use wax_bench_metrics::{
+use rax_bench_metrics::{
     CompilerOptimization, MemoryReading, MemorySampler, MetricCollector, MonotonicClock,
     SampleMetrics, ThermalState,
 };

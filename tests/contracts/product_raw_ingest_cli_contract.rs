@@ -1,11 +1,15 @@
 use std::fs;
-use std::process::Command;
 
+use rax_bench_model::embed_text;
+use rax_bench_model::ManifestFile;
+use rax_bench_packer::{pack_adhoc_dataset, AdhocPackRequest};
+use rax_docstore::Docstore;
 use tempfile::tempdir;
-use wax_bench_model::embed_text;
-use wax_bench_model::ManifestFile;
-use wax_bench_packer::{pack_adhoc_dataset, AdhocPackRequest};
-use wax_v2_docstore::Docstore;
+
+#[path = "support/cargo.rs"]
+mod cargo_support;
+
+use cargo_support::rax_output;
 
 #[test]
 fn product_cli_direct_store_raw_documents_round_trip_without_dataset_manifest() {
@@ -21,7 +25,7 @@ fn product_cli_direct_store_raw_documents_round_trip_without_dataset_manifest() 
     ))
     .unwrap();
 
-    let store_path = store_dir.path().join("projection.wax");
+    let store_path = store_dir.path().join("projection.rax");
     let docs_jsonl = store_dir.path().join("projection-docs.jsonl");
     fs::write(
         &docs_jsonl,
@@ -33,8 +37,8 @@ fn product_cli_direct_store_raw_documents_round_trip_without_dataset_manifest() 
     )
     .unwrap();
 
-    run_wax(&["create", "--store", store_path.to_str().unwrap()]);
-    run_wax(&[
+    run_rax(&["create", "--store", store_path.to_str().unwrap()]);
+    run_rax(&[
         "ingest",
         "docs",
         "--store",
@@ -44,9 +48,9 @@ fn product_cli_direct_store_raw_documents_round_trip_without_dataset_manifest() 
     ]);
 
     manifest.files = vec![ManifestFile {
-        path: "projection.wax".to_owned(),
+        path: "projection.rax".to_owned(),
         kind: "store".to_owned(),
-        format: "wax".to_owned(),
+        format: "rax".to_owned(),
         record_count: 1,
         checksum: "runtime".to_owned(),
     }];
@@ -69,24 +73,16 @@ fn product_cli_direct_store_raw_documents_round_trip_without_dataset_manifest() 
         Some(&serde_json::json!("projection-store"))
     );
 
-    let search = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-cli",
-            "--",
-            "search",
-            "--store",
-            store_path.to_str().unwrap(),
-            "--text",
-            "projected alpha",
-            "--top-k",
-            "1",
-            "--preview",
-        ])
-        .output()
-        .unwrap();
+    let search = rax_output(&[
+        "search",
+        "--store",
+        store_path.to_str().unwrap(),
+        "--text",
+        "projected alpha",
+        "--top-k",
+        "1",
+        "--preview",
+    ]);
 
     assert!(
         search.status.success(),
@@ -102,7 +98,7 @@ fn product_cli_direct_store_raw_documents_round_trip_without_dataset_manifest() 
 #[test]
 fn product_cli_direct_store_docs_ingest_creates_missing_store() {
     let store_dir = tempdir().unwrap();
-    let store_path = store_dir.path().join("projection-create-on-ingest.wax");
+    let store_path = store_dir.path().join("projection-create-on-ingest.rax");
     let docs_jsonl = store_dir.path().join("projection-docs-create.jsonl");
     fs::write(
         &docs_jsonl,
@@ -110,7 +106,7 @@ fn product_cli_direct_store_docs_ingest_creates_missing_store() {
     )
     .unwrap();
 
-    run_wax(&[
+    run_rax(&[
         "ingest",
         "docs",
         "--store",
@@ -119,24 +115,16 @@ fn product_cli_direct_store_docs_ingest_creates_missing_store() {
         docs_jsonl.to_str().unwrap(),
     ]);
 
-    let search = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-cli",
-            "--",
-            "search",
-            "--store",
-            store_path.to_str().unwrap(),
-            "--text",
-            "recent decisions",
-            "--top-k",
-            "1",
-            "--preview",
-        ])
-        .output()
-        .unwrap();
+    let search = rax_output(&[
+        "search",
+        "--store",
+        store_path.to_str().unwrap(),
+        "--text",
+        "recent decisions",
+        "--top-k",
+        "1",
+        "--preview",
+    ]);
 
     assert!(
         search.status.success(),
@@ -152,7 +140,7 @@ fn product_cli_direct_store_docs_ingest_creates_missing_store() {
 #[test]
 fn product_cli_direct_store_searches_with_external_query_vector() {
     let store_dir = tempdir().unwrap();
-    let store_path = store_dir.path().join("projection-vector.wax");
+    let store_path = store_dir.path().join("projection-vector.rax");
     let docs_jsonl = store_dir.path().join("projection-vector-docs.jsonl");
     fs::write(
         &docs_jsonl,
@@ -188,7 +176,7 @@ fn product_cli_direct_store_searches_with_external_query_vector() {
     )
     .unwrap();
 
-    run_wax(&[
+    run_rax(&[
         "ingest",
         "docs",
         "--store",
@@ -196,7 +184,7 @@ fn product_cli_direct_store_searches_with_external_query_vector() {
         "--input",
         docs_jsonl.to_str().unwrap(),
     ]);
-    run_wax(&[
+    run_rax(&[
         "ingest",
         "vectors",
         "--store",
@@ -205,26 +193,18 @@ fn product_cli_direct_store_searches_with_external_query_vector() {
         vectors_jsonl.to_str().unwrap(),
     ]);
 
-    let search = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-cli",
-            "--",
-            "search",
-            "--store",
-            store_path.to_str().unwrap(),
-            "--mode",
-            "vector",
-            "--vector-input",
-            query_vector.to_str().unwrap(),
-            "--top-k",
-            "1",
-            "--preview",
-        ])
-        .output()
-        .unwrap();
+    let search = rax_output(&[
+        "search",
+        "--store",
+        store_path.to_str().unwrap(),
+        "--mode",
+        "vector",
+        "--vector-input",
+        query_vector.to_str().unwrap(),
+        "--top-k",
+        "1",
+        "--preview",
+    ]);
 
     assert!(
         search.status.success(),
@@ -236,28 +216,20 @@ fn product_cli_direct_store_searches_with_external_query_vector() {
     assert!(stdout.contains("\"doc_id\": \"vec-doc-2\""));
     assert!(stdout.contains("\"preview\": \"semantic latency checklist\""));
 
-    let hybrid_search = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-cli",
-            "--",
-            "search",
-            "--store",
-            store_path.to_str().unwrap(),
-            "--mode",
-            "hybrid",
-            "--text",
-            "semantic latency",
-            "--vector-input",
-            query_vector.to_str().unwrap(),
-            "--top-k",
-            "1",
-            "--preview",
-        ])
-        .output()
-        .unwrap();
+    let hybrid_search = rax_output(&[
+        "search",
+        "--store",
+        store_path.to_str().unwrap(),
+        "--mode",
+        "hybrid",
+        "--text",
+        "semantic latency",
+        "--vector-input",
+        query_vector.to_str().unwrap(),
+        "--top-k",
+        "1",
+        "--preview",
+    ]);
 
     assert!(
         hybrid_search.status.success(),
@@ -273,25 +245,17 @@ fn product_cli_direct_store_searches_with_external_query_vector() {
 #[test]
 fn product_cli_docs_ingest_does_not_create_store_when_input_is_missing() {
     let store_dir = tempdir().unwrap();
-    let store_path = store_dir.path().join("side-effect.wax");
+    let store_path = store_dir.path().join("side-effect.rax");
     let missing_input = store_dir.path().join("missing-docs.jsonl");
 
-    let output = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-cli",
-            "--",
-            "ingest",
-            "docs",
-            "--store",
-            store_path.to_str().unwrap(),
-            "--input",
-            missing_input.to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
+    let output = rax_output(&[
+        "ingest",
+        "docs",
+        "--store",
+        store_path.to_str().unwrap(),
+        "--input",
+        missing_input.to_str().unwrap(),
+    ]);
 
     assert!(!output.status.success());
     assert!(
@@ -304,7 +268,7 @@ fn product_cli_docs_ingest_does_not_create_store_when_input_is_missing() {
 #[test]
 fn product_cli_search_rejects_ignored_mode_inputs() {
     let store_dir = tempdir().unwrap();
-    let store_path = store_dir.path().join("projection-search-args.wax");
+    let store_path = store_dir.path().join("projection-search-args.rax");
     let docs_jsonl = store_dir.path().join("projection-docs.jsonl");
     fs::write(
         &docs_jsonl,
@@ -321,7 +285,7 @@ fn product_cli_search_rejects_ignored_mode_inputs() {
     )
     .unwrap();
 
-    run_wax(&[
+    run_rax(&[
         "ingest",
         "docs",
         "--store",
@@ -330,7 +294,7 @@ fn product_cli_search_rejects_ignored_mode_inputs() {
         docs_jsonl.to_str().unwrap(),
     ]);
 
-    let text_with_vector = wax_output(&[
+    let text_with_vector = rax_output(&[
         "search",
         "--store",
         store_path.to_str().unwrap(),
@@ -345,7 +309,7 @@ fn product_cli_search_rejects_ignored_mode_inputs() {
     assert!(String::from_utf8_lossy(&text_with_vector.stderr)
         .contains("search --mode text does not accept --vector-input"));
 
-    let vector_with_text = wax_output(&[
+    let vector_with_text = rax_output(&[
         "search",
         "--store",
         store_path.to_str().unwrap(),
@@ -364,7 +328,7 @@ fn product_cli_search_rejects_ignored_mode_inputs() {
 #[test]
 fn product_cli_query_vector_object_rejects_unknown_fields() {
     let store_dir = tempdir().unwrap();
-    let store_path = store_dir.path().join("projection-strict-query.wax");
+    let store_path = store_dir.path().join("projection-strict-query.rax");
     let docs_jsonl = store_dir.path().join("projection-docs.jsonl");
     fs::write(
         &docs_jsonl,
@@ -394,7 +358,7 @@ fn product_cli_query_vector_object_rejects_unknown_fields() {
     )
     .unwrap();
 
-    run_wax(&[
+    run_rax(&[
         "ingest",
         "docs",
         "--store",
@@ -402,7 +366,7 @@ fn product_cli_query_vector_object_rejects_unknown_fields() {
         "--input",
         docs_jsonl.to_str().unwrap(),
     ]);
-    run_wax(&[
+    run_rax(&[
         "ingest",
         "vectors",
         "--store",
@@ -411,7 +375,7 @@ fn product_cli_query_vector_object_rejects_unknown_fields() {
         vectors_jsonl.to_str().unwrap(),
     ]);
 
-    let output = wax_output(&[
+    let output = rax_output(&[
         "search",
         "--store",
         store_path.to_str().unwrap(),
@@ -423,21 +387,12 @@ fn product_cli_query_vector_object_rejects_unknown_fields() {
     assert!(!output.status.success());
 }
 
-fn run_wax(args: &[&str]) {
-    let output = wax_output(args);
+fn run_rax(args: &[&str]) {
+    let output = rax_output(args);
     assert!(
         output.status.success(),
         "stdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-}
-
-fn wax_output(args: &[&str]) -> std::process::Output {
-    Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args(["run", "-p", "wax-cli", "--"])
-        .args(args)
-        .output()
-        .unwrap()
 }

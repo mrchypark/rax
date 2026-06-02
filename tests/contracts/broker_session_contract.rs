@@ -1,19 +1,17 @@
+use rax_bench_model::embed_text;
+use rax_core::{open_store, read_segment_object, SegmentKind};
+use rax_docstore::BinaryDocSegment;
 use serde_json::json;
 use tempfile::tempdir;
-use wax_bench_model::embed_text;
-use wax_v2_core::{open_store, read_segment_object, SegmentKind};
-use wax_v2_docstore::BinaryDocSegment;
 
-use wax_v2_broker::{
-    SessionNewDocument, SessionNewDocumentVector, SessionSearchRequest, WaxBroker,
-};
+use rax_broker::{RaxBroker, SessionNewDocument, SessionNewDocumentVector, SessionSearchRequest};
 
 #[test]
 fn broker_store_session_ingests_reopens_and_searches_raw_documents_without_dataset_manifest() {
     let temp_dir = tempdir().unwrap();
-    let store_path = temp_dir.path().join("projection.wax");
+    let store_path = temp_dir.path().join("projection.rax");
 
-    let mut broker = WaxBroker::default();
+    let mut broker = RaxBroker::default();
     let session_id = broker.open_store_session(&store_path).unwrap();
     let mut extra_fields = serde_json::Map::new();
     extra_fields.insert("channel".to_owned(), json!("direct-api"));
@@ -59,11 +57,11 @@ fn broker_store_session_ingests_reopens_and_searches_raw_documents_without_datas
         .unwrap();
     let doc_segment_bytes = read_segment_object(&store_path, doc_descriptor).unwrap();
     let doc_segment = BinaryDocSegment::decode(&doc_segment_bytes).unwrap();
-    let caller_wax_doc_id = doc_segment.doc_id_map.wax_doc_id("caller-doc-42").unwrap();
+    let caller_rax_doc_id = doc_segment.doc_id_map.rax_doc_id("caller-doc-42").unwrap();
     let caller_payload = doc_segment
         .records
         .iter()
-        .find(|record| record.row.doc_id == caller_wax_doc_id)
+        .find(|record| record.row.doc_id == caller_rax_doc_id)
         .map(|record| serde_json::from_slice::<serde_json::Value>(&record.payload).unwrap())
         .unwrap();
 
@@ -83,9 +81,9 @@ fn broker_store_session_ingests_reopens_and_searches_raw_documents_without_datas
 #[test]
 fn broker_store_session_search_refreshes_documents_published_by_another_session() {
     let temp_dir = tempdir().unwrap();
-    let store_path = temp_dir.path().join("projection-refresh.wax");
+    let store_path = temp_dir.path().join("projection-refresh.rax");
 
-    let mut broker = WaxBroker::default();
+    let mut broker = RaxBroker::default();
     let reader_id = broker.open_store_session(&store_path).unwrap();
     let writer_id = broker.open_store_session(&store_path).unwrap();
 
@@ -123,9 +121,9 @@ fn broker_store_session_search_refreshes_documents_published_by_another_session(
 #[test]
 fn broker_store_session_ingests_vectors_and_searches_direct_store() {
     let temp_dir = tempdir().unwrap();
-    let store_path = temp_dir.path().join("projection-vectors.wax");
+    let store_path = temp_dir.path().join("projection-vectors.rax");
 
-    let mut broker = WaxBroker::default();
+    let mut broker = RaxBroker::default();
     let session_id = broker.open_store_session(&store_path).unwrap();
     broker
         .ingest_documents(

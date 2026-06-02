@@ -1,10 +1,10 @@
 use std::fs;
 use std::path::Path;
 
+use rax_bench_model::DatasetPackManifest;
+use rax_bench_packer::{pack_adhoc_dataset, pack_dataset, AdhocPackRequest, PackRequest};
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
-use wax_bench_model::DatasetPackManifest;
-use wax_bench_packer::{pack_adhoc_dataset, pack_dataset, AdhocPackRequest, PackRequest};
 
 #[test]
 fn dataset_packer_produces_stable_logical_manifest_for_same_source_and_config() {
@@ -142,7 +142,7 @@ fn dataset_packer_marks_synthetic_embedding_provenance_in_manifest_identity() {
     );
     assert_eq!(
         manifest.identity.embedding_model_version,
-        "feature-hash-stub-v1"
+        "rax-feature-hash-stub"
     );
     assert_eq!(manifest.vector_profile.embedding_dimensions, 384,);
     assert_eq!(manifest.vector_profile.embedding_dtype, "f32");
@@ -185,7 +185,7 @@ fn adhoc_packer_marks_synthetic_embedding_provenance_in_manifest_identity() {
     );
     assert_eq!(
         manifest.identity.embedding_model_version,
-        "feature-hash-stub-v1"
+        "rax-feature-hash-stub"
     );
     assert!(out_dir.path().join("document_offsets.jsonl").exists());
 }
@@ -287,7 +287,7 @@ fn dataset_packer_rejects_vector_enabled_source_without_vector_query() {
         source_dir.path().join("source.json"),
         r#"{
   "dataset_family": "knowledge",
-  "dataset_version": "v1",
+  "dataset_version": "current",
   "generated_at": "2026-03-30T00:00:00Z",
   "embedding_spec_id": "minilm-l6-384-f32-cosine",
   "embedding_model_version": "2026-03-15",
@@ -349,7 +349,7 @@ fn dataset_packer_rejects_malformed_embedding_spec_for_vector_payloads() {
         source_dir.path().join("source.json"),
         r#"{
   "dataset_family": "knowledge",
-  "dataset_version": "v1",
+  "dataset_version": "current",
   "generated_at": "2026-03-30T00:00:00Z",
   "embedding_spec_id": "minilm-l6-cosine",
   "embedding_model_version": "2026-03-15",

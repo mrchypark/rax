@@ -1,0 +1,257 @@
+use std::path::PathBuf;
+
+use rax_bench_metrics::{
+    CompilerOptimization, MemorySampler, MetricCollector, MonotonicClock, SampleMetrics,
+    ThermalState,
+};
+use rax_bench_model::{
+    BenchmarkQuery, MaterializationMode, MountRequest, OpenRequest, RaxEngine, SearchRequest,
+};
+
+pub use rax_bench_model::Workload;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunRequest {
+    pub dataset_path: PathBuf,
+    pub workload: Workload,
+    pub materialization_mode: MaterializationMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LifecycleEvent {
+    Mounted,
+    Opened,
+    TextLaneMaterialized,
+    VectorLaneMaterialized,
+    SearchExecuted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunTrace {
+    pub events: Vec<LifecycleEvent>,
+    pub search_queries: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeasuredRun {
+    pub trace: RunTrace,
+    pub metrics: SampleMetrics,
+}
+
+pub struct BenchmarkRunner<E> {
+    engine: E,
+}
+
+impl<E> BenchmarkRunner<E> {
+    pub fn new(engine: E) -> Self {
+        Self { engine }
+    }
+}
+
+pub fn run_benchmark_samples_with_runner_factory<E, R, F, C, M>(
+    mut runner_factory: R,
+    request: &RunRequest,
+    sample_count: u32,
+    mut collector_factory: F,
+) -> Result<Vec<SampleMetrics>, E::Error>
+where
+    E: RaxEngine,
+    R: FnMut() -> BenchmarkRunner<E>,
+    F: FnMut() -> MetricCollector<C, M>,
+    C: MonotonicClock,
+    M: MemorySampler,
+{
+    let mut samples = Vec::new();
+    for _ in 0..sample_count {
+        let mut runner = runner_factory();
+        let mut collector = collector_factory();
+        let measured = runner.run_with_metrics(
+            request,
+            &mut collector,
+            Some(active_compiler_optimization()),
+            Some(ThermalState::Nominal),
+        )?;
+        samples.push(measured.metrics);
+    }
+
+    Ok(samples)
+}
+
+fn active_compiler_optimization() -> CompilerOptimization {
+    if cfg!(debug_assertions) {
+        CompilerOptimization::Debug
+    } else {
+        CompilerOptimization::Release
+    }
+}
+
+impl<E> BenchmarkRunner<E>
+where
+    E: RaxEngine,
+{
+    pub fn run(&mut self, request: &RunRequest) -> Result<RunTrace, E::Error> {
+        let mut trace = self.mount_and_open(request)?;
+        self.materialize_forced_lanes(request, &mut trace)?;
+
+        if let Some(query) = request.workload.first_query() {
+            execute_query(&mut self.engine, query.as_str(), &mut trace)?;
+        }
+
+        if let Some(query) = request.workload.measured_query() {
+            execute_query(&mut self.engine, query.as_str(), &mut trace)?;
+        }
+
+        Ok(trace)
+    }
+
+    pub fn run_with_metrics<C, M>(
+        &mut self,
+        request: &RunRequest,
+        collector: &mut MetricCollector<C, M>,
+        compiler_optimization: Option<CompilerOptimization>,
+        thermal_state: Option<ThermalState>,
+    ) -> Result<MeasuredRun, E::Error>
+    where
+        C: MonotonicClock,
+        M: MemorySampler,
+    {
+        collector.start_run();
+        let mut trace = self.mount_and_open(request)?;
+        collector.mark_container_open_done();
+        self.materialize_forced_lanes(request, &mut trace)?;
+
+        collector.mark_metadata_ready();
+
+        if let Some(query) = request.workload.first_query() {
+            let query_text = query.as_str();
+            if matches!(request.workload, Workload::MaterializeVector) {
+                collector.start_vector_materialization_measurement();
+            }
+            execute_query(&mut self.engine, query_text, &mut trace)?;
+            if matches!(request.workload, Workload::MaterializeVector) {
+                collector.mark_vector_materialization_done();
+            }
+            if request.workload.measured_query().is_none() {
+                collector.mark_query_done();
+            }
+        }
+
+        if let Some(query) = request.workload.measured_query() {
+            collector.start_search_measurement();
+            execute_query(&mut self.engine, query.as_str(), &mut trace)?;
+            collector.mark_search_done();
+        }
+
+        collector.snapshot_memory();
+
+        Ok(MeasuredRun {
+            trace,
+            metrics: collector.finish(compiler_optimization, thermal_state),
+        })
+    }
+
+    fn mount_and_open(&mut self, request: &RunRequest) -> Result<RunTrace, E::Error> {
+        let mut trace = RunTrace {
+            events: Vec::new(),
+            search_queries: Vec::new(),
+        };
+
+        self.engine.mount(MountRequest {
+            store_path: request.dataset_path.clone(),
+        })?;
+        trace.events.push(LifecycleEvent::Mounted);
+
+        self.engine.open(OpenRequest)?;
+        trace.events.push(LifecycleEvent::Opened);
+
+        Ok(trace)
+    }
+
+    fn materialize_forced_lanes(
+        &mut self,
+        request: &RunRequest,
+        trace: &mut RunTrace,
+    ) -> Result<(), E::Error> {
+        if matches!(
+            request.materialization_mode,
+            MaterializationMode::ForceTextLane | MaterializationMode::ForceAllLanes
+        ) {
+            materialize_lane(
+                &mut self.engine,
+                BenchmarkQuery::MaterializeTextLane.as_str(),
+                LifecycleEvent::TextLaneMaterialized,
+                trace,
+            )?;
+        }
+
+        if matches!(
+            request.materialization_mode,
+            MaterializationMode::ForceVectorLane | MaterializationMode::ForceAllLanes
+        ) {
+            materialize_lane(
+                &mut self.engine,
+                BenchmarkQuery::MaterializeVectorLane.as_str(),
+                LifecycleEvent::VectorLaneMaterialized,
+                trace,
+            )?;
+        }
+
+        Ok(())
+    }
+}
+
+fn materialize_lane<E>(
+    engine: &mut E,
+    query_text: &str,
+    event: LifecycleEvent,
+    trace: &mut RunTrace,
+) -> Result<(), E::Error>
+where
+    E: RaxEngine,
+{
+    execute_query(engine, query_text, trace)?;
+    trace.events.pop();
+    trace.events.push(event);
+    Ok(())
+}
+
+fn execute_query<E>(engine: &mut E, query_text: &str, trace: &mut RunTrace) -> Result<(), E::Error>
+where
+    E: RaxEngine,
+{
+    engine.search(SearchRequest {
+        query_text: query_text.to_owned(),
+    })?;
+    trace.events.push(LifecycleEvent::SearchExecuted);
+    trace.search_queries.push(query_text.to_owned());
+    Ok(())
+}
+
+#[derive(Default)]
+pub struct NoopRaxEngine;
+
+impl RaxEngine for NoopRaxEngine {
+    type Error = String;
+
+    fn mount(&mut self, _request: MountRequest) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn open(&mut self, _request: OpenRequest) -> Result<rax_bench_model::OpenResult, Self::Error> {
+        Ok(rax_bench_model::OpenResult)
+    }
+
+    fn search(
+        &mut self,
+        _request: SearchRequest,
+    ) -> Result<rax_bench_model::SearchResult, Self::Error> {
+        Ok(rax_bench_model::SearchResult { hits: Vec::new() })
+    }
+
+    fn get_stats(&self) -> rax_bench_model::EngineStats {
+        rax_bench_model::EngineStats {
+            phase: rax_bench_model::EnginePhase::Open,
+            last_mounted_path: None,
+        }
+    }
+}

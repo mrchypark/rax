@@ -1,9 +1,9 @@
 use std::fs;
 
+use rax_bench_packer::{pack_dataset, PackRequest};
+use rax_core::open_store;
+use rax_runtime::{RuntimeSearchMode, RuntimeSearchRequest, RuntimeStore};
 use tempfile::tempdir;
-use wax_bench_packer::{pack_dataset, PackRequest};
-use wax_v2_core::open_store;
-use wax_v2_runtime::{RuntimeSearchMode, RuntimeSearchRequest, RuntimeStore};
 
 #[test]
 fn staged_compatibility_publish_creates_one_visible_generation_for_multiple_families() {
@@ -28,14 +28,14 @@ fn staged_compatibility_publish_creates_one_visible_generation_for_multiple_fami
     assert_eq!(
         report.published_families,
         vec![
-            wax_v2_runtime::RuntimePublishFamily::Doc,
-            wax_v2_runtime::RuntimePublishFamily::Text,
-            wax_v2_runtime::RuntimePublishFamily::Vector,
+            rax_runtime::RuntimePublishFamily::Doc,
+            rax_runtime::RuntimePublishFamily::Text,
+            rax_runtime::RuntimePublishFamily::Vector,
         ]
     );
     runtime.close().unwrap();
 
-    let store_path = dataset_dir.path().join("store.wax");
+    let store_path = dataset_dir.path().join("store.rax");
     let opened = open_store(&store_path).unwrap();
     assert_eq!(opened.manifest.generation, 1);
     assert_eq!(opened.manifest.segments.len(), 3);

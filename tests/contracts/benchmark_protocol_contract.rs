@@ -1,4 +1,4 @@
-use wax_bench_model::{
+use rax_bench_model::{
     embed_text, parse_benchmark_query, parse_workload, tokenize, BenchmarkQuery, Workload,
 };
 

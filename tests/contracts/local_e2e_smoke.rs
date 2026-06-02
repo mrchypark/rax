@@ -1,7 +1,10 @@
-use std::process::Command;
-
+use rax_bench_packer::{pack_dataset, PackRequest};
 use tempfile::tempdir;
-use wax_bench_packer::{pack_dataset, PackRequest};
+
+#[path = "support/cargo.rs"]
+mod cargo_support;
+
+use cargo_support::{cargo_output, cargo_status, cargo_status_with_env};
 
 #[test]
 fn local_e2e_smoke_emits_sample_and_summary_artifacts() {
@@ -17,14 +20,11 @@ fn local_e2e_smoke_emits_sample_and_summary_artifacts() {
     .unwrap();
 
     let artifact_dir = work_dir.path().join("artifacts/latest");
-    let status = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env("WAX_BENCH_TEST_MODE", "1")
-        .env("WAX_BENCH_ARTIFACT_DIR", artifact_dir.to_str().unwrap())
-        .args([
+    let status = cargo_status_with_env(
+        [
             "run",
             "-p",
-            "wax-bench-cli",
+            "rax-bench-cli",
             "--",
             "run",
             "--dataset",
@@ -33,9 +33,12 @@ fn local_e2e_smoke_emits_sample_and_summary_artifacts() {
             "ttfq_text",
             "--sample-count",
             "2",
-        ])
-        .status()
-        .unwrap();
+        ],
+        [
+            ("RAX_BENCH_TEST_MODE", "1"),
+            ("RAX_BENCH_ARTIFACT_DIR", artifact_dir.to_str().unwrap()),
+        ],
+    );
 
     assert!(status.success());
     assert!(artifact_dir.join("sample-000.json").exists());
@@ -59,13 +62,11 @@ fn local_e2e_smoke_renders_vector_lane_matrix_report() {
     let artifact_root = work_dir.path().join("release-matrix");
     for workload in ["materialize_vector", "ttfq_vector", "warm_vector"] {
         let run_dir = artifact_root.join(workload);
-        let status = Command::new("cargo")
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .env("WAX_BENCH_TEST_MODE", "1")
-            .args([
+        let status = cargo_status_with_env(
+            [
                 "run",
                 "-p",
-                "wax-bench-cli",
+                "rax-bench-cli",
                 "--",
                 "run",
                 "--dataset",
@@ -76,43 +77,35 @@ fn local_e2e_smoke_renders_vector_lane_matrix_report() {
                 "2",
                 "--artifact-dir",
                 run_dir.to_str().unwrap(),
-            ])
-            .status()
-            .unwrap();
+            ],
+            [("RAX_BENCH_TEST_MODE", "1")],
+        );
         assert!(status.success());
 
-        let reduce = Command::new("cargo")
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .args([
-                "run",
-                "-p",
-                "wax-bench-cli",
-                "--",
-                "reduce",
-                "--input",
-                run_dir.to_str().unwrap(),
-            ])
-            .status()
-            .unwrap();
+        let reduce = cargo_status([
+            "run",
+            "-p",
+            "rax-bench-cli",
+            "--",
+            "reduce",
+            "--input",
+            run_dir.to_str().unwrap(),
+        ]);
         assert!(reduce.success());
     }
 
     let matrix_path = artifact_root.join("vector-lane-summary.md");
-    let status = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-bench-cli",
-            "--",
-            "matrix-report",
-            "--input",
-            artifact_root.to_str().unwrap(),
-            "--output",
-            matrix_path.to_str().unwrap(),
-        ])
-        .status()
-        .unwrap();
+    let status = cargo_status([
+        "run",
+        "-p",
+        "rax-bench-cli",
+        "--",
+        "matrix-report",
+        "--input",
+        artifact_root.to_str().unwrap(),
+        "--output",
+        matrix_path.to_str().unwrap(),
+    ]);
 
     assert!(status.success());
     assert!(matrix_path.exists());
@@ -134,23 +127,19 @@ fn local_e2e_smoke_queries_packed_dataset_with_document_preview() {
     ))
     .unwrap();
 
-    let output = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-bench-cli",
-            "--",
-            "query",
-            "--dataset",
-            dataset_dir.path().to_str().unwrap(),
-            "--text",
-            "rust benchmark",
-            "--top-k",
-            "2",
-        ])
-        .output()
-        .unwrap();
+    let output = cargo_output([
+        "run",
+        "-p",
+        "rax-bench-cli",
+        "--",
+        "query",
+        "--dataset",
+        dataset_dir.path().to_str().unwrap(),
+        "--text",
+        "rust benchmark",
+        "--top-k",
+        "2",
+    ]);
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -172,13 +161,11 @@ fn local_e2e_smoke_runs_warm_hybrid_with_previews_workload() {
     ))
     .unwrap();
 
-    let run = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env("WAX_BENCH_TEST_MODE", "1")
-        .args([
+    let run = cargo_status_with_env(
+        [
             "run",
             "-p",
-            "wax-bench-cli",
+            "rax-bench-cli",
             "--",
             "run",
             "--dataset",
@@ -189,9 +176,9 @@ fn local_e2e_smoke_runs_warm_hybrid_with_previews_workload() {
             "1",
             "--artifact-dir",
             artifact_dir.path().to_str().unwrap(),
-        ])
-        .status()
-        .unwrap();
+        ],
+        [("RAX_BENCH_TEST_MODE", "1")],
+    );
 
     assert!(run.success());
     assert!(artifact_dir.path().join("summary.json").exists());
@@ -211,54 +198,46 @@ fn local_e2e_smoke_batches_queries_for_realistic_judged_dataset() {
     .unwrap();
 
     let results_path = output_dir.path().join("results.json");
-    let batch = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-bench-cli",
-            "--",
-            "query-batch",
-            "--dataset",
-            dataset_dir.path().to_str().unwrap(),
-            "--query-set",
-            dataset_dir
-                .path()
-                .join("queries/core.jsonl")
-                .to_str()
-                .unwrap(),
-            "--output",
-            results_path.to_str().unwrap(),
-        ])
-        .status()
-        .unwrap();
+    let batch = cargo_status([
+        "run",
+        "-p",
+        "rax-bench-cli",
+        "--",
+        "query-batch",
+        "--dataset",
+        dataset_dir.path().to_str().unwrap(),
+        "--query-set",
+        dataset_dir
+            .path()
+            .join("queries/core.jsonl")
+            .to_str()
+            .unwrap(),
+        "--output",
+        results_path.to_str().unwrap(),
+    ]);
     assert!(batch.success());
 
-    let quality = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-bench-cli",
-            "--",
-            "quality-report",
-            "--query-set",
-            dataset_dir
-                .path()
-                .join("queries/core.jsonl")
-                .to_str()
-                .unwrap(),
-            "--qrels",
-            dataset_dir
-                .path()
-                .join("queries/core-qrels.jsonl")
-                .to_str()
-                .unwrap(),
-            "--results",
-            results_path.to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
+    let quality = cargo_output([
+        "run",
+        "-p",
+        "rax-bench-cli",
+        "--",
+        "quality-report",
+        "--query-set",
+        dataset_dir
+            .path()
+            .join("queries/core.jsonl")
+            .to_str()
+            .unwrap(),
+        "--qrels",
+        dataset_dir
+            .path()
+            .join("queries/core-qrels.jsonl")
+            .to_str()
+            .unwrap(),
+        "--results",
+        results_path.to_str().unwrap(),
+    ]);
 
     assert!(quality.status.success());
     let stdout = String::from_utf8(quality.stdout).unwrap();
@@ -282,32 +261,26 @@ fn local_e2e_smoke_packs_adhoc_docs_then_queries_them() {
     )
     .unwrap();
 
-    let pack = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-bench-cli",
-            "--",
-            "pack-adhoc",
-            "--docs",
-            source_dir.path().join("docs.ndjson").to_str().unwrap(),
-            "--out",
-            dataset_dir.path().to_str().unwrap(),
-            "--tier",
-            "small",
-        ])
-        .status()
-        .unwrap();
+    let pack = cargo_status([
+        "run",
+        "-p",
+        "rax-bench-cli",
+        "--",
+        "pack-adhoc",
+        "--docs",
+        source_dir.path().join("docs.ndjson").to_str().unwrap(),
+        "--out",
+        dataset_dir.path().to_str().unwrap(),
+        "--tier",
+        "small",
+    ]);
     assert!(pack.success());
 
-    let run = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env("WAX_BENCH_TEST_MODE", "1")
-        .args([
+    let run = cargo_status_with_env(
+        [
             "run",
             "-p",
-            "wax-bench-cli",
+            "rax-bench-cli",
             "--",
             "run",
             "--dataset",
@@ -318,28 +291,24 @@ fn local_e2e_smoke_packs_adhoc_docs_then_queries_them() {
             "1",
             "--artifact-dir",
             artifact_dir.path().to_str().unwrap(),
-        ])
-        .status()
-        .unwrap();
+        ],
+        [("RAX_BENCH_TEST_MODE", "1")],
+    );
     assert!(run.success());
 
-    let output = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args([
-            "run",
-            "-p",
-            "wax-bench-cli",
-            "--",
-            "query",
-            "--dataset",
-            dataset_dir.path().to_str().unwrap(),
-            "--text",
-            "rust vector",
-            "--top-k",
-            "1",
-        ])
-        .output()
-        .unwrap();
+    let output = cargo_output([
+        "run",
+        "-p",
+        "rax-bench-cli",
+        "--",
+        "query",
+        "--dataset",
+        dataset_dir.path().to_str().unwrap(),
+        "--text",
+        "rust vector",
+        "--top-k",
+        "1",
+    ]);
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();

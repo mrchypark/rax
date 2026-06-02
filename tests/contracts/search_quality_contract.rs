@@ -1,12 +1,12 @@
 use std::fs;
 
-use sha2::{Digest, Sha256};
-use tempfile::tempdir;
-use wax_bench_model::{ManifestFile, QrelRecord, RankedDocumentHit, RankedQueryResult};
-use wax_bench_packer::validate_manifest;
-use wax_bench_reducer::{
+use rax_bench_model::{ManifestFile, QrelRecord, RankedDocumentHit, RankedQueryResult};
+use rax_bench_packer::validate_manifest;
+use rax_bench_reducer::{
     compute_search_quality_summary, compute_search_quality_summary_from_paths,
 };
+use sha2::{Digest, Sha256};
+use tempfile::tempdir;
 
 #[test]
 fn dataset_manifest_validation_accepts_qrels_file_when_declared() {
@@ -38,7 +38,7 @@ fn dataset_manifest_validation_accepts_qrels_file_when_declared() {
     )
     .unwrap();
 
-    let mut manifest: wax_bench_model::DatasetPackManifest =
+    let mut manifest: rax_bench_model::DatasetPackManifest =
         serde_json::from_str(&fs::read_to_string(pack_root.path().join("manifest.json")).unwrap())
             .unwrap();
 
@@ -97,7 +97,7 @@ fn dataset_manifest_validation_rejects_qrels_missing_query_coverage() {
     )
     .unwrap();
 
-    let mut manifest: wax_bench_model::DatasetPackManifest =
+    let mut manifest: rax_bench_model::DatasetPackManifest =
         serde_json::from_str(&fs::read_to_string(pack_root.path().join("manifest.json")).unwrap())
             .unwrap();
 
