@@ -224,8 +224,8 @@ pub unsafe extern "C" fn rax_search(
         ensure_output(out_json)?;
         let store = required_path(store, "store")?;
         let mode = parse_search_mode(required_string(mode, "mode")?)?;
-        let text = optional_string(text)?;
-        let vector_input = optional_path(vector_input)?;
+        let text = optional_string(text, "text")?;
+        let vector_input = optional_path(vector_input, "vector_input")?;
         let top_k = ffi_top_k(top_k)?;
         let mut runtime =
             RuntimeStore::open_existing_read_only_at(&store).map_err(runtime_error)?;
@@ -287,11 +287,11 @@ fn required_string(value: *const c_char, name: &str) -> Result<String, FfiError>
         .map_err(|error| FfiError::invalid_argument(format!("{name} must be valid UTF-8: {error}")))
 }
 
-fn optional_string(value: *const c_char) -> Result<Option<String>, FfiError> {
+fn optional_string(value: *const c_char, name: &str) -> Result<Option<String>, FfiError> {
     if value.is_null() {
         Ok(None)
     } else {
-        required_string(value, "text").map(Some)
+        required_string(value, name).map(Some)
     }
 }
 
@@ -299,13 +299,11 @@ fn required_path(value: *const c_char, name: &str) -> Result<PathBuf, FfiError> 
     required_string(value, name).map(PathBuf::from)
 }
 
-fn optional_path(value: *const c_char) -> Result<Option<PathBuf>, FfiError> {
+fn optional_path(value: *const c_char, name: &str) -> Result<Option<PathBuf>, FfiError> {
     if value.is_null() {
         Ok(None)
     } else {
-        required_string(value, "vector_input")
-            .map(PathBuf::from)
-            .map(Some)
+        required_string(value, name).map(PathBuf::from).map(Some)
     }
 }
 
