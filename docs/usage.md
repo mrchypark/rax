@@ -34,6 +34,16 @@ mkdir -p .tmp
 TMPDIR=$PWD/.tmp cargo test --workspace --all-targets
 ```
 
+## Install Product CLI
+
+Install the product CLI from this workspace:
+
+```bash
+cargo install --path crates/rax-cli --locked
+```
+
+This installs the `rax` binary. The examples below use that installed command.
+
 ## Product CLI Commands
 
 The current `rax` commands are:
@@ -52,13 +62,15 @@ There is no current `import-compat` product CLI command.
 ## Memory CLI Quick Start
 
 Use `remember` and `recall` when you want `rax` memory with generated
-`mem-*` document ids.
+`mem-*` document ids. For evaluation, keep the store in a temp directory so the
+quickstart does not write to `~/.local/share/rax`.
 
 ```bash
-install -d -m 700 ~/.local/share/rax
+tmpdir=$(mktemp -d)
+store="$tmpdir/agent.rax"
 
-cargo run -p rax-cli -- remember \
-  --store ~/.local/share/rax/agent.rax \
+rax remember \
+  --store "$store" \
   "The user is building a habit tracker in Rust."
 ```
 
@@ -73,14 +85,27 @@ The command prints JSON:
 Recall from the same store:
 
 ```bash
-cargo run -p rax-cli -- recall \
-  --store ~/.local/share/rax/agent.rax \
+rax recall \
+  --store "$store" \
   "What is the user building?" \
   --top-k 5
 ```
 
 `recall` uses the product memory facade and hybrid search over documents written
-by `remember`.
+by `remember`. Remove the temp store when finished:
+
+```bash
+rm -rf "$tmpdir"
+```
+
+For a long-lived local store:
+
+```bash
+install -d -m 700 ~/.local/share/rax
+rax remember \
+  --store ~/.local/share/rax/agent.rax \
+  "The user is building a habit tracker in Rust."
+```
 
 ## Raw Projection Stores
 
@@ -108,7 +133,7 @@ Optional fields:
 Ingest documents:
 
 ```bash
-cargo run -p rax-cli -- ingest docs \
+rax ingest docs \
   --store ~/.local/share/rax/projection.rax \
   --input /tmp/docs.jsonl
 ```
@@ -125,7 +150,7 @@ The command prints a publish report:
 Search text:
 
 ```bash
-cargo run -p rax-cli -- search \
+rax search \
   --store ~/.local/share/rax/projection.rax \
   --mode text \
   --text "launch checklist" \
@@ -157,7 +182,7 @@ row has a `doc_id` and a finite 384-float `values` array:
 ```
 
 ```bash
-cargo run -p rax-cli -- ingest vectors \
+rax ingest vectors \
   --store ~/.local/share/rax/projection.rax \
   --input /tmp/vectors.jsonl
 ```
@@ -170,7 +195,7 @@ documents; sparse partial vector updates are not a product guarantee.
 Text search requires `--text`:
 
 ```bash
-cargo run -p rax-cli -- search \
+rax search \
   --store ~/.local/share/rax/projection.rax \
   --mode text \
   --text "launch checklist"
@@ -179,7 +204,7 @@ cargo run -p rax-cli -- search \
 Vector search requires `--vector-input`:
 
 ```bash
-cargo run -p rax-cli -- search \
+rax search \
   --store ~/.local/share/rax/projection.rax \
   --mode vector \
   --vector-input /tmp/query-vector.json \
@@ -197,7 +222,7 @@ The query vector file can be either a JSON array or an object with a single
 Hybrid search requires both text and a query vector:
 
 ```bash
-cargo run -p rax-cli -- search \
+rax search \
   --store ~/.local/share/rax/projection.rax \
   --mode hybrid \
   --text "launch checklist" \

@@ -11,6 +11,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Parser)]
 #[command(name = "rax")]
+#[command(version)]
 #[command(about = "Rax product CLI")]
 struct Cli {
     #[command(subcommand)]
@@ -19,28 +20,35 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[command(about = "Create a direct .rax product store file")]
     Create {
         #[arg(long, help = "Direct .rax product store file")]
         store: PathBuf,
     },
+    #[command(about = "Ingest raw documents or vectors")]
     Ingest {
         #[command(subcommand)]
         command: IngestCommand,
     },
+    #[command(about = "Store a product memory")]
     Remember {
-        #[arg(long)]
+        #[arg(long, help = "Direct .rax product store file")]
         store: PathBuf,
+        #[arg(help = "Text to store as a product memory")]
         text: String,
     },
+    #[command(about = "Search product memory")]
     Recall {
-        #[arg(long)]
+        #[arg(long, help = "Direct .rax product store file")]
         store: PathBuf,
+        #[arg(help = "Query text to search product memory")]
         query: String,
         #[arg(long, default_value_t = 5)]
         top_k: usize,
         #[arg(long = "no-preview", action = ArgAction::SetFalse, default_value_t = true)]
         preview: bool,
     },
+    #[command(about = "Search raw runtime indexes")]
     Search {
         #[arg(long, help = "Direct .rax product store file")]
         store: PathBuf,
@@ -69,12 +77,14 @@ enum CliSearchMode {
 
 #[derive(Debug, Subcommand)]
 enum IngestCommand {
+    #[command(about = "Ingest JSONL raw documents")]
     Docs {
         #[arg(long, help = "Direct .rax product store file")]
         store: PathBuf,
         #[arg(long, help = "JSONL raw document input")]
         input: PathBuf,
     },
+    #[command(about = "Ingest JSONL vectors for existing documents")]
     Vectors {
         #[arg(long, help = "Direct .rax product store file")]
         store: PathBuf,

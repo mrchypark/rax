@@ -11,6 +11,32 @@ mod cargo_support;
 use cargo_support::rax_output;
 
 #[test]
+fn product_cli_reports_version() {
+    let output = rax_output(&["--version"]);
+
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "rax 0.4.0"
+    );
+}
+
+#[test]
+fn product_cli_help_describes_memory_arguments() {
+    let remember = rax_output(&["remember", "--help"]);
+    assert_success(&remember);
+    let stdout = String::from_utf8(remember.stdout).unwrap();
+    assert!(stdout.contains("<TEXT>"));
+    assert!(stdout.contains("Text to store as a product memory"));
+
+    let recall = rax_output(&["recall", "--help"]);
+    assert_success(&recall);
+    let stdout = String::from_utf8(recall.stdout).unwrap();
+    assert!(stdout.contains("<QUERY>"));
+    assert!(stdout.contains("Query text to search product memory"));
+}
+
+#[test]
 fn product_cli_remembers_and_recalls_from_single_rax_file() {
     let store_dir = tempdir().unwrap();
     let store_path = store_dir.path().join("agent.rax");
