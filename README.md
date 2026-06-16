@@ -27,23 +27,39 @@ For a source-derived inventory of the current crate and API surface, see
 
 ## Quick Start
 
-Remember text into a local `.rax` file:
+Install the product CLI from this workspace:
+
+```bash
+cargo install --path crates/rax-cli --locked
+```
+
+This installs the `rax` binary.
+
+Try `remember` and `recall` against a disposable temp store:
+
+```bash
+tmpdir=$(mktemp -d)
+store="$tmpdir/agent.rax"
+
+rax remember \
+  --store "$store" \
+  "The user is building a habit tracker in Rust."
+
+rax recall \
+  --store "$store" \
+  "What is the user building?" \
+  --top-k 5
+
+rm -rf "$tmpdir"
+```
+
+For a long-lived local store:
 
 ```bash
 install -d -m 700 ~/.local/share/rax
-
-cargo run -p rax-cli -- remember \
+rax remember \
   --store ~/.local/share/rax/agent.rax \
   "The user is building a habit tracker in Rust."
-```
-
-Recall from the same file:
-
-```bash
-cargo run -p rax-cli -- recall \
-  --store ~/.local/share/rax/agent.rax \
-  "What is the user building?" \
-  --top-k 5
 ```
 
 The current product CLI commands are:
