@@ -77,7 +77,8 @@ jobs:
         run: |
           set -eu
           version="${GITHUB_REF_NAME:-manual}"
-          package="rax-ffi-${version}-${{ matrix.artifact }}"
+          safe_version="$(printf '%s' "${version}" | tr '/:' '--')"
+          package="rax-ffi-${safe_version}-${{ matrix.artifact }}"
           mkdir -p "dist/${package}/include" "dist/${package}/lib"
 
           cp "crates/rax-ffi/include/rax.h" "dist/${package}/include/rax.h"
@@ -106,7 +107,8 @@ jobs:
         shell: pwsh
         run: |
           $version = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "manual" }
-          $package = "rax-ffi-$version-${{ matrix.artifact }}"
+          $safeVersion = $version -replace '[/:]', '-'
+          $package = "rax-ffi-$safeVersion-${{ matrix.artifact }}"
           New-Item -ItemType Directory -Force -Path "dist/$package/include", "dist/$package/lib", "dist/$package/bin" | Out-Null
 
           Copy-Item "crates/rax-ffi/include/rax.h" "dist/$package/include/rax.h"
