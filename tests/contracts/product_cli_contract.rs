@@ -17,7 +17,7 @@ fn product_cli_reports_version() {
     assert_success(&output);
     assert_eq!(
         String::from_utf8(output.stdout).unwrap().trim(),
-        "rax 0.4.0"
+        format!("rax {}", env!("CARGO_PKG_VERSION"))
     );
 }
 
