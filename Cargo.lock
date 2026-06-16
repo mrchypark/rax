@@ -836,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "rax"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "fs4",
  "rax-bench-artifacts",
@@ -863,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "rax-bench-artifacts"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "rax-bench-metrics",
  "rax-bench-model",
@@ -874,7 +874,7 @@ dependencies = [
 
 [[package]]
 name = "rax-bench-cli"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "clap",
  "rax-bench-artifacts",
@@ -889,11 +889,11 @@ dependencies = [
 
 [[package]]
 name = "rax-bench-metrics"
-version = "0.4.1"
+version = "0.4.2"
 
 [[package]]
 name = "rax-bench-model"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "serde",
  "strum",
@@ -901,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "rax-bench-packer"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "bytemuck",
  "hnsw_rs",
@@ -913,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "rax-bench-reducer"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "rax-bench-artifacts",
  "rax-bench-model",
@@ -923,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "rax-bench-runner"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "rax-bench-metrics",
  "rax-bench-model",
@@ -931,7 +931,7 @@ dependencies = [
 
 [[package]]
 name = "rax-bench-text-engine"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "bytemuck",
  "rax-bench-model",
@@ -947,7 +947,7 @@ dependencies = [
 
 [[package]]
 name = "rax-broker"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "rax-runtime",
  "serde_json",
@@ -955,7 +955,7 @@ dependencies = [
 
 [[package]]
 name = "rax-cli"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "clap",
  "rax-runtime",
@@ -965,7 +965,7 @@ dependencies = [
 
 [[package]]
 name = "rax-core"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
@@ -979,7 +979,7 @@ dependencies = [
 
 [[package]]
 name = "rax-docstore"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "rax-bench-model",
  "rax-core",
@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "rax-ffi"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "rax-runtime",
  "serde",
@@ -1001,7 +1001,7 @@ dependencies = [
 
 [[package]]
 name = "rax-multimodal"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "fs2",
  "serde",
@@ -1012,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "rax-runtime"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "libc",
  "rax-bench-model",
@@ -1029,7 +1029,7 @@ dependencies = [
 
 [[package]]
 name = "rax-search"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "rax-bench-model",
  "rax-text",
@@ -1039,7 +1039,7 @@ dependencies = [
 
 [[package]]
 name = "rax-structured-memory"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "fs2",
  "serde",
@@ -1049,7 +1049,7 @@ dependencies = [
 
 [[package]]
 name = "rax-text"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "rax-bench-model",
  "rax-core",
@@ -1061,7 +1061,7 @@ dependencies = [
 
 [[package]]
 name = "rax-vector"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "bytemuck",
  "hnsw_rs",
