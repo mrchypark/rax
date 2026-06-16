@@ -78,7 +78,7 @@ The command prints JSON:
 
 ```json
 {
-  "doc_id": "mem-1"
+  "doc_id": "mem-0000000000000001"
 }
 ```
 
