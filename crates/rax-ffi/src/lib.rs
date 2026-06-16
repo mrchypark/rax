@@ -147,8 +147,8 @@ pub unsafe extern "C" fn rax_ingest_vectors(
         let input = required_path(input, "input")?;
         let vectors = read_jsonl::<FfiNewDocumentVector>(&input)?
             .into_iter()
-            .map(|vector| NewDocumentVector::new(vector.doc_id, vector.values))
-            .collect::<Vec<_>>();
+            .map(new_document_vector)
+            .collect::<Result<Vec<_>, _>>()?;
         let mut runtime = open_existing_runtime_store_for_vectors(&store)?;
         let report = runtime
             .writer()
@@ -296,14 +296,20 @@ fn optional_string(value: *const c_char, name: &str) -> Result<Option<String>, F
 }
 
 fn required_path(value: *const c_char, name: &str) -> Result<PathBuf, FfiError> {
-    required_string(value, name).map(PathBuf::from)
+    let path = required_string(value, name)?;
+    if path.trim().is_empty() {
+        return Err(FfiError::invalid_argument(format!(
+            "{name} path cannot be empty"
+        )));
+    }
+    Ok(PathBuf::from(path))
 }
 
 fn optional_path(value: *const c_char, name: &str) -> Result<Option<PathBuf>, FfiError> {
     if value.is_null() {
         Ok(None)
     } else {
-        required_string(value, name).map(PathBuf::from).map(Some)
+        required_path(value, name).map(Some)
     }
 }
 
@@ -422,6 +428,22 @@ fn read_query_vector(path: &Path) -> Result<Vec<f32>, FfiError> {
         ));
     }
     Ok(values)
+}
+
+fn new_document_vector(vector: FfiNewDocumentVector) -> Result<NewDocumentVector, FfiError> {
+    if vector.values.is_empty() {
+        return Err(FfiError::invalid_argument(format!(
+            "vector for doc_id {} must contain at least one value",
+            vector.doc_id
+        )));
+    }
+    if vector.values.iter().any(|value| !value.is_finite()) {
+        return Err(FfiError::invalid_argument(format!(
+            "vector for doc_id {} must contain only finite float values",
+            vector.doc_id
+        )));
+    }
+    Ok(NewDocumentVector::new(vector.doc_id, vector.values))
 }
 
 fn open_existing_runtime_store_for_vectors(store: &Path) -> Result<RuntimeStore, FfiError> {
@@ -658,6 +680,49 @@ mod tests {
         });
         let error = unsafe { CStr::from_ptr(super::rax_last_error()) }.to_string_lossy();
         assert!(error.contains("store is required"));
+
+        let blank_store = CString::new(" \t ").unwrap();
+        assert_eq!(super::RAX_STATUS_INVALID_ARGUMENT, unsafe {
+            super::rax_create(blank_store.as_ptr())
+        });
+        let error = unsafe { CStr::from_ptr(super::rax_last_error()) }.to_string_lossy();
+        assert!(error.contains("store path cannot be empty"));
+    }
+
+    #[test]
+    fn ingest_vectors_rejects_invalid_vector_values() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store_path = tempdir.path().join("raw.rax");
+        let vectors_path = tempdir.path().join("vectors.jsonl");
+        fs::write(&vectors_path, "{\"doc_id\":\"doc-empty\",\"values\":[]}\n").unwrap();
+
+        let store_path = CString::new(store_path.to_string_lossy().as_bytes()).unwrap();
+        let vectors_path = CString::new(vectors_path.to_string_lossy().as_bytes()).unwrap();
+        let mut vectors_json = ptr::null_mut();
+        assert_eq!(super::RAX_STATUS_INVALID_ARGUMENT, unsafe {
+            super::rax_ingest_vectors(
+                store_path.as_ptr(),
+                vectors_path.as_ptr(),
+                &mut vectors_json,
+            )
+        });
+        assert!(vectors_json.is_null());
+        let error = unsafe { CStr::from_ptr(super::rax_last_error()) }.to_string_lossy();
+        assert!(error.contains("vector for doc_id doc-empty must contain at least one value"));
+
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let error = match super::new_document_vector(super::FfiNewDocumentVector {
+                doc_id: "doc-non-finite".to_owned(),
+                values: vec![value],
+            }) {
+                Ok(_) => panic!("non-finite vector value should fail validation"),
+                Err(error) => error,
+            };
+            assert_eq!(super::RAX_STATUS_INVALID_ARGUMENT, error.status);
+            assert!(error.message.contains(
+                "vector for doc_id doc-non-finite must contain only finite float values"
+            ));
+        }
     }
 
     fn fixture_vector(active_index: usize) -> Vec<f32> {
