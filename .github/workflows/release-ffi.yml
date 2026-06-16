@@ -1,6 +1,20 @@
 name: Release FFI artifacts
 
 on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/release-ffi.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/rax-ffi/**"
+      - "crates/rax-runtime/**"
+      - "crates/rax-core/**"
+      - "crates/rax-docstore/**"
+      - "crates/rax-search/**"
+      - "crates/rax-text/**"
+      - "crates/rax-vector/**"
   push:
     tags:
       - "v*"
