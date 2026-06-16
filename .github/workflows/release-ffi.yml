@@ -1,0 +1,145 @@
+name: Release FFI artifacts
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact: linux-x86_64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            dylib: librax_ffi.so
+          - artifact: macos-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+            dylib: librax_ffi.dylib
+          - artifact: macos-x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            dylib: librax_ffi.dylib
+          - artifact: windows-x86_64
+            os: windows-2025
+            target: x86_64-pc-windows-msvc
+            dylib: rax_ffi.dll
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Add Rust target
+        run: rustup target add "${{ matrix.target }}"
+
+      - name: Build rax-ffi
+        run: cargo build --locked --release -p rax-ffi --target "${{ matrix.target }}"
+
+      - name: Package artifacts
+        if: runner.os != 'Windows'
+        shell: sh
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME:-manual}"
+          package="rax-ffi-${version}-${{ matrix.artifact }}"
+          mkdir -p "dist/${package}/include" "dist/${package}/lib"
+
+          cp "crates/rax-ffi/include/rax.h" "dist/${package}/include/rax.h"
+          cp "target/${{ matrix.target }}/release/librax_ffi.a" "dist/${package}/lib/librax_ffi.a"
+          cp "target/${{ matrix.target }}/release/${{ matrix.dylib }}" "dist/${package}/lib/${{ matrix.dylib }}"
+          cat > "dist/${package}/README.txt" <<EOF
+          rax FFI artifacts
+
+          version: ${version}
+          target: ${{ matrix.target }}
+
+          Link with lib/librax_ffi.a for static linking or lib/${{ matrix.dylib }} for dynamic linking.
+          Include include/rax.h from this archive in C, C++, or cgo consumers.
+          EOF
+
+          checksum_file="$(mktemp)"
+          (
+            cd "dist/${package}"
+            find . -type f -print | sort | xargs shasum -a 256 > "${checksum_file}"
+            mv "${checksum_file}" SHA256SUMS
+          )
+          tar -czf "dist/${package}.tar.gz" -C dist "${package}"
+
+      - name: Package Windows artifacts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "manual" }
+          $package = "rax-ffi-$version-${{ matrix.artifact }}"
+          New-Item -ItemType Directory -Force -Path "dist/$package/include", "dist/$package/lib", "dist/$package/bin" | Out-Null
+
+          Copy-Item "crates/rax-ffi/include/rax.h" "dist/$package/include/rax.h"
+          Copy-Item "target/${{ matrix.target }}/release/rax_ffi.dll" "dist/$package/bin/rax_ffi.dll"
+          if (Test-Path "target/${{ matrix.target }}/release/rax_ffi.dll.lib") {
+            Copy-Item "target/${{ matrix.target }}/release/rax_ffi.dll.lib" "dist/$package/lib/rax_ffi.dll.lib"
+          }
+          if (Test-Path "target/${{ matrix.target }}/release/rax_ffi.lib") {
+            Copy-Item "target/${{ matrix.target }}/release/rax_ffi.lib" "dist/$package/lib/rax_ffi.lib"
+          }
+          @"
+          rax FFI artifacts
+
+          version: $version
+          target: ${{ matrix.target }}
+
+          Link with lib/rax_ffi.lib for static linking or bin/rax_ffi.dll plus lib/rax_ffi.dll.lib for dynamic linking.
+          Include include/rax.h from this archive in C, C++, or cgo consumers.
+          "@ | Set-Content "dist/$package/README.txt"
+          Get-ChildItem "dist/$package" -Recurse -File |
+            Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLowerInvariant())  $($_.Path.Replace((Resolve-Path "dist/$package").Path + [System.IO.Path]::DirectorySeparatorChar, ''))" } |
+            Set-Content "dist/$package/SHA256SUMS"
+          Compress-Archive -Path "dist/$package" -DestinationPath "dist/$package.zip"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rax-ffi-${{ matrix.artifact }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: rax-ffi-*
+          merge-multiple: true
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: sh
+        run: |
+          set -eu
+          notes="FFI release artifacts for rax ${GITHUB_REF_NAME}."
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/*.tar.gz dist/*.zip --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz dist/*.zip \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "${notes}"
+          fi

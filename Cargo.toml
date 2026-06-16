@@ -11,6 +11,7 @@ members = [
   "crates/rax-core",
   "crates/rax-docstore",
   "crates/rax-multimodal",
+  "crates/rax-ffi",
   "crates/rax-runtime",
   "crates/rax-search",
   "crates/rax-structured-memory",

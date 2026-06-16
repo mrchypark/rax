@@ -990,6 +990,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rax-ffi"
+version = "0.4.1"
+dependencies = [
+ "libc",
+ "rax-runtime",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "rax-multimodal"
 version = "0.4.1"
 dependencies = [
