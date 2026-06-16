@@ -16,8 +16,21 @@ on:
       - "crates/rax-text/**"
       - "crates/rax-vector/**"
   push:
+    branches:
+      - "feature/**"
     tags:
       - "v*"
+    paths:
+      - ".github/workflows/release-ffi.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/rax-ffi/**"
+      - "crates/rax-runtime/**"
+      - "crates/rax-core/**"
+      - "crates/rax-docstore/**"
+      - "crates/rax-search/**"
+      - "crates/rax-text/**"
+      - "crates/rax-vector/**"
   workflow_dispatch:
 
 permissions:
