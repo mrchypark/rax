@@ -884,7 +884,10 @@ dependencies = [
  "rax-bench-reducer",
  "rax-bench-runner",
  "rax-bench-text-engine",
+ "rax-runtime",
+ "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

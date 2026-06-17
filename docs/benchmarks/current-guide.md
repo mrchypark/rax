@@ -17,6 +17,7 @@ For the latest small smoke report generated while refreshing these docs, see
 | `query` | Query a packed dataset directly and print previewed hits. |
 | `query-batch` | Run a query-set JSONL file and print ranked results. |
 | `profile-vector-query` | Profile the first vector query under a selected vector mode. |
+| `search-bench` | Build a temporary product `.rax` store from a pack and measure runtime search per-query latency/QPS. |
 | `quality-report` | Compare ranked results to qrels and print quality metrics. |
 | `reduce` | Reduce one run directory into summary JSON and Markdown. |
 | `matrix-report` | Render a workload matrix from a release-matrix artifact root. |
@@ -82,6 +83,73 @@ set, artifacts go to `artifacts/latest`.
 
 Set `RAX_BENCH_TEST_MODE=1` for deterministic test measurement plumbing. Do not
 use that mode for performance claims.
+
+## Runtime Search Benchmark
+
+Use `search-bench` when you need rax's product search path as the benchmark
+target. It reads a packed dataset, builds a temporary product `.rax` store from
+the pack's documents and vectors, opens that store through `RuntimeStore`, and
+measures each query in the query set with `RuntimeStore::search`.
+
+```bash
+cargo run --release -p rax-bench-cli -- search-bench \
+  --dataset /tmp/rax-pack \
+  --query-set /tmp/rax-pack/queries/core.jsonl \
+  --sample-count 30 \
+  --concurrency 1 \
+  --vector-mode auto \
+  --scale-label small-clean \
+  --output /tmp/rax-search-bench.json \
+  --artifact-dir /tmp/rax-search-bench-artifacts
+```
+
+The JSON summary keeps store preparation separate from timed search work:
+`store_build_ms` is setup-only, while `total_elapsed_ms` and `qps_end_to_end`
+cover request building, store opens, cold/warm sample passes, and other harness
+overhead after setup. `request_build_ms` records query vector/request
+construction outside `RuntimeStore::search`. `total_search_only_ms` and
+`qps_search_only` use only the sum of timed `RuntimeStore::search` calls.
+`qps` is retained as an alias for `qps_end_to_end`.
+
+The summary includes `concurrency` and `scale_label`; if `--scale-label` is not
+provided, `scale_label` defaults to the dataset id. It also includes
+`rss_kb_before`, `rss_kb_after`, and `rss_kb_delta`. RSS readings are std-only
+best effort: Linux reads `/proc/self/status`, and other Unix-like platforms use
+`ps`.
+
+For `cold_query`, each measured query opens its own fresh read-only
+`RuntimeStore` before timing `RuntimeStore::search`, so lazy lane
+materialization is not shared across cold samples. For `warm_steady`, each
+sample opens one read-only store, runs an unmeasured warmup pass over all
+prebuilt requests, then measures the same requests on the warmed store. The
+summary reports overall p50/p95/p99 query latency for compatibility, plus
+separate cold, warm, and warm-concurrent p50/p95/p99 latency fields.
+
+`--concurrency` defaults to `1` and rejects `0`. With `--concurrency 1`,
+`search-bench` records only the existing `cold_query` and `warm_steady` phases.
+With `--concurrency N` for `N > 1`, it additionally records a measured
+`warm_concurrent` phase: each worker thread opens its own read-only
+`RuntimeStore`, warms it with all prepared requests outside measurement, then
+runs `sample_count` measured iterations over every prepared request. Samples in
+that phase include `worker_index`; cold and warm samples serialize
+`worker_index` as `null`. `qps_warm_concurrent` is the wall-clock QPS for that
+concurrent phase only; `qps_end_to_end` still includes serial cold and warm
+passes.
+
+If `--artifact-dir` is provided, `search-bench` writes:
+
+| File | Contents |
+| --- | --- |
+| `summary.json` | The same summary printed to stdout and written by `--output`. |
+| `samples.ndjson` | One per-query latency sample per line, including `phase`. |
+| `ranked-results.json` | Warm-pass sample 0 ranked results as `{query_id, hits:[{doc_id}]}`. |
+| `quality.json` | Quality reducer output, when the dataset manifest declares qrels for the query set. |
+
+Runtime search currently supports only `--vector-mode auto`; use the packed
+harness commands for vector-mode sidecar comparisons. The runtime request type
+does not yet carry metadata filters, so `search-bench` reports
+`supports_metadata_filters: false` and `filter_query_count`, and rejects query
+sets containing any non-empty `filter_spec`.
 
 ## Vector Modes
 
