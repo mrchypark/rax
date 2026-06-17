@@ -747,6 +747,10 @@ impl StoreDocSegment {
             .collect()
     }
 
+    fn document_count(&self) -> usize {
+        self.row_count
+    }
+
     fn build_doc_id_map(&self) -> Result<DocIdMap, DocstoreError> {
         if let Some(doc_id_map) = self.doc_id_map.as_ref() {
             return Ok(doc_id_map.clone());
@@ -980,6 +984,19 @@ impl Docstore {
                 load_document_ids_from_documents(documents_path)
             }
             DocstoreSource::Store { segment } => segment.load_document_ids(),
+        }
+    }
+
+    pub fn document_count(&self) -> Result<usize, DocstoreError> {
+        match &self.source {
+            DocstoreSource::Empty => Ok(0),
+            DocstoreSource::DatasetPack { offset_index, .. } => {
+                if let Some(index) = offset_index {
+                    return Ok(index.len());
+                }
+                Ok(self.load_document_ids()?.len())
+            }
+            DocstoreSource::Store { segment } => Ok(segment.document_count()),
         }
     }
 
@@ -2382,6 +2399,35 @@ mod tests {
             reopened.load_document_ids().unwrap(),
             vec!["doc-900".to_owned(), "doc-010".to_owned()]
         );
+    }
+
+    #[test]
+    fn document_count_uses_store_segment_row_count() {
+        let temp_dir = tempdir().unwrap();
+        let docs_path = temp_dir.path().join("docs.ndjson");
+        let offsets_path = temp_dir.path().join("document-offsets.jsonl");
+        let store_path = temp_dir.path().join("store.rax");
+        fs::write(
+            &docs_path,
+            concat!(
+                "{\"doc_id\":\"doc-900\",\"text\":\"first\",\"metadata\":{\"kind\":\"note\"}}\n",
+                "{\"doc_id\":\"doc-010\",\"text\":\"second\",\"metadata\":{\"kind\":\"task\"}}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(&offsets_path, "").unwrap();
+        create_empty_store(&store_path).unwrap();
+
+        let manifest = test_manifest(true);
+        let dataset_docstore = Docstore::open_dataset_pack(temp_dir.path(), &manifest).unwrap();
+        dataset_docstore.publish_to_store(&store_path).unwrap();
+        fs::remove_file(&docs_path).unwrap();
+        fs::remove_file(&offsets_path).unwrap();
+
+        let reopened = Docstore::open(temp_dir.path(), &manifest).unwrap();
+
+        assert!(matches!(&reopened.source, DocstoreSource::Store { .. }));
+        assert_eq!(reopened.document_count().unwrap(), 2);
     }
 
     #[test]
