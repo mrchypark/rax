@@ -3,15 +3,21 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Component, Path, PathBuf};
 
-use rax_bench_model::{tokenize, DatasetPackManifest};
+use rax_bench_model::{tokenize as simple_tokenize, DatasetPackManifest};
 use rax_core::{PendingSegmentDescriptor, PendingSegmentWrite, SegmentDescriptor, SegmentKind};
 use serde::Deserialize;
 use serde_json::Value;
 
 const TEXT_SEGMENT_MAGIC: &[u8; 4] = b"RXTG";
-const TEXT_SEGMENT_MAJOR: u16 = 1;
+const TEXT_SEGMENT_MAJOR: u16 = 2;
 const TEXT_SEGMENT_MINOR: u16 = 0;
 const TEXT_SEGMENT_HEADER_LENGTH: usize = 16;
+const BM25_K1: f64 = 1.2;
+const BM25_B: f64 = 0.75;
+const CURRENT_ANALYZER_NAME: &str = "rax-simple-alnum-lower";
+const LEGACY_ANALYZER_NAME: &str = "rax-simple-alnum-lower-legacy";
+const EXPERIMENTAL_ALYZE_ANALYZER_NAME: &str = "rax-alyze-uax29-ascii-fold";
+const CURRENT_ANALYZER_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextLane {
@@ -19,7 +25,76 @@ pub struct TextLane {
     first_text_top_k: usize,
     first_hybrid_query: Option<String>,
     first_hybrid_top_k: usize,
-    inverted: HashMap<String, Vec<String>>,
+    index: TextIndex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TextIndex {
+    analyzer_profile: TextAnalyzerProfile,
+    inverted: HashMap<String, Vec<TextPosting>>,
+    doc_lengths: HashMap<String, u32>,
+    doc_count: usize,
+    total_doc_length: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TextPosting {
+    doc_id: String,
+    term_frequency: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TextAnalyzerProfile {
+    name: String,
+    version: u32,
+}
+
+impl TextAnalyzerProfile {
+    fn current() -> Self {
+        Self {
+            name: CURRENT_ANALYZER_NAME.to_owned(),
+            version: CURRENT_ANALYZER_VERSION,
+        }
+    }
+
+    fn legacy_v1() -> Self {
+        Self {
+            name: LEGACY_ANALYZER_NAME.to_owned(),
+            version: CURRENT_ANALYZER_VERSION,
+        }
+    }
+
+    fn experimental_alyze_v1() -> Self {
+        Self {
+            name: EXPERIMENTAL_ALYZE_ANALYZER_NAME.to_owned(),
+            version: CURRENT_ANALYZER_VERSION,
+        }
+    }
+
+    fn is_supported(&self) -> bool {
+        self.version == CURRENT_ANALYZER_VERSION
+            && matches!(
+                self.name.as_str(),
+                CURRENT_ANALYZER_NAME | LEGACY_ANALYZER_NAME | EXPERIMENTAL_ALYZE_ANALYZER_NAME
+            )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextSearchDiagnostic {
+    pub doc_id: String,
+    pub score: f64,
+    pub doc_length: u32,
+    pub terms: Vec<TextSearchTermDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextSearchTermDiagnostic {
+    pub token: String,
+    pub term_frequency: u32,
+    pub document_frequency: usize,
+    pub idf: f64,
+    pub score: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,7 +302,7 @@ impl TextLane {
         let (first_text_query, first_text_top_k) =
             load_first_text_query(&query_inputs.query_paths)?;
         let first_hybrid_query = load_first_hybrid_text_query(&query_inputs.query_paths)?;
-        let inverted = load_text_postings(&metadata)?;
+        let index = load_text_index(&metadata)?;
 
         Ok(Self {
             first_text_query,
@@ -236,7 +311,7 @@ impl TextLane {
                 .as_ref()
                 .map(|query| query.query_text.clone()),
             first_hybrid_top_k: first_hybrid_query.map(|query| query.top_k).unwrap_or(0),
-            inverted,
+            index,
         })
     }
 
@@ -267,22 +342,128 @@ impl TextLane {
     }
 
     pub fn search_with_limit(&self, query: &str, limit: usize) -> Vec<String> {
-        let mut scores: HashMap<String, u32> = HashMap::new();
-        for token in tokenize(query) {
-            if let Some(doc_ids) = self.inverted.get(&token) {
-                for doc_id in doc_ids {
-                    *scores.entry(doc_id.clone()).or_insert(0) += 1;
+        self.search_with_diagnostics(query, limit)
+            .into_iter()
+            .map(|hit| hit.doc_id)
+            .collect()
+    }
+
+    pub fn search_with_diagnostics(&self, query: &str, limit: usize) -> Vec<TextSearchDiagnostic> {
+        if limit == 0 || self.index.doc_count == 0 {
+            return Vec::new();
+        }
+
+        let average_doc_length = self.index.average_doc_length();
+        let mut scores: HashMap<String, TextSearchAccumulator> = HashMap::new();
+        for token in analyze_text(&self.index.analyzer_profile, query) {
+            if let Some(postings) = self.index.inverted.get(&token) {
+                let document_frequency = postings.len();
+                let idf = bm25_idf(self.index.doc_count, document_frequency);
+                for posting in postings {
+                    let doc_length = self.index.doc_length(&posting.doc_id);
+                    let term_score = bm25_term_score(
+                        posting.term_frequency,
+                        doc_length,
+                        average_doc_length,
+                        idf,
+                    );
+                    let accumulator = scores.entry(posting.doc_id.clone()).or_insert_with(|| {
+                        TextSearchAccumulator {
+                            score: 0.0,
+                            doc_length,
+                            terms: Vec::new(),
+                        }
+                    });
+                    accumulator.score += term_score;
+                    accumulator.terms.push(TextSearchTermDiagnostic {
+                        token: token.clone(),
+                        term_frequency: posting.term_frequency,
+                        document_frequency,
+                        idf,
+                        score: term_score,
+                    });
                 }
             }
         }
 
-        let mut hits: Vec<(String, u32)> = scores.into_iter().collect();
-        hits.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-        hits.into_iter()
-            .take(limit)
-            .map(|(doc_id, _)| doc_id)
-            .collect()
+        let mut hits = scores
+            .into_iter()
+            .map(|(doc_id, accumulator)| TextSearchDiagnostic {
+                doc_id,
+                score: accumulator.score,
+                doc_length: accumulator.doc_length,
+                terms: accumulator.terms,
+            })
+            .collect::<Vec<_>>();
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.doc_id.cmp(&right.doc_id))
+        });
+        hits.into_iter().take(limit).collect()
     }
+}
+
+#[derive(Debug, Clone)]
+struct TextSearchAccumulator {
+    score: f64,
+    doc_length: u32,
+    terms: Vec<TextSearchTermDiagnostic>,
+}
+
+impl TextIndex {
+    fn average_doc_length(&self) -> f64 {
+        if self.doc_count == 0 {
+            1.0
+        } else {
+            (self.total_doc_length as f64 / self.doc_count as f64).max(1.0)
+        }
+    }
+
+    fn doc_length(&self, doc_id: &str) -> u32 {
+        self.doc_lengths.get(doc_id).copied().unwrap_or(1).max(1)
+    }
+}
+
+fn bm25_idf(doc_count: usize, document_frequency: usize) -> f64 {
+    (((doc_count as f64 - document_frequency as f64 + 0.5) / (document_frequency as f64 + 0.5))
+        + 1.0)
+        .ln()
+}
+
+fn bm25_term_score(term_frequency: u32, doc_length: u32, average_doc_length: f64, idf: f64) -> f64 {
+    let term_frequency = term_frequency as f64;
+    let length_ratio = doc_length as f64 / average_doc_length.max(1.0);
+    let denominator = term_frequency + BM25_K1 * (1.0 - BM25_B + BM25_B * length_ratio);
+    idf * (term_frequency * (BM25_K1 + 1.0)) / denominator
+}
+
+fn analyze_text(profile: &TextAnalyzerProfile, text: &str) -> Vec<String> {
+    match profile.name.as_str() {
+        EXPERIMENTAL_ALYZE_ANALYZER_NAME => analyze_text_with_alyze(text),
+        _ => simple_tokenize(text),
+    }
+}
+
+fn analyze_text_with_alyze(text: &str) -> Vec<String> {
+    use alyze::analyze::{AnalysisOptions, Analyzer, ReusableBuffer, TokenizerOptions};
+
+    let analyzer = Analyzer::new(AnalysisOptions {
+        tokenizer: TokenizerOptions::UAX29Word(Default::default()),
+        maximum_token_length: None,
+        case_sensitive: false,
+        stopword_removal: None,
+        stemming: None,
+        ascii_folding: true,
+    });
+    let mut buffer = ReusableBuffer::new();
+    let mut tokens = Vec::new();
+    analyzer.analyze(text, &mut buffer, |token| {
+        tokens.push(token.text.to_owned());
+        true
+    });
+    tokens
 }
 
 pub fn publish_compatibility_text_segment(
@@ -379,6 +560,17 @@ pub fn prepare_text_segment_from_documents(
     )
 }
 
+pub fn prepare_experimental_alyze_text_segment_from_documents(
+    documents: &[(String, String)],
+) -> Result<PendingSegmentWrite, String> {
+    prepare_text_segment_from_document_refs_with_analyzer(
+        documents
+            .iter()
+            .map(|(doc_id, text)| (doc_id.as_str(), text.as_str())),
+        TextAnalyzerProfile::experimental_alyze_v1(),
+    )
+}
+
 fn prepare_text_segment_from_document_values(
     documents: &[(String, Value)],
 ) -> Result<PendingSegmentWrite, String> {
@@ -402,7 +594,18 @@ pub fn prepare_text_segment_from_document_refs<'a, I>(
 where
     I: IntoIterator<Item = (&'a str, &'a str)>,
 {
-    let (segment, doc_count) = BinaryTextSegment::from_document_refs(documents);
+    prepare_text_segment_from_document_refs_with_analyzer(documents, TextAnalyzerProfile::current())
+}
+
+fn prepare_text_segment_from_document_refs_with_analyzer<'a, I>(
+    documents: I,
+    analyzer_profile: TextAnalyzerProfile,
+) -> Result<PendingSegmentWrite, String>
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    let (segment, doc_count) =
+        BinaryTextSegment::from_document_refs_with_analyzer(documents, analyzer_profile);
     let object_bytes = segment.encode()?;
     Ok(PendingSegmentWrite {
         descriptor: PendingSegmentDescriptor {
@@ -818,73 +1021,135 @@ fn load_documents_for_text_builder(path: &Path) -> Result<Vec<(String, String)>,
         .collect()
 }
 
-fn load_text_postings(metadata: &TextLaneMetadata) -> Result<HashMap<String, Vec<String>>, String> {
+fn load_text_index(metadata: &TextLaneMetadata) -> Result<TextIndex, String> {
     match &metadata.source {
-        TextLaneSource::Compatibility { postings_path } => {
-            load_text_postings_from_path(postings_path)
-        }
+        TextLaneSource::Compatibility { postings_path } => load_text_index_from_path(postings_path),
         TextLaneSource::Store {
             store_path,
             descriptor,
         } => {
             let bytes = rax_core::map_segment_object(store_path, descriptor)
                 .map_err(|error| error.to_string())?;
-            BinaryTextSegment::decode(&bytes).map(|segment| segment.into_inverted())
+            BinaryTextSegment::decode(&bytes).and_then(BinaryTextSegment::try_into_index)
         }
     }
 }
 
-fn load_text_postings_from_path(path: &Path) -> Result<HashMap<String, Vec<String>>, String> {
+fn load_text_index_from_path(path: &Path) -> Result<TextIndex, String> {
     let reader = BufReader::new(open_read_no_symlinks(path)?);
-    let mut postings = HashMap::new();
+    let mut inverted = HashMap::new();
+    let mut doc_lengths = HashMap::<String, u32>::new();
     for line in reader.lines() {
         let line = line.map_err(|error| error.to_string())?;
         let posting: TextPostingRecord =
             serde_json::from_str(&line).map_err(|error| error.to_string())?;
-        postings.insert(posting.token, posting.doc_ids);
+        let postings = posting
+            .doc_ids
+            .into_iter()
+            .map(|doc_id| {
+                *doc_lengths.entry(doc_id.clone()).or_insert(0) += 1;
+                TextPosting {
+                    doc_id,
+                    term_frequency: 1,
+                }
+            })
+            .collect();
+        inverted.insert(posting.token, postings);
     }
-    Ok(postings)
+    Ok(index_from_parts(
+        TextAnalyzerProfile::legacy_v1(),
+        inverted,
+        doc_lengths,
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BinaryTextSegment {
-    postings: Vec<TextPostingRecord>,
+    analyzer_profile: TextAnalyzerProfile,
+    postings: Vec<BinaryTextPostingRecord>,
+    doc_lengths: Vec<DocumentLengthRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BinaryTextPostingRecord {
+    token: String,
+    postings: Vec<TextPosting>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DocumentLengthRecord {
+    doc_id: String,
+    length: u32,
 }
 
 impl BinaryTextSegment {
     fn from_documents(documents: &[(String, String)]) -> Self {
-        Self::from_document_refs(
+        Self::from_documents_with_analyzer(documents, TextAnalyzerProfile::current())
+    }
+
+    fn from_documents_with_analyzer(
+        documents: &[(String, String)],
+        analyzer_profile: TextAnalyzerProfile,
+    ) -> Self {
+        Self::from_document_refs_with_analyzer(
             documents
                 .iter()
                 .map(|(doc_id, text)| (doc_id.as_str(), text.as_str())),
+            analyzer_profile,
         )
         .0
     }
 
-    fn from_document_refs<'a, I>(documents: I) -> (Self, usize)
+    fn from_document_refs_with_analyzer<'a, I>(
+        documents: I,
+        analyzer_profile: TextAnalyzerProfile,
+    ) -> (Self, usize)
     where
         I: IntoIterator<Item = (&'a str, &'a str)>,
     {
-        let mut inverted: HashMap<String, Vec<String>> = HashMap::new();
+        let mut inverted: HashMap<String, HashMap<String, u32>> = HashMap::new();
+        let mut doc_lengths = HashMap::<String, u32>::new();
         let mut doc_count = 0;
         for (doc_id, text) in documents {
             doc_count += 1;
-            let mut seen_tokens = std::collections::HashSet::new();
-            for token in tokenize(text) {
-                if seen_tokens.insert(token.clone()) {
-                    inverted.entry(token).or_default().push(doc_id.to_owned());
-                }
+            doc_lengths.entry(doc_id.to_owned()).or_insert(0);
+            for token in analyze_text(&analyzer_profile, text) {
+                *doc_lengths.entry(doc_id.to_owned()).or_insert(0) += 1;
+                *inverted
+                    .entry(token)
+                    .or_default()
+                    .entry(doc_id.to_owned())
+                    .or_insert(0) += 1;
             }
         }
         let mut postings = inverted
             .into_iter()
-            .map(|(token, mut doc_ids)| {
-                doc_ids.sort();
-                TextPostingRecord { token, doc_ids }
+            .map(|(token, by_doc)| {
+                let mut postings = by_doc
+                    .into_iter()
+                    .map(|(doc_id, term_frequency)| TextPosting {
+                        doc_id,
+                        term_frequency,
+                    })
+                    .collect::<Vec<_>>();
+                postings.sort_by(|left, right| left.doc_id.cmp(&right.doc_id));
+                BinaryTextPostingRecord { token, postings }
             })
             .collect::<Vec<_>>();
         postings.sort_by(|left, right| left.token.cmp(&right.token));
-        (Self { postings }, doc_count)
+        let mut doc_lengths = doc_lengths
+            .into_iter()
+            .map(|(doc_id, length)| DocumentLengthRecord { doc_id, length })
+            .collect::<Vec<_>>();
+        doc_lengths.sort_by(|left, right| left.doc_id.cmp(&right.doc_id));
+        (
+            Self {
+                analyzer_profile,
+                postings,
+                doc_lengths,
+            },
+            doc_count,
+        )
     }
 
     fn encode(&self) -> Result<Vec<u8>, String> {
@@ -893,20 +1158,35 @@ impl BinaryTextSegment {
                 return Err("text segment tokens must be sorted and unique".to_owned());
             }
         }
+        for pair in self.doc_lengths.windows(2) {
+            if pair[0].doc_id >= pair[1].doc_id {
+                return Err("text segment document lengths must be sorted and unique".to_owned());
+            }
+        }
 
         let mut bytes = Vec::new();
         bytes.extend_from_slice(TEXT_SEGMENT_MAGIC);
         bytes.extend_from_slice(&TEXT_SEGMENT_MAJOR.to_le_bytes());
         bytes.extend_from_slice(&TEXT_SEGMENT_MINOR.to_le_bytes());
         bytes.extend_from_slice(&(self.postings.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&(self.analyzer_profile.name.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&self.analyzer_profile.version.to_le_bytes());
+        bytes.extend_from_slice(self.analyzer_profile.name.as_bytes());
         for posting in &self.postings {
             bytes.extend_from_slice(&(posting.token.len() as u32).to_le_bytes());
-            bytes.extend_from_slice(&(posting.doc_ids.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&(posting.postings.len() as u32).to_le_bytes());
             bytes.extend_from_slice(posting.token.as_bytes());
-            for doc_id in &posting.doc_ids {
-                bytes.extend_from_slice(&(doc_id.len() as u32).to_le_bytes());
-                bytes.extend_from_slice(doc_id.as_bytes());
+            for doc_posting in &posting.postings {
+                bytes.extend_from_slice(&(doc_posting.doc_id.len() as u32).to_le_bytes());
+                bytes.extend_from_slice(&doc_posting.term_frequency.to_le_bytes());
+                bytes.extend_from_slice(doc_posting.doc_id.as_bytes());
             }
+        }
+        bytes.extend_from_slice(&(self.doc_lengths.len() as u64).to_le_bytes());
+        for record in &self.doc_lengths {
+            bytes.extend_from_slice(&(record.doc_id.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&record.length.to_le_bytes());
+            bytes.extend_from_slice(record.doc_id.as_bytes());
         }
         Ok(bytes)
     }
@@ -920,7 +1200,9 @@ impl BinaryTextSegment {
         if &bytes[..4] != TEXT_SEGMENT_MAGIC {
             return Err("text segment magic mismatch".to_owned());
         }
-        if read_u16(bytes, 4) != TEXT_SEGMENT_MAJOR || read_u16(bytes, 6) != TEXT_SEGMENT_MINOR {
+        let major = read_u16(bytes, 4);
+        let minor = read_u16(bytes, 6);
+        if !matches!(major, 1 | TEXT_SEGMENT_MAJOR) || minor != TEXT_SEGMENT_MINOR {
             return Err("unsupported text segment version".to_owned());
         }
 
@@ -931,19 +1213,86 @@ impl BinaryTextSegment {
             return Err("text segment record_count exceeds possible records in slice".to_owned());
         }
         let mut postings = Vec::with_capacity(record_count);
-        for _ in 0..record_count {
-            let token_length = read_u32_at(bytes, &mut cursor)? as usize;
-            let doc_count = read_u32_at(bytes, &mut cursor)? as usize;
-            let token = read_string_at(bytes, &mut cursor, token_length)?;
-            if doc_count > bytes[cursor..].len() / 4 {
-                return Err("text segment doc_count exceeds possible records in slice".to_owned());
+        let mut doc_lengths = HashMap::<String, u32>::new();
+        let analyzer_profile;
+        match major {
+            1 => {
+                analyzer_profile = TextAnalyzerProfile::legacy_v1();
+                for _ in 0..record_count {
+                    let token_length = read_u32_at(bytes, &mut cursor)? as usize;
+                    let doc_count = read_u32_at(bytes, &mut cursor)? as usize;
+                    let token = read_string_at(bytes, &mut cursor, token_length)?;
+                    if doc_count > bytes[cursor..].len() / 4 {
+                        return Err(
+                            "text segment doc_count exceeds possible records in slice".to_owned()
+                        );
+                    }
+                    let mut token_postings = Vec::with_capacity(doc_count);
+                    for _ in 0..doc_count {
+                        let doc_id_length = read_u32_at(bytes, &mut cursor)? as usize;
+                        let doc_id = read_string_at(bytes, &mut cursor, doc_id_length)?;
+                        *doc_lengths.entry(doc_id.clone()).or_insert(0) += 1;
+                        token_postings.push(TextPosting {
+                            doc_id,
+                            term_frequency: 1,
+                        });
+                    }
+                    postings.push(BinaryTextPostingRecord {
+                        token,
+                        postings: token_postings,
+                    });
+                }
             }
-            let mut doc_ids = Vec::with_capacity(doc_count);
-            for _ in 0..doc_count {
-                let doc_id_length = read_u32_at(bytes, &mut cursor)? as usize;
-                doc_ids.push(read_string_at(bytes, &mut cursor, doc_id_length)?);
+            TEXT_SEGMENT_MAJOR => {
+                let analyzer_name_length = read_u32_at(bytes, &mut cursor)? as usize;
+                let analyzer_version = read_u32_at(bytes, &mut cursor)?;
+                let analyzer_name = read_string_at(bytes, &mut cursor, analyzer_name_length)?;
+                analyzer_profile = TextAnalyzerProfile {
+                    name: analyzer_name,
+                    version: analyzer_version,
+                };
+                for _ in 0..record_count {
+                    let token_length = read_u32_at(bytes, &mut cursor)? as usize;
+                    let doc_count = read_u32_at(bytes, &mut cursor)? as usize;
+                    let token = read_string_at(bytes, &mut cursor, token_length)?;
+                    if doc_count > bytes[cursor..].len() / 8 {
+                        return Err(
+                            "text segment doc_count exceeds possible records in slice".to_owned()
+                        );
+                    }
+                    let mut token_postings = Vec::with_capacity(doc_count);
+                    for _ in 0..doc_count {
+                        let doc_id_length = read_u32_at(bytes, &mut cursor)? as usize;
+                        let term_frequency = read_u32_at(bytes, &mut cursor)?;
+                        let doc_id = read_string_at(bytes, &mut cursor, doc_id_length)?;
+                        token_postings.push(TextPosting {
+                            doc_id,
+                            term_frequency,
+                        });
+                    }
+                    postings.push(BinaryTextPostingRecord {
+                        token,
+                        postings: token_postings,
+                    });
+                }
+
+                let length_count =
+                    usize::try_from(read_u64_at(bytes, &mut cursor)?).map_err(|_| {
+                        "text segment length_count exceeds addressable memory".to_owned()
+                    })?;
+                if length_count > bytes[cursor..].len() / 8 {
+                    return Err(
+                        "text segment length_count exceeds possible records in slice".to_owned(),
+                    );
+                }
+                for _ in 0..length_count {
+                    let doc_id_length = read_u32_at(bytes, &mut cursor)? as usize;
+                    let length = read_u32_at(bytes, &mut cursor)?;
+                    let doc_id = read_string_at(bytes, &mut cursor, doc_id_length)?;
+                    doc_lengths.insert(doc_id, length);
+                }
             }
-            postings.push(TextPostingRecord { token, doc_ids });
+            _ => unreachable!(),
         }
         if cursor != bytes.len() {
             return Err("text segment trailing bytes mismatch".to_owned());
@@ -954,14 +1303,55 @@ impl BinaryTextSegment {
             }
         }
 
-        Ok(Self { postings })
+        let mut doc_lengths = doc_lengths
+            .into_iter()
+            .map(|(doc_id, length)| DocumentLengthRecord { doc_id, length })
+            .collect::<Vec<_>>();
+        doc_lengths.sort_by(|left, right| left.doc_id.cmp(&right.doc_id));
+        Ok(Self {
+            analyzer_profile,
+            postings,
+            doc_lengths,
+        })
     }
 
-    fn into_inverted(self) -> HashMap<String, Vec<String>> {
-        self.postings
+    fn try_into_index(self) -> Result<TextIndex, String> {
+        if !self.analyzer_profile.is_supported() {
+            return Err(format!(
+                "unsupported text analyzer profile {}@{}",
+                self.analyzer_profile.name, self.analyzer_profile.version
+            ));
+        }
+        let inverted = self
+            .postings
             .into_iter()
-            .map(|posting| (posting.token, posting.doc_ids))
-            .collect()
+            .map(|posting| (posting.token, posting.postings))
+            .collect();
+        let doc_lengths = self
+            .doc_lengths
+            .into_iter()
+            .map(|record| (record.doc_id, record.length))
+            .collect();
+        Ok(index_from_parts(
+            self.analyzer_profile,
+            inverted,
+            doc_lengths,
+        ))
+    }
+}
+
+fn index_from_parts(
+    analyzer_profile: TextAnalyzerProfile,
+    inverted: HashMap<String, Vec<TextPosting>>,
+    doc_lengths: HashMap<String, u32>,
+) -> TextIndex {
+    let total_doc_length = doc_lengths.values().map(|length| u64::from(*length)).sum();
+    TextIndex {
+        analyzer_profile,
+        inverted,
+        doc_count: doc_lengths.len(),
+        total_doc_length,
+        doc_lengths,
     }
 }
 
@@ -981,6 +1371,18 @@ fn read_u32_at(bytes: &[u8], cursor: &mut usize) -> Result<u32, String> {
         return Err("text segment truncated while reading u32".to_owned());
     }
     let value = u32::from_le_bytes(bytes[*cursor..end].try_into().expect("u32 slice"));
+    *cursor = end;
+    Ok(value)
+}
+
+fn read_u64_at(bytes: &[u8], cursor: &mut usize) -> Result<u64, String> {
+    let end = cursor
+        .checked_add(8)
+        .ok_or_else(|| "text segment cursor overflow".to_owned())?;
+    if end > bytes.len() {
+        return Err("text segment truncated while reading u64".to_owned());
+    }
+    let value = u64::from_le_bytes(bytes[*cursor..end].try_into().expect("u64 slice"));
     *cursor = end;
     Ok(value)
 }
@@ -1043,8 +1445,8 @@ mod tests {
 
     use crate::{
         prepare_compatibility_text_segment, publish_compatibility_text_segment, BinaryTextSegment,
-        TextBatchQuery, TextLane, TextLaneMetadata, TextLaneSource, TextQueryInputs,
-        TEXT_SEGMENT_MAGIC,
+        TextAnalyzerProfile, TextBatchQuery, TextLane, TextLaneMetadata, TextLaneSource,
+        TextQueryInputs, TEXT_SEGMENT_MAGIC,
     };
 
     #[test]
@@ -1059,6 +1461,445 @@ mod tests {
             BinaryTextSegment::decode(&bytes).expect_err("record count should exceed payload");
 
         assert!(error.contains("record_count"));
+    }
+
+    #[test]
+    fn text_segment_v2_roundtrips_term_frequency_and_document_lengths() {
+        let segment = BinaryTextSegment::from_documents(&[
+            ("doc-short".to_owned(), "alpha".to_owned()),
+            ("doc-repeated".to_owned(), "alpha alpha alpha".to_owned()),
+        ]);
+
+        let bytes = segment.encode().unwrap();
+        assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 2);
+
+        let decoded = BinaryTextSegment::decode(&bytes).unwrap();
+        assert_eq!(decoded.analyzer_profile, TextAnalyzerProfile::current());
+        let alpha = decoded
+            .postings
+            .iter()
+            .find(|posting| posting.token == "alpha")
+            .unwrap();
+
+        assert_eq!(
+            alpha
+                .postings
+                .iter()
+                .map(|posting| (posting.doc_id.as_str(), posting.term_frequency))
+                .collect::<Vec<_>>(),
+            vec![("doc-repeated", 3), ("doc-short", 1)]
+        );
+        assert_eq!(
+            decoded
+                .doc_lengths
+                .iter()
+                .map(|record| (record.doc_id.as_str(), record.length))
+                .collect::<Vec<_>>(),
+            vec![("doc-repeated", 3), ("doc-short", 1)]
+        );
+    }
+
+    #[test]
+    fn text_segment_rejects_unsupported_analyzer_profile_before_indexing() {
+        let mut segment =
+            BinaryTextSegment::from_documents(&[("doc-1".to_owned(), "alpha".to_owned())]);
+        segment.analyzer_profile.version += 1;
+
+        let error = segment
+            .try_into_index()
+            .expect_err("unsupported analyzer profile should be rejected");
+
+        assert!(error.contains("unsupported text analyzer profile"));
+    }
+
+    #[test]
+    fn experimental_alyze_segment_records_profile_and_ascii_folds_tokens() {
+        let segment = BinaryTextSegment::from_documents_with_analyzer(
+            &[("doc-1".to_owned(), "Café".to_owned())],
+            TextAnalyzerProfile::experimental_alyze_v1(),
+        );
+
+        let decoded = BinaryTextSegment::decode(&segment.encode().unwrap()).unwrap();
+
+        assert_eq!(
+            decoded.analyzer_profile,
+            TextAnalyzerProfile::experimental_alyze_v1()
+        );
+        assert!(decoded
+            .postings
+            .iter()
+            .any(|posting| posting.token == "cafe"));
+        decoded.try_into_index().unwrap();
+    }
+
+    #[test]
+    #[ignore = "microbenchmark; run with --release --ignored --nocapture"]
+    fn experimental_alyze_profile_microbench() {
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+
+        let documents = (0..2_000)
+            .map(|index| {
+                (
+                    format!("doc-{index:04}"),
+                    format!(
+                        "Rust benchmark guide {index} Café Straße hybrid-search vector_index BM25 alpha alpha {}",
+                        index % 17
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let queries = [
+            "rust benchmark cafe",
+            "straße hybrid search",
+            "vector index bm25 alpha",
+        ];
+
+        fn elapsed_per(iterations: u32, mut run: impl FnMut() -> usize) -> (Duration, usize) {
+            let start = Instant::now();
+            let mut sink = 0usize;
+            for _ in 0..iterations {
+                sink = sink.wrapping_add(black_box(run()));
+            }
+            (start.elapsed() / iterations, sink)
+        }
+
+        let build_iterations = 100;
+        let search_iterations = 10_000;
+
+        let (simple_build, simple_sink) = elapsed_per(build_iterations, || {
+            BinaryTextSegment::from_documents(black_box(&documents))
+                .encode()
+                .unwrap()
+                .len()
+        });
+        let (alyze_build, alyze_sink) = elapsed_per(build_iterations, || {
+            BinaryTextSegment::from_documents_with_analyzer(
+                black_box(&documents),
+                TextAnalyzerProfile::experimental_alyze_v1(),
+            )
+            .encode()
+            .unwrap()
+            .len()
+        });
+
+        let simple_lane = TextLane {
+            first_text_query: String::new(),
+            first_text_top_k: 0,
+            first_hybrid_query: None,
+            first_hybrid_top_k: 0,
+            index: BinaryTextSegment::from_documents(&documents)
+                .try_into_index()
+                .unwrap(),
+        };
+        let alyze_lane = TextLane {
+            first_text_query: String::new(),
+            first_text_top_k: 0,
+            first_hybrid_query: None,
+            first_hybrid_top_k: 0,
+            index: BinaryTextSegment::from_documents_with_analyzer(
+                &documents,
+                TextAnalyzerProfile::experimental_alyze_v1(),
+            )
+            .try_into_index()
+            .unwrap(),
+        };
+
+        let (simple_search, simple_search_sink) = elapsed_per(search_iterations, || {
+            queries
+                .iter()
+                .map(|query| simple_lane.search_with_limit(black_box(query), 10).len())
+                .sum()
+        });
+        let (alyze_search, alyze_search_sink) = elapsed_per(search_iterations, || {
+            queries
+                .iter()
+                .map(|query| alyze_lane.search_with_limit(black_box(query), 10).len())
+                .sum()
+        });
+
+        eprintln!(
+            "simple build+encode avg: {:?} sink={simple_sink}",
+            simple_build
+        );
+        eprintln!(
+            "alyze build+encode avg: {:?} sink={alyze_sink}",
+            alyze_build
+        );
+        eprintln!(
+            "simple search batch avg: {:?} sink={simple_search_sink}",
+            simple_search
+        );
+        eprintln!(
+            "alyze search batch avg: {:?} sink={alyze_search_sink}",
+            alyze_search
+        );
+    }
+
+    #[derive(Debug, Clone)]
+    struct QualityCase {
+        language: &'static str,
+        group: &'static str,
+        query_id: &'static str,
+        query: &'static str,
+        relevant_doc_id: &'static str,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct QualitySummary {
+        query_count: usize,
+        ndcg_at_10: f64,
+        recall_at_10: f64,
+        mrr_at_10: f64,
+        success_at_1: f64,
+    }
+
+    #[test]
+    #[ignore = "quality benchmark; run with --release --ignored --nocapture"]
+    fn experimental_alyze_profile_quality_bench_english_and_korean() {
+        let documents = vec![
+            (
+                "en-cafe".to_owned(),
+                "Café guide for espresso tasting and roast notes".to_owned(),
+            ),
+            (
+                "en-diacritics".to_owned(),
+                "naïve façade résumé coöperate jalapeño reference".to_owned(),
+            ),
+            (
+                "en-sao".to_owned(),
+                "São Paulo travel guide and city map".to_owned(),
+            ),
+            (
+                "en-strasse".to_owned(),
+                "Straße transit closure guide for Berlin commuters".to_owned(),
+            ),
+            (
+                "en-hyphen".to_owned(),
+                "full-text search implementation notes".to_owned(),
+            ),
+            (
+                "en-apostrophe".to_owned(),
+                "O'Reilly can't won't tokenizer notes".to_owned(),
+            ),
+            (
+                "en-vector-index".to_owned(),
+                "vector_index tuning notes for approximate nearest neighbor search".to_owned(),
+            ),
+            (
+                "en-control".to_owned(),
+                "Rust benchmark guide for hybrid search latency".to_owned(),
+            ),
+            (
+                "ko-cafe".to_owned(),
+                "서울 카페 추천 espresso 로스팅 가이드".to_owned(),
+            ),
+            (
+                "ko-search".to_owned(),
+                "한국어 검색 품질 테스트 문서".to_owned(),
+            ),
+            (
+                "ko-nospace".to_owned(),
+                "한국어검색품질테스트문서".to_owned(),
+            ),
+            (
+                "ko-vector".to_owned(),
+                "벡터 검색 하이브리드 랭킹 실험".to_owned(),
+            ),
+            (
+                "ko-control".to_owned(),
+                "서울 교통 안내와 환승 정보".to_owned(),
+            ),
+        ];
+        let cases = vec![
+            QualityCase {
+                language: "en",
+                group: "ascii-folding",
+                query_id: "en-cafe",
+                query: "cafe",
+                relevant_doc_id: "en-cafe",
+            },
+            QualityCase {
+                language: "en",
+                group: "ascii-folding",
+                query_id: "en-diacritics",
+                query: "naive facade resume cooperate jalapeno",
+                relevant_doc_id: "en-diacritics",
+            },
+            QualityCase {
+                language: "en",
+                group: "ascii-folding",
+                query_id: "en-sao",
+                query: "sao paulo",
+                relevant_doc_id: "en-sao",
+            },
+            QualityCase {
+                language: "en",
+                group: "ascii-folding",
+                query_id: "en-strasse",
+                query: "strasse",
+                relevant_doc_id: "en-strasse",
+            },
+            QualityCase {
+                language: "en",
+                group: "punctuation",
+                query_id: "en-hyphen",
+                query: "full text search",
+                relevant_doc_id: "en-hyphen",
+            },
+            QualityCase {
+                language: "en",
+                group: "punctuation",
+                query_id: "en-apostrophe",
+                query: "oreilly cant wont",
+                relevant_doc_id: "en-apostrophe",
+            },
+            QualityCase {
+                language: "en",
+                group: "punctuation",
+                query_id: "en-vector-index",
+                query: "vector index",
+                relevant_doc_id: "en-vector-index",
+            },
+            QualityCase {
+                language: "ko",
+                group: "whitespace",
+                query_id: "ko-cafe",
+                query: "서울 카페 추천",
+                relevant_doc_id: "ko-cafe",
+            },
+            QualityCase {
+                language: "ko",
+                group: "whitespace",
+                query_id: "ko-search",
+                query: "한국어 검색 품질",
+                relevant_doc_id: "ko-search",
+            },
+            QualityCase {
+                language: "ko",
+                group: "no-morphology",
+                query_id: "ko-nospace",
+                query: "한국어 검색 품질",
+                relevant_doc_id: "ko-nospace",
+            },
+            QualityCase {
+                language: "ko",
+                group: "whitespace",
+                query_id: "ko-vector",
+                query: "벡터 검색 랭킹",
+                relevant_doc_id: "ko-vector",
+            },
+        ];
+
+        let simple_lane = TextLane {
+            first_text_query: String::new(),
+            first_text_top_k: 0,
+            first_hybrid_query: None,
+            first_hybrid_top_k: 0,
+            index: BinaryTextSegment::from_documents(&documents)
+                .try_into_index()
+                .unwrap(),
+        };
+        let alyze_lane = TextLane {
+            first_text_query: String::new(),
+            first_text_top_k: 0,
+            first_hybrid_query: None,
+            first_hybrid_top_k: 0,
+            index: BinaryTextSegment::from_documents_with_analyzer(
+                &documents,
+                TextAnalyzerProfile::experimental_alyze_v1(),
+            )
+            .try_into_index()
+            .unwrap(),
+        };
+
+        for language in ["en", "ko"] {
+            let language_cases = cases
+                .iter()
+                .filter(|case| case.language == language)
+                .cloned()
+                .collect::<Vec<_>>();
+            let simple_summary = quality_summary(&simple_lane, &language_cases);
+            let alyze_summary = quality_summary(&alyze_lane, &language_cases);
+            eprintln!("{language} simple quality: {simple_summary:?}");
+            eprintln!("{language} alyze quality: {alyze_summary:?}");
+
+            for case in &language_cases {
+                eprintln!(
+                    "{language} {} [{}] simple={:?} alyze={:?}",
+                    case.query_id,
+                    case.group,
+                    simple_lane.search_with_limit(case.query, 3),
+                    alyze_lane.search_with_limit(case.query, 3)
+                );
+            }
+        }
+
+        for group in [
+            "ascii-folding",
+            "punctuation",
+            "whitespace",
+            "no-morphology",
+        ] {
+            let group_cases = cases
+                .iter()
+                .filter(|case| case.group == group)
+                .cloned()
+                .collect::<Vec<_>>();
+            let simple_summary = quality_summary(&simple_lane, &group_cases);
+            let alyze_summary = quality_summary(&alyze_lane, &group_cases);
+            eprintln!("{group} simple quality: {simple_summary:?}");
+            eprintln!("{group} alyze quality: {alyze_summary:?}");
+        }
+    }
+
+    fn quality_summary(lane: &TextLane, cases: &[QualityCase]) -> QualitySummary {
+        let mut summary = QualitySummary {
+            query_count: cases.len(),
+            ..QualitySummary::default()
+        };
+        for case in cases {
+            let hits = lane.search_with_limit(case.query, 10);
+            summary.ndcg_at_10 += single_relevant_ndcg_at_10(&hits, case.relevant_doc_id);
+            summary.recall_at_10 += if hits.iter().any(|doc_id| doc_id == case.relevant_doc_id) {
+                1.0
+            } else {
+                0.0
+            };
+            summary.mrr_at_10 += reciprocal_rank_at_10(&hits, case.relevant_doc_id);
+            summary.success_at_1 += if hits
+                .first()
+                .is_some_and(|doc_id| doc_id == case.relevant_doc_id)
+            {
+                1.0
+            } else {
+                0.0
+            };
+        }
+        if summary.query_count > 0 {
+            let query_count = summary.query_count as f64;
+            summary.ndcg_at_10 /= query_count;
+            summary.recall_at_10 /= query_count;
+            summary.mrr_at_10 /= query_count;
+            summary.success_at_1 /= query_count;
+        }
+        summary
+    }
+
+    fn single_relevant_ndcg_at_10(hits: &[String], relevant_doc_id: &str) -> f64 {
+        hits.iter()
+            .take(10)
+            .position(|doc_id| doc_id == relevant_doc_id)
+            .map(|index| 1.0 / (index as f64 + 2.0).log2())
+            .unwrap_or(0.0)
+    }
+
+    fn reciprocal_rank_at_10(hits: &[String], relevant_doc_id: &str) -> f64 {
+        hits.iter()
+            .take(10)
+            .position(|doc_id| doc_id == relevant_doc_id)
+            .map(|index| 1.0 / (index as f64 + 1.0))
+            .unwrap_or(0.0)
     }
 
     #[test]
@@ -1084,6 +1925,40 @@ mod tests {
         assert_eq!(lane.search("alpha"), vec!["doc-1", "doc-2"]);
         assert_eq!(lane.first_hybrid_query(), Some("alpha beta"));
         assert_eq!(lane.first_hybrid_top_k(), 2);
+    }
+
+    #[test]
+    fn bm25_diagnostics_rank_repeated_terms_and_explain_contributions() {
+        let (segment, _) = BinaryTextSegment::from_document_refs_with_analyzer(
+            [
+                ("doc-short", "alpha"),
+                ("doc-repeated", "alpha alpha alpha"),
+                ("doc-other", "beta"),
+            ],
+            TextAnalyzerProfile::current(),
+        );
+        let lane = TextLane {
+            first_text_query: String::new(),
+            first_text_top_k: 0,
+            first_hybrid_query: None,
+            first_hybrid_top_k: 0,
+            index: segment.try_into_index().unwrap(),
+        };
+
+        let diagnostics = lane.search_with_diagnostics("alpha", 2);
+
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|hit| hit.doc_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["doc-repeated", "doc-short"]
+        );
+        assert!(diagnostics[0].score > diagnostics[1].score);
+        assert_eq!(diagnostics[0].doc_length, 3);
+        assert_eq!(diagnostics[0].terms[0].token, "alpha");
+        assert_eq!(diagnostics[0].terms[0].term_frequency, 3);
+        assert_eq!(diagnostics[0].terms[0].document_frequency, 2);
     }
 
     #[test]
@@ -1195,7 +2070,7 @@ mod tests {
         assert_eq!(results[0].query_id, "q-text");
         assert_eq!(results[0].hits, vec!["doc-2", "doc-1"]);
         assert_eq!(results[1].query_id, "q-hybrid");
-        assert_eq!(results[1].hits, vec!["doc-2", "doc-3"]);
+        assert_eq!(results[1].hits, vec!["doc-3", "doc-2"]);
     }
 
     #[test]
