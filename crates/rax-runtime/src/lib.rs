@@ -282,6 +282,7 @@ pub struct RuntimeStore {
     vector_lane: Option<VectorLane>,
     store_generation: Option<u64>,
     store_open_mode: ProductStoreOpenMode,
+    read_only_snapshot_open: bool,
     closed: bool,
 }
 
@@ -688,6 +689,7 @@ impl RuntimeStore {
             vector_lane: None,
             store_generation,
             store_open_mode,
+            read_only_snapshot_open: use_runtime_read_only_open,
             closed: false,
         })
     }
@@ -1231,10 +1233,17 @@ impl RuntimeStore {
         if self.text_lane.is_none() {
             let root_path = self.root_path();
             let store_path = self.store_path();
-            self.text_lane = Some(
+            self.text_lane = Some(if self.read_only_snapshot_open {
+                TextLane::load_runtime_snapshot_with_store_path(
+                    &root_path,
+                    &self.manifest,
+                    &store_path,
+                )
+                .map_err(RuntimeError::Storage)?
+            } else {
                 TextLane::load_runtime_with_store_path(&root_path, &self.manifest, &store_path)
-                    .map_err(RuntimeError::Storage)?,
-            );
+                    .map_err(RuntimeError::Storage)?
+            });
         }
         self.text_lane
             .as_ref()
