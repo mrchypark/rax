@@ -77,8 +77,6 @@
 - [x] Define Rust runtime API surface for create/open/write/search/close
 - [x] Add product CLI separate from `wax-bench-cli`
 - [x] Add broker/session model
-- [x] ~~Add MCP-compatible surface~~ Historical slice; MCP support has since
-  been removed from the current build.
 
 ## Deferred Full Parity
 
@@ -122,8 +120,6 @@
 - [x] Recorded that the completed runtime API surface now uses `RuntimeStore::create` plus a `RuntimeStoreWriter` compatibility-import session for write/publish, and `create` explicitly refuses to overwrite an existing `store.wax`.
 - [x] Recorded the historical first product CLI slice: `wax-cli` shipped a `wax` binary with `create`, `import-compat`, and text `search`, while benchmark pack/run/reduce flows remained isolated in `wax-bench-cli`.
 - [x] Recorded the historical first broker/session slice: `wax-v2-broker` kept opaque broker-owned session ids above `wax-v2-runtime` and exposed text search plus compatibility import without freezing future transport or vector-input policy.
-- [x] Recorded that the first MCP-compatible surface was a historical slice; it
-  has since been removed from the current build.
 - [x] Recorded that the first structured-memory surface now lives in `wax-v2-structured-memory`, uses an explicit bootstrap `structured-memory.ndjson` persistence layer, and currently exposes bootstrap record write/read/query with explicit status and provenance rather than full entity/fact parity.
 - [x] Recorded that the first explicit entity/fact API layer now also lives in `wax-v2-structured-memory`, keeps persistence in the same bootstrap `structured-memory.ndjson` file through reserved entity metadata predicates, and still does not claim alias normalization, graph traversal, evidence, or bitemporal parity.
 - [x] Recorded that the first multimodal ingest surface now lives in `wax-v2-multimodal`, persists asset descriptors in `multimodal-assets.ndjson`, copies imported payloads into a store-owned `multimodal-assets/` directory, and still does not claim final media segments, OCR, transcript, embedding, or retrieval orchestration parity.
@@ -131,9 +127,6 @@
 - [x] Recorded that the first VideoRAG parity surface now lives in `wax-v2-multimodal`, exposes video-only typed read/query APIs plus optional bootstrap video metadata, and keeps video-specific typed views and processing dependencies out of `wax-v2-core` while transcripts, frame extraction, temporal retrieval, and video retrieval quality remain future work.
 - [x] Recorded that the first Apple-specific acceleration parity surface now lives in `wax-v2-runtime`, reports Apple-family acceleration capability explicitly, resolves optional backend preference separately from search requests, and still does not claim linked Apple frameworks or hardware-accelerated execution parity.
 - [x] Recorded the 2026-05-29 surface correction: the current `wax` CLI commands are `create`, `remember`, `recall`, `ingest docs`, `ingest vectors`, and `search`; the earlier `import-compat` CLI note is historical, not current.
-- [x] Recorded the 2026-05-29 MCP removal: there is no current MCP crate, stdio
-  server, JSON-RPC tool surface, or trusted in-process MCP adapter.
-
 ## Follow-On Roadmap
 
 - [x] Recorded that the staged roadmap is complete and remains frozen as historical execution history.

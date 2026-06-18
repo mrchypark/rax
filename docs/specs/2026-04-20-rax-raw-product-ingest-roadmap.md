@@ -13,9 +13,6 @@ current `wax` commands are `create`, `remember`, `recall`, `ingest docs`,
 
 The runtime raw-ingest product types are `NewDocument` and `NewDocumentVector`.
 The broker exposes raw `ingest_documents` and `ingest_vectors` session methods.
-MCP support has since been removed entirely; there is no MCP crate, stdio
-server, JSON-RPC tool surface, or trusted in-process MCP adapter in the current
-build.
 
 ## Summary
 
@@ -23,7 +20,7 @@ The staged rax-to-wax roadmap is complete, but the public write path is still in
 
 - `RuntimeStoreWriter::import_compatibility_snapshot()` reads dataset-pack compatibility artifacts and publishes compatibility `Doc`/`Txt`/`Vec` segments into `store.wax`
 - historically, `wax-cli` exposed `import-compat` as a compatibility bridge; the current product CLI no longer exposes that command
-- broker sessions expose raw document/vector writes; the earlier MCP work is now retired
+- broker sessions expose raw document/vector writes
 
 That was the right staged endpoint because it gave `rax` a real core, product-facing read surfaces, and stable engine crates without pretending raw product ingest already existed.
 
@@ -282,7 +279,6 @@ Slice G handoff status:
 
 - `wax-cli` now exposes explicit family-based raw ingest commands as `wax ingest docs` and `wax ingest vectors`
 - `wax-v2-broker` now exposes raw document and raw vector ingest requests above the existing session boundary
-- the former MCP raw-ingest work has been retired from the current build
 - the first product raw-ingest migration keeps family boundaries explicit rather than inventing a generic multi-family envelope before the runtime actually has one
 - `publish_raw_documents` is now incremental only against active store-owned raw document segments; it does not silently merge compatibility pack sidecars into product ingest state when the store has no `Doc` segment yet
 - long-lived runtime, broker, structured-memory, and multimodal sessions now refresh read state before serving reads that may otherwise observe stale data after another session writes
@@ -325,7 +321,6 @@ Slice H handoff status:
 - Benchmark coverage remains mandatory, but the target is shared builder verification rather than permanent compatibility-only publication logic.
 - Product raw document ingest now treats the active store `Doc` segment as the only carry-forward source. Compatibility pack documents remain a bridge input for explicit compatibility import or full-snapshot equivalence, not an implicit merge source for incremental product writes.
 - Store publication paths now use generation or document-segment preconditions around merge, validation, and publish so concurrent writers fail closed instead of clobbering unseen updates.
-- The former MCP root-boundary work is retired with the MCP surface; arbitrary MCP filesystem roots are no longer a product concern.
 - Missing HNSW sidecar files now fall back to exact-flat even when HNSW mode is explicitly requested, matching runtime search fallback behavior instead of failing during lane load.
 
 ## Verification Strategy

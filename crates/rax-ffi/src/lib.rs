@@ -801,6 +801,7 @@ int main(int argc, char **argv) {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let include_dir = manifest_dir.join("include");
         let library_dir = target_debug_dir();
+        ensure_debug_ffi_library();
         let status = Command::new("cc")
             .arg("-I")
             .arg(&include_dir)
@@ -834,6 +835,15 @@ int main(int argc, char **argv) {
             .and_then(Path::parent)
             .expect("target debug directory")
             .to_path_buf()
+    }
+
+    fn ensure_debug_ffi_library() {
+        let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+        let status = Command::new(cargo)
+            .args(["build", "-p", "rax-ffi"])
+            .status()
+            .expect("run cargo build -p rax-ffi");
+        assert!(status.success(), "debug FFI library build failed");
     }
 
     fn add_library_path(command: &mut Command, library_dir: &Path) {

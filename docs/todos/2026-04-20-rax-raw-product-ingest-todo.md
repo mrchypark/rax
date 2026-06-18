@@ -53,7 +53,6 @@
 
 - [x] Add product-facing `ingest` CLI verbs after raw builders are real
 - [x] Add raw ingest requests to broker/session surface
-- [x] Retire the earlier MCP raw-ingest surface from current product scope
 - [x] Keep `import-compat` as a legacy bridge rather than removing it immediately
 
 ## Phase H: Compatibility Bridge Convergence
@@ -84,5 +83,5 @@
 - [x] Recorded that incremental product document ingest carries forward only active store `Doc` segments, not compatibility pack sidecars.
 - [x] Recorded that raw publication must use the same generation or document-segment identity for validation and final publish preconditions.
 - [x] Recorded that long-lived product sessions must refresh read state before serving reads after another handle may have written.
-- [x] Recorded that MCP support has since been removed entirely and raw document unknown top-level fields must survive broker ingest.
+- [x] Recorded that raw document unknown top-level fields must survive broker ingest.
 - [x] Recorded that explicit HNSW requests should fall back to exact-flat when declared sidecars are missing rather than failing lane load.

@@ -539,6 +539,7 @@ struct StoreDocSegment {
     payload_range: Range<usize>,
     row_table_range: Range<usize>,
     row_count: usize,
+    live_row_count: usize,
     doc_id_map: Option<DocIdMap>,
 }
 
@@ -636,6 +637,7 @@ impl StoreDocSegment {
             Some(DocIdMap::decode_json(binding_section)?)
         };
 
+        let mut live_row_count = 0usize;
         for row_index in 0..row_count {
             let row = read_doc_row(
                 &bytes[row_table_offset + row_index * DOC_ROW_LENGTH
@@ -656,6 +658,9 @@ impl StoreDocSegment {
                     )));
                 }
             }
+            if !row.is_tombstone() {
+                live_row_count += 1;
+            }
         }
 
         Ok(Self {
@@ -664,6 +669,7 @@ impl StoreDocSegment {
             payload_range: payload_bytes_offset..metadata_bytes_offset,
             row_table_range: row_table_offset..row_table_end,
             row_count,
+            live_row_count,
             doc_id_map,
         })
     }
@@ -745,6 +751,10 @@ impl StoreDocSegment {
                     })
             })
             .collect()
+    }
+
+    fn live_row_count(&self) -> usize {
+        self.live_row_count
     }
 
     fn build_doc_id_map(&self) -> Result<DocIdMap, DocstoreError> {
@@ -932,42 +942,23 @@ impl Docstore {
                 offset_index,
             } => {
                 if let Some(index) = offset_index {
-                    return load_documents_by_id_from_offsets(
-                        documents_path,
-                        index,
-                        target_doc_ids,
-                    );
+                    let mut documents =
+                        load_documents_by_id_from_offsets(documents_path, index, target_doc_ids)?;
+                    let missing_doc_ids = target_doc_ids
+                        .iter()
+                        .filter(|doc_id| !documents.contains_key(*doc_id))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if !missing_doc_ids.is_empty() {
+                        documents.extend(load_documents_by_id_by_scanning(
+                            documents_path,
+                            &missing_doc_ids,
+                        )?);
+                    }
+                    return Ok(documents);
                 }
 
-                let mut remaining = target_doc_ids
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<HashSet<_>>();
-                let mut documents = HashMap::new();
-                let file = open_read_no_symlinks(documents_path)?;
-                let reader = BufReader::new(file);
-                for line in reader.lines() {
-                    let line = line?;
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    let doc_id = parse_document_id(&line, "document line")
-                        .map(Cow::into_owned)
-                        .map_err(DocstoreError::InvalidDocument)?;
-                    if remaining.remove(doc_id.as_str()) {
-                        let value: Value = serde_json::from_str(&line)?;
-                        let object = value.as_object().ok_or_else(|| {
-                            DocstoreError::InvalidDocument(
-                                "document line must be a json object".to_owned(),
-                            )
-                        })?;
-                        documents.insert(doc_id, Value::Object(object.clone()));
-                        if remaining.is_empty() {
-                            break;
-                        }
-                    }
-                }
-                Ok(documents)
+                load_documents_by_id_by_scanning(documents_path, target_doc_ids)
             }
             DocstoreSource::Store { segment } => segment.load_documents_by_id(target_doc_ids),
         }
@@ -980,6 +971,14 @@ impl Docstore {
                 load_document_ids_from_documents(documents_path)
             }
             DocstoreSource::Store { segment } => segment.load_document_ids(),
+        }
+    }
+
+    pub fn document_count(&self) -> Result<usize, DocstoreError> {
+        match &self.source {
+            DocstoreSource::Empty => Ok(0),
+            DocstoreSource::DatasetPack { .. } => Ok(self.load_document_ids()?.len()),
+            DocstoreSource::Store { segment } => Ok(segment.live_row_count()),
         }
     }
 
@@ -1706,6 +1705,39 @@ fn load_documents_by_id_from_offsets(
     Ok(documents)
 }
 
+fn load_documents_by_id_by_scanning(
+    path: &Path,
+    target_doc_ids: &[String],
+) -> Result<HashMap<String, Value>, DocstoreError> {
+    let mut remaining = target_doc_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut documents = HashMap::new();
+    let file = open_read_no_symlinks(path)?;
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let doc_id = parse_document_id(&line, "document line")
+            .map(Cow::into_owned)
+            .map_err(DocstoreError::InvalidDocument)?;
+        if remaining.remove(doc_id.as_str()) {
+            let value: Value = serde_json::from_str(&line)?;
+            let object = value.as_object().ok_or_else(|| {
+                DocstoreError::InvalidDocument("document line must be a json object".to_owned())
+            })?;
+            documents.insert(doc_id, Value::Object(object.clone()));
+            if remaining.is_empty() {
+                break;
+            }
+        }
+    }
+    Ok(documents)
+}
+
 fn validate_document_offset_entry(
     doc_id: &str,
     entry: &DocumentOffsetEntry,
@@ -2086,6 +2118,61 @@ mod tests {
     }
 
     #[test]
+    fn document_count_uses_documents_file_when_offsets_are_partial() {
+        let temp_dir = tempdir().unwrap();
+        let docs_path = temp_dir.path().join("docs.ndjson");
+        let offsets_path = temp_dir.path().join("document-offsets.jsonl");
+        let doc_lines = [
+            "{\"doc_id\":\"doc-001\",\"text\":\"alpha\"}\n",
+            "{\"doc_id\":\"doc-002\",\"text\":\"beta\"}\n",
+        ];
+        fs::write(&docs_path, doc_lines.concat()).unwrap();
+        fs::write(
+            &offsets_path,
+            format!(
+                "{{\"doc_id\":\"doc-001\",\"offset\":0,\"length\":{}}}\n",
+                doc_lines[0].len()
+            ),
+        )
+        .unwrap();
+
+        let manifest = test_manifest(true);
+        let docstore = Docstore::open_dataset_pack(temp_dir.path(), &manifest).unwrap();
+
+        assert_eq!(docstore.document_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn load_documents_by_id_scans_for_targets_missing_from_partial_offsets() {
+        let temp_dir = tempdir().unwrap();
+        let docs_path = temp_dir.path().join("docs.ndjson");
+        let offsets_path = temp_dir.path().join("document-offsets.jsonl");
+        let doc_lines = [
+            "{\"doc_id\":\"doc-001\",\"text\":\"alpha\"}\n",
+            "{\"doc_id\":\"doc-002\",\"text\":\"beta\"}\n",
+        ];
+        fs::write(&docs_path, doc_lines.concat()).unwrap();
+        fs::write(
+            &offsets_path,
+            format!(
+                "{{\"doc_id\":\"doc-001\",\"offset\":0,\"length\":{}}}\n",
+                doc_lines[0].len()
+            ),
+        )
+        .unwrap();
+
+        let manifest = test_manifest(true);
+        let docstore = Docstore::open_dataset_pack(temp_dir.path(), &manifest).unwrap();
+        let documents = docstore
+            .load_documents_by_id(&["doc-001".to_owned(), "doc-002".to_owned()])
+            .unwrap();
+
+        assert_eq!(documents.len(), 2);
+        assert_eq!(documents["doc-001"]["text"], "alpha");
+        assert_eq!(documents["doc-002"]["text"], "beta");
+    }
+
+    #[test]
     fn open_dataset_pack_rejects_implausible_offset_length_before_allocation() {
         let temp_dir = tempdir().unwrap();
         let docs_path = temp_dir.path().join("docs.ndjson");
@@ -2382,6 +2469,7 @@ mod tests {
             reopened.load_document_ids().unwrap(),
             vec!["doc-900".to_owned(), "doc-010".to_owned()]
         );
+        assert_eq!(reopened.document_count().unwrap(), 2);
     }
 
     #[test]
@@ -2555,6 +2643,73 @@ mod tests {
         let reopened = Docstore::open(temp_dir.path(), &test_manifest(false)).unwrap();
 
         assert!(reopened.load_document_ids().unwrap().is_empty());
+    }
+
+    #[test]
+    fn store_document_count_excludes_tombstones_without_parsing_minor_v0_payloads() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("store.rax");
+        create_empty_store(&store_path).unwrap();
+        let segment = BinaryDocSegment {
+            doc_id_map: test_doc_id_map(&[(0, "doc-001"), (1, "doc-002")]),
+            records: vec![
+                DocSegmentRecord {
+                    row: DocRow {
+                        doc_id: 0,
+                        timestamp_ms: 0,
+                        flags: 0,
+                        payload_offset: 0,
+                        payload_length: 1,
+                        metadata_ref: SectionRef::new(0, 2),
+                        preview_ref: SectionRef::new(0, 0),
+                    },
+                    payload: b"{".to_vec(),
+                    metadata: json!({}),
+                    preview: None,
+                },
+                DocSegmentRecord {
+                    row: DocRow {
+                        doc_id: 1,
+                        timestamp_ms: 0,
+                        flags: DocRow::FLAG_TOMBSTONE,
+                        payload_offset: 1,
+                        payload_length: 0,
+                        metadata_ref: SectionRef::new(2, 2),
+                        preview_ref: SectionRef::new(0, 0),
+                    },
+                    payload: Vec::new(),
+                    metadata: json!({}),
+                    preview: None,
+                },
+            ],
+        };
+        let bytes = encode_minor_v0_segment(&segment).unwrap();
+        publish_segment(
+            &store_path,
+            PendingSegmentDescriptor {
+                family: SegmentKind::Doc,
+                family_version: 1,
+                flags: 0,
+                doc_id_start: 0,
+                doc_id_end_exclusive: 2,
+                min_timestamp_ms: 0,
+                max_timestamp_ms: 0,
+                live_items: 1,
+                tombstoned_items: 1,
+                backend_id: 0,
+                backend_aux: 0,
+            },
+            &bytes,
+        )
+        .unwrap();
+
+        let reopened = Docstore::open(temp_dir.path(), &test_manifest(false)).unwrap();
+
+        assert_eq!(reopened.document_count().unwrap(), 1);
+        let DocstoreSource::Store { segment } = &reopened.source else {
+            panic!("expected store-backed docstore");
+        };
+        assert_eq!(segment.live_row_count, 1);
     }
 
     #[test]
