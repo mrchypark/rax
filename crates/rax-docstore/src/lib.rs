@@ -747,7 +747,7 @@ impl StoreDocSegment {
             .collect()
     }
 
-    fn document_count(&self) -> usize {
+    fn row_count(&self) -> usize {
         self.row_count
     }
 
@@ -990,13 +990,8 @@ impl Docstore {
     pub fn document_count(&self) -> Result<usize, DocstoreError> {
         match &self.source {
             DocstoreSource::Empty => Ok(0),
-            DocstoreSource::DatasetPack { offset_index, .. } => {
-                if let Some(index) = offset_index {
-                    return Ok(index.len());
-                }
-                Ok(self.load_document_ids()?.len())
-            }
-            DocstoreSource::Store { segment } => Ok(segment.document_count()),
+            DocstoreSource::DatasetPack { .. } => Ok(self.load_document_ids()?.len()),
+            DocstoreSource::Store { segment } => Ok(segment.row_count()),
         }
     }
 
@@ -2103,6 +2098,31 @@ mod tests {
     }
 
     #[test]
+    fn document_count_uses_documents_file_when_offsets_are_partial() {
+        let temp_dir = tempdir().unwrap();
+        let docs_path = temp_dir.path().join("docs.ndjson");
+        let offsets_path = temp_dir.path().join("document-offsets.jsonl");
+        let doc_lines = [
+            "{\"doc_id\":\"doc-001\",\"text\":\"alpha\"}\n",
+            "{\"doc_id\":\"doc-002\",\"text\":\"beta\"}\n",
+        ];
+        fs::write(&docs_path, doc_lines.concat()).unwrap();
+        fs::write(
+            &offsets_path,
+            format!(
+                "{{\"doc_id\":\"doc-001\",\"offset\":0,\"length\":{}}}\n",
+                doc_lines[0].len()
+            ),
+        )
+        .unwrap();
+
+        let manifest = test_manifest(true);
+        let docstore = Docstore::open_dataset_pack(temp_dir.path(), &manifest).unwrap();
+
+        assert_eq!(docstore.document_count().unwrap(), 2);
+    }
+
+    #[test]
     fn open_dataset_pack_rejects_implausible_offset_length_before_allocation() {
         let temp_dir = tempdir().unwrap();
         let docs_path = temp_dir.path().join("docs.ndjson");
@@ -2399,34 +2419,6 @@ mod tests {
             reopened.load_document_ids().unwrap(),
             vec!["doc-900".to_owned(), "doc-010".to_owned()]
         );
-    }
-
-    #[test]
-    fn document_count_uses_store_segment_row_count() {
-        let temp_dir = tempdir().unwrap();
-        let docs_path = temp_dir.path().join("docs.ndjson");
-        let offsets_path = temp_dir.path().join("document-offsets.jsonl");
-        let store_path = temp_dir.path().join("store.rax");
-        fs::write(
-            &docs_path,
-            concat!(
-                "{\"doc_id\":\"doc-900\",\"text\":\"first\",\"metadata\":{\"kind\":\"note\"}}\n",
-                "{\"doc_id\":\"doc-010\",\"text\":\"second\",\"metadata\":{\"kind\":\"task\"}}\n",
-            ),
-        )
-        .unwrap();
-        fs::write(&offsets_path, "").unwrap();
-        create_empty_store(&store_path).unwrap();
-
-        let manifest = test_manifest(true);
-        let dataset_docstore = Docstore::open_dataset_pack(temp_dir.path(), &manifest).unwrap();
-        dataset_docstore.publish_to_store(&store_path).unwrap();
-        fs::remove_file(&docs_path).unwrap();
-        fs::remove_file(&offsets_path).unwrap();
-
-        let reopened = Docstore::open(temp_dir.path(), &manifest).unwrap();
-
-        assert!(matches!(&reopened.source, DocstoreSource::Store { .. }));
         assert_eq!(reopened.document_count().unwrap(), 2);
     }
 
