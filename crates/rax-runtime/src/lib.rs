@@ -887,8 +887,7 @@ impl RuntimeStore {
 
     fn live_doc_count(&self) -> Result<usize, RuntimeError> {
         self.docstore
-            .load_document_ids()
-            .map(|doc_ids| doc_ids.len())
+            .document_count()
             .map_err(|error| RuntimeError::Storage(docstore_error(error)))
     }
 

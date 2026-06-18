@@ -4,7 +4,7 @@
 
 **Goal:** Add the first broker/session model on top of `wax-v2-runtime` so product callers can hold a durable session boundary without coupling directly to benchmark-era request files or one-shot CLI orchestration.
 
-**Architecture:** Introduce a small broker-facing crate or module that owns session lifecycle, store handle reuse, and future request routing. Keep it above `wax-v2-runtime`; there is no current MCP integration layer.
+**Architecture:** Introduce a small broker-facing crate or module that owns session lifecycle, store handle reuse, and future request routing. Keep it above `wax-v2-runtime`.
 
 **Current status note, 2026-05-29:** This plan records the first broker slice.
 The current broker surface includes raw `ingest_documents` and `ingest_vectors`

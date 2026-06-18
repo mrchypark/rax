@@ -88,7 +88,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 - There is no current `import-compat` product CLI command.
 - Product vector and hybrid search require explicit caller-provided query
   vectors; `rax` does not generate hidden embeddings.
-- There is no MCP crate, stdio server, or tool surface in the current build.
 
 ## Documentation
 

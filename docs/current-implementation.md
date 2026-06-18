@@ -1,7 +1,7 @@
 # Current Implementation
 
 Status: source-derived snapshot
-Date: 2026-05-29
+Date: 2026-06-18
 
 This file summarizes the current code surface. Historical dated plans remain useful
 for execution history, but this page is the shorter reference for what exists now.
@@ -51,13 +51,6 @@ session search plus raw ingest operations:
 Raw broker documents map to `NewDocument`; raw broker vectors map to
 `NewDocumentVector`.
 
-## Removed MCP Support
-
-There is no MCP crate, stdio server, JSON-RPC tool surface, or trusted
-in-process MCP adapter in the current build. Product access is through the
-`rax` CLI, `rax-runtime`, and the in-process `rax-broker`
-session surface.
-
 ## Benchmark CLI
 
 The `rax-bench-cli` commands are:
@@ -87,17 +80,7 @@ The benchmark runner also recognizes these environment variables:
 - `RAX_BENCH_ARTIFACT_DIR` supplies the default artifact directory when
   `run --artifact-dir` is omitted.
 
-## Bootstrap And Parity Scope
-
-Structured memory currently has a bootstrap `structured-memory.ndjson` persistence
-layer with record, entity, and fact APIs. It is not a final binary structured
-memory format.
-
-Multimodal support currently has asset import, copied store-owned payloads,
-`multimodal-assets.ndjson`, image-only typed read/query scaffolds, and video-only
-typed read/query scaffolds. It does not claim OCR, captioning, transcript
-extraction, embeddings, temporal retrieval, or full PhotoRAG/VideoRAG retrieval
-parity.
+## Platform Acceleration Scope
 
 Apple acceleration support is an explicit capability and backend-preference
 resolution surface. Current execution still falls back to the Rust default backend
