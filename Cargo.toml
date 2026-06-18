@@ -1,6 +1,6 @@
 [package]
 name = "rax"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 publish = false
 
@@ -10,6 +10,7 @@ members = [
   "crates/rax-broker",
   "crates/rax-core",
   "crates/rax-docstore",
+  "crates/rax-ffi",
   "crates/rax-runtime",
   "crates/rax-search",
   "crates/rax-text",
