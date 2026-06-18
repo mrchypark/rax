@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::os::raw::{c_char, c_int};
+use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 
 use rax_runtime::{
@@ -26,6 +26,10 @@ thread_local! {
 struct FfiError {
     status: c_int,
     message: String,
+}
+
+struct RaxReadHandle {
+    runtime: RuntimeStore,
 }
 
 impl FfiError {
@@ -238,6 +242,109 @@ pub unsafe extern "C" fn rax_search(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn rax_search_doc_ids(
+    store: *const c_char,
+    mode: *const c_char,
+    text: *const c_char,
+    vector_input: *const c_char,
+    top_k: c_int,
+    out_json: *mut *mut c_char,
+) -> c_int {
+    ffi_status(|| {
+        ensure_output(out_json)?;
+        let store = required_path(store, "store")?;
+        let mode = parse_search_mode(required_string(mode, "mode")?)?;
+        let text = optional_string(text, "text")?;
+        let vector_input = optional_path(vector_input, "vector_input")?;
+        let top_k = ffi_top_k(top_k)?;
+        let mut runtime =
+            RuntimeStore::open_existing_read_only_at(&store).map_err(runtime_error)?;
+        let request = build_search_request(mode, text, vector_input, top_k, false)?;
+        let doc_ids = runtime.search_doc_ids(request).map_err(runtime_error)?;
+        let json = render_doc_ids(doc_ids)?;
+        runtime.close().map_err(runtime_error)?;
+        write_output(out_json, json)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rax_open_read_only(
+    store: *const c_char,
+    out_handle: *mut *mut c_void,
+) -> c_int {
+    ffi_status(|| {
+        ensure_handle_output(out_handle)?;
+        let store = required_path(store, "store")?;
+        let runtime = RuntimeStore::open_existing_read_only_at(&store).map_err(runtime_error)?;
+        let handle = Box::new(RaxReadHandle { runtime });
+        unsafe {
+            *out_handle = Box::into_raw(handle).cast();
+        }
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rax_handle_search_doc_ids(
+    handle: *mut c_void,
+    mode: *const c_char,
+    text: *const c_char,
+    vector_input: *const c_char,
+    top_k: c_int,
+    out_json: *mut *mut c_char,
+) -> c_int {
+    ffi_status(|| {
+        ensure_output(out_json)?;
+        let handle = required_read_handle(handle)?;
+        let mode = parse_search_mode(required_string(mode, "mode")?)?;
+        let text = optional_string(text, "text")?;
+        let vector_input = optional_path(vector_input, "vector_input")?;
+        let top_k = ffi_top_k(top_k)?;
+        let request = build_search_request(mode, text, vector_input, top_k, false)?;
+        let doc_ids = handle
+            .runtime
+            .search_doc_ids_snapshot(request)
+            .map_err(runtime_error)?;
+        let json = render_doc_ids(doc_ids)?;
+        write_output(out_json, json)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rax_handle_search_doc_ids_profiled(
+    handle: *mut c_void,
+    mode: *const c_char,
+    text: *const c_char,
+    vector_input: *const c_char,
+    top_k: c_int,
+    out_json: *mut *mut c_char,
+) -> c_int {
+    ffi_status(|| {
+        ensure_output(out_json)?;
+        let handle = required_read_handle(handle)?;
+        let mode = parse_search_mode(required_string(mode, "mode")?)?;
+        let text = optional_string(text, "text")?;
+        let vector_input = optional_path(vector_input, "vector_input")?;
+        let top_k = ffi_top_k(top_k)?;
+        let request = build_search_request(mode, text, vector_input, top_k, false)?;
+        let response = handle
+            .runtime
+            .search_doc_ids_snapshot_profiled(request)
+            .map_err(runtime_error)?;
+        let json = render_profiled_doc_ids(response)?;
+        write_output(out_json, json)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rax_handle_close(handle: *mut c_void) {
+    if !handle.is_null() {
+        let mut handle = unsafe { Box::from_raw(handle.cast::<RaxReadHandle>()) };
+        let _ = handle.runtime.close();
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn rax_string_free(value: *mut c_char) {
     if !value.is_null() {
         drop(CString::from_raw(value));
@@ -335,6 +442,23 @@ fn ensure_output(out_json: *mut *mut c_char) -> Result<(), FfiError> {
         *out_json = std::ptr::null_mut();
     }
     Ok(())
+}
+
+fn ensure_handle_output(out_handle: *mut *mut c_void) -> Result<(), FfiError> {
+    if out_handle.is_null() {
+        return Err(FfiError::invalid_argument("out_handle is required"));
+    }
+    unsafe {
+        *out_handle = std::ptr::null_mut();
+    }
+    Ok(())
+}
+
+fn required_read_handle<'a>(handle: *mut c_void) -> Result<&'a mut RaxReadHandle, FfiError> {
+    if handle.is_null() {
+        return Err(FfiError::invalid_argument("handle is required"));
+    }
+    Ok(unsafe { &mut *handle.cast::<RaxReadHandle>() })
 }
 
 fn parse_search_mode(mode: String) -> Result<FfiSearchMode, FfiError> {
@@ -468,6 +592,29 @@ fn render_hits(hits: Vec<rax_runtime::RuntimeSearchHit>) -> Result<String, FfiEr
         .collect::<Vec<_>>();
     serde_json::to_string_pretty(&rendered_hits)
         .map_err(|error| FfiError::runtime(error.to_string()))
+}
+
+fn render_doc_ids(doc_ids: Vec<String>) -> Result<String, FfiError> {
+    serde_json::to_string_pretty(&doc_ids).map_err(|error| FfiError::runtime(error.to_string()))
+}
+
+fn render_profiled_doc_ids(
+    response: rax_runtime::RuntimeSearchDocIdsResponse,
+) -> Result<String, FfiError> {
+    let profile = response.profile;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "doc_ids": response.doc_ids,
+        "profile": {
+            "attempts": profile.attempts,
+            "refresh_ms": profile.refresh_ms,
+            "live_doc_count_ms": profile.live_doc_count_ms,
+            "lane_load_ms": profile.lane_load_ms,
+            "rank_ms": profile.rank_ms,
+            "generation_check_ms": profile.generation_check_ms,
+            "total_ms": profile.total_ms,
+        },
+    }))
+    .map_err(|error| FfiError::runtime(error.to_string()))
 }
 
 fn render_publish_report(report: &rax_runtime::RuntimePublishReport) -> Result<String, FfiError> {
@@ -649,6 +796,67 @@ mod tests {
         assert_eq!(search_hits[0]["doc_id"], "doc-1");
         assert_eq!(search_hits[0]["preview"], "rust ffi search target");
         unsafe { super::rax_string_free(search_json) };
+
+        let mut doc_ids_json = ptr::null_mut();
+        assert_eq!(0, unsafe {
+            super::rax_search_doc_ids(
+                store_path.as_ptr(),
+                mode_text.as_ptr(),
+                text_query.as_ptr(),
+                ptr::null(),
+                1,
+                &mut doc_ids_json,
+            )
+        });
+        let doc_ids: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(doc_ids_json) }.to_str().unwrap())
+                .unwrap();
+        assert_eq!(doc_ids, serde_json::json!(["doc-1"]));
+        unsafe { super::rax_string_free(doc_ids_json) };
+
+        let mut read_handle = ptr::null_mut();
+        assert_eq!(0, unsafe {
+            super::rax_open_read_only(store_path.as_ptr(), &mut read_handle)
+        });
+        let mut handle_doc_ids_json = ptr::null_mut();
+        assert_eq!(0, unsafe {
+            super::rax_handle_search_doc_ids(
+                read_handle,
+                mode_text.as_ptr(),
+                text_query.as_ptr(),
+                ptr::null(),
+                1,
+                &mut handle_doc_ids_json,
+            )
+        });
+        let handle_doc_ids: serde_json::Value = serde_json::from_str(
+            unsafe { CStr::from_ptr(handle_doc_ids_json) }
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(handle_doc_ids, serde_json::json!(["doc-1"]));
+        unsafe { super::rax_string_free(handle_doc_ids_json) };
+
+        let mut profiled_json = ptr::null_mut();
+        assert_eq!(0, unsafe {
+            super::rax_handle_search_doc_ids_profiled(
+                read_handle,
+                mode_text.as_ptr(),
+                text_query.as_ptr(),
+                ptr::null(),
+                1,
+                &mut profiled_json,
+            )
+        });
+        let profiled: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(profiled_json) }.to_str().unwrap())
+                .unwrap();
+        assert_eq!(profiled["doc_ids"], serde_json::json!(["doc-1"]));
+        assert!(profiled["profile"]["total_ms"].is_number());
+        assert!(profiled["profile"]["rank_ms"].is_number());
+        unsafe { super::rax_string_free(profiled_json) };
+        unsafe { super::rax_handle_close(read_handle) };
 
         let mut vector_search_json = ptr::null_mut();
         assert_eq!(0, unsafe {

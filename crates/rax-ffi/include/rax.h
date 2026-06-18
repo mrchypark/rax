@@ -2,6 +2,7 @@
 #define RAX_FFI_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -43,6 +44,33 @@ int rax_search(
     int top_k,
     bool preview,
     char **out_json);
+int rax_search_doc_ids(
+    const char *store,
+    const char *mode,
+    const char *text,
+    const char *vector_input,
+    int top_k,
+    char **out_json);
+/*
+ * Persistent read handles search the snapshot opened by rax_open_read_only().
+ * Reopen the handle after replacing or rebuilding the store.
+ */
+int rax_open_read_only(const char *store, void **out_handle);
+int rax_handle_search_doc_ids(
+    void *handle,
+    const char *mode,
+    const char *text,
+    const char *vector_input,
+    int top_k,
+    char **out_json);
+int rax_handle_search_doc_ids_profiled(
+    void *handle,
+    const char *mode,
+    const char *text,
+    const char *vector_input,
+    int top_k,
+    char **out_json);
+void rax_handle_close(void *handle);
 void rax_string_free(char *value);
 const char *rax_last_error(void);
 

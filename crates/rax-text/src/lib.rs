@@ -115,13 +115,14 @@ enum TextLaneSource {
 impl TextLaneMetadata {
     fn resolve(mount_root: &Path, manifest: &DatasetPackManifest) -> Result<Self, String> {
         let store_path = store_path_from_manifest(mount_root, manifest)?;
-        Self::resolve_with_store_path(mount_root, manifest, &store_path)
+        Self::resolve_with_store_path(mount_root, manifest, &store_path, true)
     }
 
     fn resolve_with_store_path(
         mount_root: &Path,
         manifest: &DatasetPackManifest,
         store_path: &Path,
+        validate_store_doc_payloads: bool,
     ) -> Result<Self, String> {
         if store_path.exists() {
             let opened = rax_core::open_store(store_path).map_err(|error| error.to_string())?;
@@ -158,11 +159,13 @@ impl TextLaneMetadata {
                             .to_owned(),
                     );
                 }
-                validate_text_segment_against_store_doc_descriptor(
-                    store_path,
-                    &descriptor,
-                    doc_descriptor,
-                )?;
+                if validate_store_doc_payloads {
+                    validate_text_segment_against_store_doc_descriptor(
+                        store_path,
+                        &descriptor,
+                        doc_descriptor,
+                    )?;
+                }
                 return Ok(Self {
                     source: TextLaneSource::Store {
                         store_path: store_path.to_path_buf(),
@@ -214,7 +217,18 @@ impl TextLane {
         manifest: &DatasetPackManifest,
         store_path: &Path,
     ) -> Result<Self, String> {
-        let metadata = TextLaneMetadata::resolve_with_store_path(mount_root, manifest, store_path)?;
+        let metadata =
+            TextLaneMetadata::resolve_with_store_path(mount_root, manifest, store_path, true)?;
+        Self::load_with_metadata(mount_root, manifest, metadata)
+    }
+
+    pub fn load_runtime_with_store_path(
+        mount_root: &Path,
+        manifest: &DatasetPackManifest,
+        store_path: &Path,
+    ) -> Result<Self, String> {
+        let metadata =
+            TextLaneMetadata::resolve_with_store_path(mount_root, manifest, store_path, false)?;
         Self::load_with_metadata(mount_root, manifest, metadata)
     }
 
@@ -1295,6 +1309,38 @@ mod tests {
 
         let error = TextLane::load(temp_dir.path(), &test_manifest()).unwrap_err();
         assert!(error.contains("stale"));
+    }
+
+    #[test]
+    fn text_lane_runtime_load_trusts_manifest_visible_store_segment() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("store.rax");
+        fs::write(
+            temp_dir.path().join("queries.jsonl"),
+            "{\"query_id\":\"q-001\",\"query_class\":\"keyword\",\"difficulty\":\"easy\",\"query_text\":\"alpha\",\"top_k\":2,\"filter_spec\":{},\"preview_expected\":false,\"embedding_available\":false,\"lane_eligibility\":{\"text\":true,\"vector\":false,\"hybrid\":false}}\n",
+        )
+        .unwrap();
+        create_empty_store(&store_path).unwrap();
+        let doc_pending = prepare_raw_documents_segment(
+            &store_path,
+            vec![
+                ("doc-1".to_owned(), json!({"doc_id":"doc-1","text":"gamma"})),
+                ("doc-2".to_owned(), json!({"doc_id":"doc-2","text":"delta"})),
+            ],
+        )
+        .unwrap();
+        let text_pending = crate::prepare_text_segment_from_documents(&[
+            ("doc-1".to_owned(), "alpha".to_owned()),
+            ("doc-2".to_owned(), "beta".to_owned()),
+        ])
+        .unwrap();
+        publish_segments(&store_path, vec![doc_pending, text_pending]).unwrap();
+
+        let lane =
+            TextLane::load_runtime_with_store_path(temp_dir.path(), &test_manifest(), &store_path)
+                .unwrap();
+
+        assert_eq!(lane.search("alpha"), vec!["doc-1"]);
     }
 
     #[test]

@@ -23,6 +23,7 @@ use std::os::unix::fs::MetadataExt;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 use std::path::{Component, Path, PathBuf};
+use std::time::Instant;
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
     GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
@@ -66,6 +67,23 @@ pub struct RuntimeSearchResponse {
     pub hits: Vec<RuntimeSearchHit>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeSearchProfile {
+    pub attempts: u32,
+    pub refresh_ms: f64,
+    pub live_doc_count_ms: f64,
+    pub lane_load_ms: f64,
+    pub rank_ms: f64,
+    pub generation_check_ms: f64,
+    pub total_ms: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeSearchDocIdsResponse {
+    pub doc_ids: Vec<String>,
+    pub profile: RuntimeSearchProfile,
+}
+
 pub type MemorySearchResponse = RuntimeSearchResponse;
 pub type MemorySearchHit = RuntimeSearchHit;
 
@@ -77,6 +95,28 @@ const MEMORY_OPEN_CREATE_RACE_RETRY_DELAY_MS: u64 = 10;
 const STORE_GENERATION_CHANGED_MESSAGE: &str =
     "publish_raw_snapshot store generation changed before publish; retry with latest documents";
 const STORE_PUBLISH_LOCK_BUSY_MESSAGE: &str = "store publish lock is busy; retry";
+
+fn elapsed_ms(start: Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1000.0
+}
+
+fn validate_search_request(request: &RuntimeSearchRequest) -> Result<(), RuntimeError> {
+    match &request.mode {
+        RuntimeSearchMode::Text if request.text_query.is_none() => Err(
+            RuntimeError::InvalidRequest("text_query is required for text search".to_owned()),
+        ),
+        RuntimeSearchMode::Vector if request.vector_query.is_none() => Err(
+            RuntimeError::InvalidRequest("vector_query is required for vector search".to_owned()),
+        ),
+        RuntimeSearchMode::Hybrid if request.text_query.is_none() => Err(
+            RuntimeError::InvalidRequest("text_query is required for hybrid search".to_owned()),
+        ),
+        RuntimeSearchMode::Hybrid if request.vector_query.is_none() => Err(
+            RuntimeError::InvalidRequest("vector_query is required for hybrid search".to_owned()),
+        ),
+        _ => Ok(()),
+    }
+}
 
 #[cfg(test)]
 type SearchGenerationRaceHook = Box<dyn FnOnce() + Send>;
@@ -793,6 +833,304 @@ impl RuntimeStore {
         ))
     }
 
+    pub fn search_doc_ids(
+        &mut self,
+        request: RuntimeSearchRequest,
+    ) -> Result<Vec<String>, RuntimeError> {
+        self.search_doc_ids_profiled(request)
+            .map(|response| response.doc_ids)
+    }
+
+    pub fn search_doc_ids_snapshot(
+        &mut self,
+        request: RuntimeSearchRequest,
+    ) -> Result<Vec<String>, RuntimeError> {
+        self.search_doc_ids_snapshot_profiled(request)
+            .map(|response| response.doc_ids)
+    }
+
+    pub fn search_doc_ids_profiled(
+        &mut self,
+        request: RuntimeSearchRequest,
+    ) -> Result<RuntimeSearchDocIdsResponse, RuntimeError> {
+        let total_start = Instant::now();
+        let mut profile = RuntimeSearchProfile {
+            attempts: 0,
+            refresh_ms: 0.0,
+            live_doc_count_ms: 0.0,
+            lane_load_ms: 0.0,
+            rank_ms: 0.0,
+            generation_check_ms: 0.0,
+            total_ms: 0.0,
+        };
+        if self.closed {
+            return Err(RuntimeError::InvalidRequest(
+                "runtime store is already closed".to_owned(),
+            ));
+        }
+        validate_search_request(&request)?;
+        if request.top_k == 0 {
+            profile.total_ms = elapsed_ms(total_start);
+            return Ok(RuntimeSearchDocIdsResponse {
+                doc_ids: Vec::new(),
+                profile,
+            });
+        }
+        for attempt in 0..2 {
+            profile.attempts += 1;
+            let phase_start = Instant::now();
+            self.refresh_read_state_if_store_generation_changed()?;
+            profile.refresh_ms += elapsed_ms(phase_start);
+            let snapshot_generation = self.store_generation;
+            #[cfg(test)]
+            run_search_generation_race_hook();
+
+            let phase_start = Instant::now();
+            let live_doc_count = self.live_doc_count()?;
+            profile.live_doc_count_ms += elapsed_ms(phase_start);
+            if live_doc_count == 0 {
+                let phase_start = Instant::now();
+                let generation_changed =
+                    self.search_generation_changed_since(snapshot_generation)?;
+                profile.generation_check_ms += elapsed_ms(phase_start);
+                if generation_changed {
+                    self.invalidate_read_cache();
+                    if attempt == 1 {
+                        break;
+                    }
+                    continue;
+                }
+                profile.total_ms = elapsed_ms(total_start);
+                return Ok(RuntimeSearchDocIdsResponse {
+                    doc_ids: Vec::new(),
+                    profile,
+                });
+            }
+            let top_k = request.top_k.min(live_doc_count);
+
+            let doc_ids_result = match request.mode {
+                RuntimeSearchMode::Text => (|| {
+                    let text_query = request.text_query.as_deref().ok_or_else(|| {
+                        RuntimeError::InvalidRequest(
+                            "text_query is required for text search".to_owned(),
+                        )
+                    })?;
+                    let phase_start = Instant::now();
+                    let text_lane = self.ensure_text_lane()?;
+                    profile.lane_load_ms += elapsed_ms(phase_start);
+                    let phase_start = Instant::now();
+                    let hits = text_lane.search_with_limit(text_query, top_k);
+                    profile.rank_ms += elapsed_ms(phase_start);
+                    Ok(hits)
+                })(),
+                RuntimeSearchMode::Vector => (|| {
+                    let vector_query = request.vector_query.as_deref().ok_or_else(|| {
+                        RuntimeError::InvalidRequest(
+                            "vector_query is required for vector search".to_owned(),
+                        )
+                    })?;
+                    let phase_start = Instant::now();
+                    let vector_lane = self.ensure_vector_lane()?;
+                    profile.lane_load_ms += elapsed_ms(phase_start);
+                    let phase_start = Instant::now();
+                    let hits = vector_lane
+                        .search_with_query(
+                            vector_query,
+                            top_k,
+                            rax_bench_model::VectorQueryMode::Auto,
+                            false,
+                        )
+                        .map_err(RuntimeError::Storage)?;
+                    profile.rank_ms += elapsed_ms(phase_start);
+                    Ok(hits)
+                })(),
+                RuntimeSearchMode::Hybrid => (|| {
+                    let text_query = request.text_query.as_deref().ok_or_else(|| {
+                        RuntimeError::InvalidRequest(
+                            "text_query is required for hybrid search".to_owned(),
+                        )
+                    })?;
+                    let vector_query = request.vector_query.as_deref().ok_or_else(|| {
+                        RuntimeError::InvalidRequest(
+                            "vector_query is required for hybrid search".to_owned(),
+                        )
+                    })?;
+                    let text_limit = hybrid_text_candidate_limit(top_k, live_doc_count);
+                    let phase_start = Instant::now();
+                    let text_lane = self.ensure_text_lane()?;
+                    profile.lane_load_ms += elapsed_ms(phase_start);
+                    let phase_start = Instant::now();
+                    let text_hits = text_lane.search_with_limit(text_query, text_limit);
+                    profile.rank_ms += elapsed_ms(phase_start);
+                    let phase_start = Instant::now();
+                    let vector_lane = self.ensure_vector_lane()?;
+                    profile.lane_load_ms += elapsed_ms(phase_start);
+                    let phase_start = Instant::now();
+                    let report = hybrid_search_with_diagnostics(
+                        &text_hits,
+                        vector_lane,
+                        vector_query,
+                        top_k,
+                        rax_bench_model::VectorQueryMode::Auto,
+                        false,
+                    )
+                    .map_err(RuntimeError::Storage)?;
+                    profile.rank_ms += elapsed_ms(phase_start);
+                    Ok(report.fused_hits)
+                })(),
+            };
+            let doc_ids = match doc_ids_result {
+                Ok(doc_ids) => doc_ids,
+                Err(error) => {
+                    let phase_start = Instant::now();
+                    let generation_changed =
+                        self.search_generation_changed_since(snapshot_generation)?;
+                    profile.generation_check_ms += elapsed_ms(phase_start);
+                    if generation_changed {
+                        self.invalidate_read_cache();
+                        if attempt == 1 {
+                            break;
+                        }
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
+
+            let phase_start = Instant::now();
+            let generation_changed = self.search_generation_changed_since(snapshot_generation)?;
+            profile.generation_check_ms += elapsed_ms(phase_start);
+            if generation_changed {
+                self.invalidate_read_cache();
+                if attempt == 1 {
+                    break;
+                }
+                continue;
+            }
+            profile.total_ms = elapsed_ms(total_start);
+            return Ok(RuntimeSearchDocIdsResponse { doc_ids, profile });
+        }
+        Err(RuntimeError::Storage(
+            "store generation changed during search; retry".to_owned(),
+        ))
+    }
+
+    pub fn search_doc_ids_snapshot_profiled(
+        &mut self,
+        request: RuntimeSearchRequest,
+    ) -> Result<RuntimeSearchDocIdsResponse, RuntimeError> {
+        let total_start = Instant::now();
+        let mut profile = RuntimeSearchProfile {
+            attempts: 1,
+            refresh_ms: 0.0,
+            live_doc_count_ms: 0.0,
+            lane_load_ms: 0.0,
+            rank_ms: 0.0,
+            generation_check_ms: 0.0,
+            total_ms: 0.0,
+        };
+        if self.closed {
+            return Err(RuntimeError::InvalidRequest(
+                "runtime store is already closed".to_owned(),
+            ));
+        }
+        validate_search_request(&request)?;
+        if request.top_k == 0 {
+            profile.total_ms = elapsed_ms(total_start);
+            return Ok(RuntimeSearchDocIdsResponse {
+                doc_ids: Vec::new(),
+                profile,
+            });
+        }
+
+        let phase_start = Instant::now();
+        let live_doc_count = self.live_doc_count()?;
+        profile.live_doc_count_ms += elapsed_ms(phase_start);
+        if live_doc_count == 0 {
+            profile.total_ms = elapsed_ms(total_start);
+            return Ok(RuntimeSearchDocIdsResponse {
+                doc_ids: Vec::new(),
+                profile,
+            });
+        }
+        let top_k = request.top_k.min(live_doc_count);
+
+        let doc_ids = match request.mode {
+            RuntimeSearchMode::Text => {
+                let text_query = request.text_query.as_deref().ok_or_else(|| {
+                    RuntimeError::InvalidRequest(
+                        "text_query is required for text search".to_owned(),
+                    )
+                })?;
+                let phase_start = Instant::now();
+                let text_lane = self.ensure_text_lane()?;
+                profile.lane_load_ms += elapsed_ms(phase_start);
+                let phase_start = Instant::now();
+                let hits = text_lane.search_with_limit(text_query, top_k);
+                profile.rank_ms += elapsed_ms(phase_start);
+                hits
+            }
+            RuntimeSearchMode::Vector => {
+                let vector_query = request.vector_query.as_deref().ok_or_else(|| {
+                    RuntimeError::InvalidRequest(
+                        "vector_query is required for vector search".to_owned(),
+                    )
+                })?;
+                let phase_start = Instant::now();
+                let vector_lane = self.ensure_vector_lane()?;
+                profile.lane_load_ms += elapsed_ms(phase_start);
+                let phase_start = Instant::now();
+                let hits = vector_lane
+                    .search_with_query(
+                        vector_query,
+                        top_k,
+                        rax_bench_model::VectorQueryMode::Auto,
+                        false,
+                    )
+                    .map_err(RuntimeError::Storage)?;
+                profile.rank_ms += elapsed_ms(phase_start);
+                hits
+            }
+            RuntimeSearchMode::Hybrid => {
+                let text_query = request.text_query.as_deref().ok_or_else(|| {
+                    RuntimeError::InvalidRequest(
+                        "text_query is required for hybrid search".to_owned(),
+                    )
+                })?;
+                let vector_query = request.vector_query.as_deref().ok_or_else(|| {
+                    RuntimeError::InvalidRequest(
+                        "vector_query is required for hybrid search".to_owned(),
+                    )
+                })?;
+                let text_limit = hybrid_text_candidate_limit(top_k, live_doc_count);
+                let phase_start = Instant::now();
+                let text_lane = self.ensure_text_lane()?;
+                profile.lane_load_ms += elapsed_ms(phase_start);
+                let phase_start = Instant::now();
+                let text_hits = text_lane.search_with_limit(text_query, text_limit);
+                profile.rank_ms += elapsed_ms(phase_start);
+                let phase_start = Instant::now();
+                let vector_lane = self.ensure_vector_lane()?;
+                profile.lane_load_ms += elapsed_ms(phase_start);
+                let phase_start = Instant::now();
+                let report = hybrid_search_with_diagnostics(
+                    &text_hits,
+                    vector_lane,
+                    vector_query,
+                    top_k,
+                    rax_bench_model::VectorQueryMode::Auto,
+                    false,
+                )
+                .map_err(RuntimeError::Storage)?;
+                profile.rank_ms += elapsed_ms(phase_start);
+                report.fused_hits
+            }
+        };
+
+        profile.total_ms = elapsed_ms(total_start);
+        Ok(RuntimeSearchDocIdsResponse { doc_ids, profile })
+    }
+
     pub fn close(&mut self) -> Result<(), RuntimeError> {
         self.closed = true;
         Ok(())
@@ -857,7 +1195,7 @@ impl RuntimeStore {
             let root_path = self.root_path();
             let store_path = self.store_path();
             self.text_lane = Some(
-                TextLane::load_with_store_path(&root_path, &self.manifest, &store_path)
+                TextLane::load_runtime_with_store_path(&root_path, &self.manifest, &store_path)
                     .map_err(RuntimeError::Storage)?,
             );
         }
@@ -896,27 +1234,20 @@ impl RuntimeStore {
         doc_ids: &[String],
         include_preview: bool,
     ) -> Result<Vec<RuntimeSearchHit>, RuntimeError> {
+        if !include_preview {
+            return Ok(doc_ids
+                .iter()
+                .map(|doc_id| RuntimeSearchHit {
+                    doc_id: doc_id.clone(),
+                    preview: None,
+                })
+                .collect());
+        }
+
         let documents = self
             .docstore
             .load_documents_by_id(doc_ids)
             .map_err(|error| RuntimeError::Storage(docstore_error(error)))?;
-        if !include_preview {
-            return doc_ids
-                .iter()
-                .map(|doc_id| {
-                    if !documents.contains_key(doc_id) {
-                        return Err(RuntimeError::Storage(format!(
-                            "search hit {doc_id} has no loadable document payload"
-                        )));
-                    }
-                    Ok(RuntimeSearchHit {
-                        doc_id: doc_id.clone(),
-                        preview: None,
-                    })
-                })
-                .collect();
-        }
-
         doc_ids
             .iter()
             .map(|doc_id| {
@@ -3127,8 +3458,8 @@ mod tests {
         publish_segments_with_precondition, PendingSegmentDescriptor, PendingSegmentWrite,
         SegmentKind,
     };
-    use rax_docstore::Docstore;
-    use rax_text::publish_compatibility_text_segment;
+    use rax_docstore::{prepare_raw_documents_segment, Docstore};
+    use rax_text::{prepare_text_segment_from_documents, publish_compatibility_text_segment};
     use rax_vector::publish_compatibility_vector_segment;
     use serde_json::json;
     use tempfile::tempdir;
@@ -4016,7 +4347,56 @@ mod tests {
         assert_eq!(hybrid.hits[0].doc_id, "doc-002");
         assert_eq!(hybrid.hits[0].preview, None);
 
+        let doc_ids = runtime
+            .search_doc_ids(RuntimeSearchRequest {
+                mode: RuntimeSearchMode::Text,
+                text_query: Some("rust benchmark".to_owned()),
+                vector_query: None,
+                top_k: 1,
+                include_preview: false,
+            })
+            .unwrap();
+        assert_eq!(doc_ids, vec!["doc-001"]);
+
         runtime.close().unwrap();
+    }
+
+    #[test]
+    fn runtime_search_without_preview_does_not_hydrate_document_payloads() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("store.rax");
+        create_empty_store(&store_path).unwrap();
+        let doc_pending = prepare_raw_documents_segment(
+            &store_path,
+            vec![(
+                "doc-1".to_owned(),
+                json!({"doc_id":"doc-1","text":"payload"}),
+            )],
+        )
+        .unwrap();
+        let text_pending =
+            prepare_text_segment_from_documents(&[("ghost".to_owned(), "alpha".to_owned())])
+                .unwrap();
+        publish_segments_with_precondition(
+            &store_path,
+            vec![doc_pending, text_pending],
+            |_| Ok(()),
+        )
+        .unwrap();
+        let mut runtime = RuntimeStore::open_at(&store_path).unwrap();
+
+        let response = runtime
+            .search(RuntimeSearchRequest {
+                mode: RuntimeSearchMode::Text,
+                text_query: Some("alpha".to_owned()),
+                vector_query: None,
+                top_k: 1,
+                include_preview: false,
+            })
+            .unwrap();
+
+        assert_eq!(response.hits[0].doc_id, "ghost");
+        assert_eq!(response.hits[0].preview, None);
     }
 
     #[test]
