@@ -239,10 +239,6 @@ includes previews by default; pass `--no-preview` to disable them.
 - No hidden embedding generation for product vector or hybrid search.
 - No MCP crate, stdio server, JSON-RPC tool surface, or MCP-focused contract
   tests are part of the current build.
-- Structured memory currently uses bootstrap `structured-memory.ndjson`
-  persistence, not a final binary structured-memory format.
-- Multimodal support currently owns asset import and typed image/video read
-  scaffolds, not OCR, captions, transcripts, embeddings, or retrieval parity.
 - Apple acceleration is an explicit capability/preference surface; execution
   falls back to the Rust default backend when Apple-specific backends are
   unavailable or not compiled.

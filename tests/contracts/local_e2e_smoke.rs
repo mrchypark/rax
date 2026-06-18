@@ -375,7 +375,7 @@ fn local_e2e_smoke_search_bench_uses_runtime_store_built_from_pack() {
     .unwrap();
     assert_eq!(ranked_results.as_array().unwrap().len(), 5);
     assert_eq!(ranked_results[0]["query_id"], "q-101");
-    assert!(ranked_results[0]["hits"].as_array().unwrap().len() > 0);
+    assert!(!ranked_results[0]["hits"].as_array().unwrap().is_empty());
     assert!(ranked_results[0]["hits"][0]["doc_id"].as_str().is_some());
 
     let quality: serde_json::Value = serde_json::from_str(

@@ -10,10 +10,8 @@ members = [
   "crates/rax-broker",
   "crates/rax-core",
   "crates/rax-docstore",
-  "crates/rax-multimodal",
   "crates/rax-runtime",
   "crates/rax-search",
-  "crates/rax-structured-memory",
   "crates/rax-text",
   "crates/rax-vector",
   "crates/rax-bench-artifacts",
@@ -45,8 +43,6 @@ rax-core = { path = "crates/rax-core" }
 rax-docstore = { path = "crates/rax-docstore" }
 rax-broker = { path = "crates/rax-broker" }
 rax-runtime = { path = "crates/rax-runtime" }
-rax-multimodal = { path = "crates/rax-multimodal" }
-rax-structured-memory = { path = "crates/rax-structured-memory" }
 rax-text = { path = "crates/rax-text" }
 rax-vector = { path = "crates/rax-vector" }
 
@@ -121,22 +117,6 @@ path = "tests/contracts/product_cli_contract.rs"
 [[test]]
 name = "broker_session_contract"
 path = "tests/contracts/broker_session_contract.rs"
-
-[[test]]
-name = "structured_memory_contract"
-path = "tests/contracts/structured_memory_contract.rs"
-
-[[test]]
-name = "multimodal_ingest_contract"
-path = "tests/contracts/multimodal_ingest_contract.rs"
-
-[[test]]
-name = "photorag_parity_contract"
-path = "tests/contracts/photorag_parity_contract.rs"
-
-[[test]]
-name = "videorag_parity_contract"
-path = "tests/contracts/videorag_parity_contract.rs"
 
 [[test]]
 name = "apple_acceleration_contract"
