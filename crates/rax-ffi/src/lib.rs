@@ -275,7 +275,8 @@ pub unsafe extern "C" fn rax_open_read_only(
     ffi_status(|| {
         ensure_handle_output(out_handle)?;
         let store = required_path(store, "store")?;
-        let runtime = RuntimeStore::open_existing_read_only_at(&store).map_err(runtime_error)?;
+        let runtime =
+            RuntimeStore::open_existing_read_only_snapshot_at(&store).map_err(runtime_error)?;
         let handle = Box::new(RaxReadHandle { runtime });
         unsafe {
             *out_handle = Box::into_raw(handle).cast();

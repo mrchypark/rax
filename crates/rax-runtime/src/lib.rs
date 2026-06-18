@@ -118,6 +118,10 @@ fn validate_search_request(request: &RuntimeSearchRequest) -> Result<(), Runtime
     }
 }
 
+fn is_product_runtime_manifest(manifest: &DatasetPackManifest) -> bool {
+    manifest.schema_version == "rax-product"
+}
+
 #[cfg(test)]
 type SearchGenerationRaceHook = Box<dyn FnOnce() + Send>;
 #[cfg(test)]
@@ -533,6 +537,14 @@ impl RuntimeStore {
         path: &Path,
         store_open_mode: ProductStoreOpenMode,
     ) -> Result<Self, RuntimeError> {
+        Self::open_at_with_mode_options(path, store_open_mode, false)
+    }
+
+    fn open_at_with_mode_options(
+        path: &Path,
+        store_open_mode: ProductStoreOpenMode,
+        read_only_snapshot_open: bool,
+    ) -> Result<Self, RuntimeError> {
         ensure_stable_store_paths_supported()?;
         let stable_store = stable_product_store_path(path, store_open_mode)?;
         let input_root = product_store_root(&stable_store.path)?;
@@ -546,6 +558,7 @@ impl RuntimeStore {
             stable_store.handle,
             stable_store.identity,
             store_open_mode,
+            read_only_snapshot_open,
         )
     }
 
@@ -567,6 +580,16 @@ impl RuntimeStore {
             )));
         }
         Self::open_at_with_mode(path, ProductStoreOpenMode::ReadOnly)
+    }
+
+    pub fn open_existing_read_only_snapshot_at(path: &Path) -> Result<Self, RuntimeError> {
+        if !path.exists() {
+            return Err(RuntimeError::InvalidRequest(format!(
+                "memory store does not exist at {}",
+                path.display()
+            )));
+        }
+        Self::open_at_with_mode_options(path, ProductStoreOpenMode::ReadOnly, true)
     }
 
     pub fn writer(&mut self) -> Result<RuntimeStoreWriter<'_>, RuntimeError> {
@@ -617,6 +640,7 @@ impl RuntimeStore {
             stable_store.handle,
             stable_store.identity,
             store_open_mode,
+            false,
         )
     }
 
@@ -627,16 +651,28 @@ impl RuntimeStore {
         store_handle: StableStoreHandle,
         store_identity: Option<FileIdentity>,
         store_open_mode: ProductStoreOpenMode,
+        read_only_snapshot_open: bool,
     ) -> Result<Self, RuntimeError> {
         #[cfg(not(unix))]
         let _ = store_handle;
         ensure_store_identity_matches(&store_path, store_identity.as_ref())?;
-        let store_generation = loaded_store_manifest_generation_if_present(&store_path)?;
+        let use_runtime_read_only_open = read_only_snapshot_open
+            && store_open_mode == ProductStoreOpenMode::ReadOnly
+            && is_product_runtime_manifest(&manifest);
+        let store_generation = if use_runtime_read_only_open {
+            loaded_store_manifest_generation_shallow_if_present(&store_path)?
+        } else {
+            loaded_store_manifest_generation_if_present(&store_path)?
+        };
         ensure_store_identity_matches(&store_path, store_identity.as_ref())?;
         let root_path = stable_runtime_root_current_path(&root);
         validate_prebuilt_store_segments_against_dataset_pack(&root_path, &manifest, &store_path)?;
-        let docstore = Docstore::open_with_store_path(&root_path, &manifest, &store_path)
-            .map_err(|error| RuntimeError::Storage(docstore_error(error)))?;
+        let docstore = if use_runtime_read_only_open {
+            Docstore::open_runtime_with_store_path(&root_path, &manifest, &store_path)
+        } else {
+            Docstore::open_with_store_path(&root_path, &manifest, &store_path)
+        }
+        .map_err(|error| RuntimeError::Storage(docstore_error(error)))?;
 
         Ok(Self {
             root: root_path,
@@ -671,6 +707,7 @@ impl RuntimeStore {
             store_handle,
             store_identity,
             ProductStoreOpenMode::ReadWrite,
+            false,
         )
     }
 
@@ -2081,6 +2118,13 @@ fn loaded_store_manifest_generation_from_store(store_path: &Path) -> Result<u64,
     store_manifest_generation_from_store(store_path)
 }
 
+fn loaded_store_manifest_generation_shallow_from_store(
+    store_path: &Path,
+) -> Result<u64, RuntimeError> {
+    let opened = rax_core::open_store_shallow(store_path).map_err(runtime_core_error)?;
+    Ok(opened.manifest.generation)
+}
+
 fn store_manifest_generation_if_present(store_path: &Path) -> Result<Option<u64>, RuntimeError> {
     match std::fs::symlink_metadata(store_path) {
         Ok(_) => store_manifest_generation_from_store(store_path).map(Some),
@@ -2094,6 +2138,16 @@ fn loaded_store_manifest_generation_if_present(
 ) -> Result<Option<u64>, RuntimeError> {
     match std::fs::symlink_metadata(store_path) {
         Ok(_) => loaded_store_manifest_generation_from_store(store_path).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(RuntimeError::Storage(error.to_string())),
+    }
+}
+
+fn loaded_store_manifest_generation_shallow_if_present(
+    store_path: &Path,
+) -> Result<Option<u64>, RuntimeError> {
+    match std::fs::symlink_metadata(store_path) {
+        Ok(_) => loaded_store_manifest_generation_shallow_from_store(store_path).map(Some),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(RuntimeError::Storage(error.to_string())),
     }

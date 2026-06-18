@@ -879,9 +879,30 @@ impl Docstore {
         manifest: &DatasetPackManifest,
         store_path: &Path,
     ) -> Result<Self, DocstoreError> {
+        Self::open_with_store_path_mode(mount_root, manifest, store_path, true)
+    }
+
+    pub fn open_runtime_with_store_path(
+        mount_root: &Path,
+        manifest: &DatasetPackManifest,
+        store_path: &Path,
+    ) -> Result<Self, DocstoreError> {
+        Self::open_with_store_path_mode(mount_root, manifest, store_path, false)
+    }
+
+    fn open_with_store_path_mode(
+        mount_root: &Path,
+        manifest: &DatasetPackManifest,
+        store_path: &Path,
+        validate_active_segments: bool,
+    ) -> Result<Self, DocstoreError> {
         if store_path.exists() {
-            let opened = rax_core::open_store(store_path)
-                .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))?;
+            let opened = if validate_active_segments {
+                rax_core::open_store(store_path)
+            } else {
+                rax_core::open_store_shallow(store_path)
+            }
+            .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))?;
             if let Some(descriptor) = opened
                 .manifest
                 .segments
