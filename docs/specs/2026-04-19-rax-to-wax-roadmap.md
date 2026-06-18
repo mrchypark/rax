@@ -235,7 +235,6 @@ Slice C handoff status:
 - the first product CLI intentionally keeps compatibility import explicit and does not surface benchmark pack/run/reduce workflows or pretend to offer final raw ingest
 - historically, `wax-v2-broker` first existed as the broker/session crate with opaque session ids plus in-process `RuntimeStore` reuse for text search, compatibility import, and close
 - the first broker/session surface was intentionally local and text-first, so it stayed reusable for later daemon transport without prematurely freezing vector-input or concurrency policy
-- historically, `wax-v2-mcp` first existed as an MCP-compatible crate with transport-ready request/response enums for session open, text search, compatibility import, and close over `wax-v2-broker`; that MCP slice has since been removed from the current build
 - `wax-v2-structured-memory` now exists as the first bootstrap structured-memory crate with explicit `subject/predicate/value/status/provenance` records and a bootstrap `structured-memory.ndjson` persistence layer
 - the first structured-memory slice deliberately stops short of final Wax binary segment persistence and full upstream entity/fact parity, but it now gives deferred-parity work an explicit boundary instead of hiding structure inside document metadata
 - `wax-v2-structured-memory` now also exposes first explicit `StructuredEntity` and `StructuredFact` APIs above the same bootstrap persistence layer, so broker callers no longer need to reinterpret generic bootstrap records to express entity or fact intent
@@ -341,6 +340,4 @@ The next product-write roadmap is tracked separately in `docs/specs/2026-04-20-r
 Current status note, 2026-05-29: the historical first product surface above has
 since been superseded. The current `wax` CLI commands are `create`, `remember`,
 `recall`, `ingest docs`, `ingest vectors`, and `search`; there is no
-`import-compat` product CLI command. MCP support has since been removed
-entirely; there is no MCP crate, stdio server, JSON-RPC tool surface, or trusted
-in-process MCP adapter in the current build.
+`import-compat` product CLI command.

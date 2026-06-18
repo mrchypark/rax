@@ -51,13 +51,6 @@ session search plus raw ingest operations:
 Raw broker documents map to `NewDocument`; raw broker vectors map to
 `NewDocumentVector`.
 
-## Removed MCP Support
-
-There is no MCP crate, stdio server, JSON-RPC tool surface, or trusted
-in-process MCP adapter in the current build. Product access is through the
-`rax` CLI, `rax-runtime`, and the in-process `rax-broker`
-session surface.
-
 ## Benchmark CLI
 
 The `rax-bench-cli` commands are:

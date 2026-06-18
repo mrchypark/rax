@@ -161,5 +161,5 @@
 - Keep `publish_raw_snapshot` as the explicit full-replacement primitive; use `publish_raw_documents` only for incremental document updates against existing raw store documents.
 - Guard raw document and vector publication with store-generation or document-segment preconditions from the state that was actually validated.
 - Refresh long-lived runtime, broker, structured-memory, and multimodal sessions before read operations that can be affected by another handle's write.
-- MCP support has since been removed entirely; preserve unknown top-level raw document fields through broker boundaries.
+- Preserve unknown top-level raw document fields through broker boundaries.
 - Fall back to exact-flat vector search when HNSW sidecars are declared but missing, including explicit HNSW mode.
