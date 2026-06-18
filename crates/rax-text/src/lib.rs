@@ -112,6 +112,7 @@ pub struct TextLaneEligibility {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TextLaneMetadata {
     source: TextLaneSource,
+    validate_store_object_payloads: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +206,7 @@ impl TextLaneMetadata {
                         store_path: store_path.to_path_buf(),
                         descriptor,
                     },
+                    validate_store_object_payloads: validate_active_segments,
                 });
             }
             if latest_doc_descriptor.is_some() {
@@ -219,6 +221,7 @@ impl TextLaneMetadata {
             source: TextLaneSource::Compatibility {
                 postings_path: compatibility_postings_path(mount_root, manifest)?,
             },
+            validate_store_object_payloads: true,
         })
     }
 }
@@ -920,8 +923,12 @@ fn load_text_postings(metadata: &TextLaneMetadata) -> Result<TextPostings, Strin
             store_path,
             descriptor,
         } => {
-            let bytes = rax_core::map_segment_object(store_path, descriptor)
-                .map_err(|error| error.to_string())?;
+            let bytes = if metadata.validate_store_object_payloads {
+                rax_core::map_segment_object(store_path, descriptor)
+            } else {
+                rax_core::map_segment_object_shallow(store_path, descriptor)
+            }
+            .map_err(|error| error.to_string())?;
             validate_binary_text_segment_header(&bytes)?;
             Ok(TextPostings::LazyStore(LazyStoreTextPostings::new(bytes)))
         }

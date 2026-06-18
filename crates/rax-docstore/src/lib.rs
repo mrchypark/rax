@@ -545,6 +545,17 @@ struct StoreDocSegment {
 
 impl StoreDocSegment {
     fn open(bytes: rax_core::SegmentObject) -> Result<Self, DocstoreError> {
+        Self::open_with_contents_checksum(bytes, true)
+    }
+
+    fn open_snapshot(bytes: rax_core::SegmentObject) -> Result<Self, DocstoreError> {
+        Self::open_with_contents_checksum(bytes, false)
+    }
+
+    fn open_with_contents_checksum(
+        bytes: rax_core::SegmentObject,
+        validate_contents_checksum: bool,
+    ) -> Result<Self, DocstoreError> {
         let bytes = Arc::new(bytes);
         if bytes.len() < DOC_SEGMENT_VERSION_PREFIX_LENGTH {
             return Err(DocstoreError::InvalidDocument(format!(
@@ -611,7 +622,7 @@ impl StoreDocSegment {
 
         let mut contents_checksum = [0u8; 32];
         contents_checksum.copy_from_slice(&bytes[checksum_start..checksum_end]);
-        if sha256(&bytes[header_length..]) != contents_checksum {
+        if validate_contents_checksum && sha256(&bytes[header_length..]) != contents_checksum {
             return Err(DocstoreError::InvalidDocument(
                 "doc segment checksum mismatch".to_owned(),
             ));
@@ -910,7 +921,7 @@ impl Docstore {
                 .filter(|segment| segment.family == SegmentKind::Doc)
                 .max_by_key(|segment| (segment.segment_generation, segment.object_offset))
             {
-                return Self::open_store_segment(store_path, descriptor);
+                return Self::open_store_segment(store_path, descriptor, validate_active_segments);
             }
         }
         if manifest.files.iter().all(|file| file.kind != "documents") {
@@ -1154,10 +1165,19 @@ impl Docstore {
     fn open_store_segment(
         store_path: &Path,
         descriptor: &rax_core::SegmentDescriptor,
+        validate_payload: bool,
     ) -> Result<Self, DocstoreError> {
-        let bytes = rax_core::map_segment_object(store_path, descriptor)
-            .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))?;
-        let segment = StoreDocSegment::open(bytes)?;
+        let bytes = if validate_payload {
+            rax_core::map_segment_object(store_path, descriptor)
+        } else {
+            rax_core::map_segment_object_shallow(store_path, descriptor)
+        }
+        .map_err(|error| DocstoreError::InvalidDocument(error.to_string()))?;
+        let segment = if validate_payload {
+            StoreDocSegment::open(bytes)?
+        } else {
+            StoreDocSegment::open_snapshot(bytes)?
+        };
 
         Ok(Self {
             source: DocstoreSource::Store { segment },
@@ -1188,7 +1208,7 @@ pub fn validate_store_segment_against_dataset_pack_with_store_path(
         return Ok(());
     };
 
-    let store_docstore = Docstore::open_store_segment(store_path, descriptor)?;
+    let store_docstore = Docstore::open_store_segment(store_path, descriptor, true)?;
     validate_store_docstore_against_dataset_pack(mount_root, manifest, &store_docstore)
 }
 
@@ -1198,7 +1218,7 @@ pub fn validate_store_doc_descriptor_against_dataset_pack(
     mount_root: &Path,
     manifest: &DatasetPackManifest,
 ) -> Result<(), DocstoreError> {
-    let store_docstore = Docstore::open_store_segment(store_path, descriptor)?;
+    let store_docstore = Docstore::open_store_segment(store_path, descriptor, true)?;
     validate_store_docstore_against_dataset_pack(mount_root, manifest, &store_docstore)
 }
 
@@ -1213,7 +1233,7 @@ pub fn load_store_ordered_documents(
     store_path: &Path,
     descriptor: &SegmentDescriptor,
 ) -> Result<Vec<(String, Value)>, DocstoreError> {
-    Docstore::open_store_segment(store_path, descriptor)?.ordered_documents()
+    Docstore::open_store_segment(store_path, descriptor, true)?.ordered_documents()
 }
 
 pub fn order_document_ids_for_store(
@@ -1240,7 +1260,7 @@ pub fn load_store_document_ids(store_path: &Path) -> Result<Option<Vec<String>>,
     let Some(descriptor) = active_doc_descriptor(&opened) else {
         return Ok(None);
     };
-    let store_docstore = Docstore::open_store_segment(store_path, descriptor)?;
+    let store_docstore = Docstore::open_store_segment(store_path, descriptor, true)?;
     store_docstore.load_document_ids().map(Some)
 }
 

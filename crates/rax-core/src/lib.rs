@@ -1581,6 +1581,26 @@ pub fn map_segment_object(
     path: &Path,
     descriptor: &SegmentDescriptor,
 ) -> Result<SegmentObject, CoreError> {
+    map_segment_object_with_payload_validation(path, descriptor, true)
+}
+
+/// Reads a persisted segment object and returns a payload view after validating only descriptor
+/// bounds and the object header checksum contract.
+///
+/// This is intended for already-opened read-only snapshot paths that have explicitly chosen fast
+/// header validation over rescanning large immutable payloads.
+pub fn map_segment_object_shallow(
+    path: &Path,
+    descriptor: &SegmentDescriptor,
+) -> Result<SegmentObject, CoreError> {
+    map_segment_object_with_payload_validation(path, descriptor, false)
+}
+
+fn map_segment_object_with_payload_validation(
+    path: &Path,
+    descriptor: &SegmentDescriptor,
+    validate_payload: bool,
+) -> Result<SegmentObject, CoreError> {
     let mut file = open_store_file_read(path)?;
     let file_length = file.metadata()?.len();
     let object_end = descriptor
@@ -1645,11 +1665,20 @@ pub fn map_segment_object(
             .map(&file)?
     };
     let object_end = map_prefix + object_length;
-    let decoded = decode_object_payload(
-        &mapped[map_prefix..object_end],
-        object_type_for_family(descriptor.family),
-        descriptor.segment_generation,
-    )?;
+    let object_bytes = &mapped[map_prefix..object_end];
+    let decoded = if validate_payload {
+        decode_object_payload(
+            object_bytes,
+            object_type_for_family(descriptor.family),
+            descriptor.segment_generation,
+        )?
+    } else {
+        decode_object_payload_header(
+            object_bytes,
+            object_type_for_family(descriptor.family),
+            descriptor.segment_generation,
+        )?
+    };
     if decoded.payload_checksum != descriptor.object_checksum {
         return Err(CoreError::ChecksumMismatch {
             context: "segment object",
@@ -3011,14 +3040,14 @@ mod tests {
 
     use crate::{
         align_up, create_empty_store, decode_object_payload, default_mmap_allocation_granularity,
-        map_segment_object, open_store, publish_segment, publish_segments,
-        publish_segments_with_precondition, read_segment_object, set_create_empty_store_fail_hook,
-        set_create_empty_store_pre_publish_hook, write_zero_padding, ActiveManifest, CoreError,
-        ObjectType, PendingSegmentDescriptor, PendingSegmentWrite, SegmentDescriptor, SegmentKind,
-        SegmentObjectBacking, Superblock, DEFAULT_OBJECT_ALIGNMENT, FORMAT_VERSION,
-        MANIFEST_HEADER_LENGTH, MANIFEST_MAGIC, MAX_ACTIVE_SEGMENT_BYTES,
-        MAX_MANIFEST_OBJECT_LENGTH, OBJECT_HEADER_LENGTH, OBJECT_MAGIC, SEGMENT_DESCRIPTOR_LENGTH,
-        STORE_PUBLISH_LOCK_BUSY_MESSAGE, SUPERBLOCK_SIZE,
+        map_segment_object, map_segment_object_shallow, open_store, publish_segment,
+        publish_segments, publish_segments_with_precondition, read_segment_object,
+        set_create_empty_store_fail_hook, set_create_empty_store_pre_publish_hook,
+        write_zero_padding, ActiveManifest, CoreError, ObjectType, PendingSegmentDescriptor,
+        PendingSegmentWrite, SegmentDescriptor, SegmentKind, SegmentObjectBacking, Superblock,
+        DEFAULT_OBJECT_ALIGNMENT, FORMAT_VERSION, MANIFEST_HEADER_LENGTH, MANIFEST_MAGIC,
+        MAX_ACTIVE_SEGMENT_BYTES, MAX_MANIFEST_OBJECT_LENGTH, OBJECT_HEADER_LENGTH, OBJECT_MAGIC,
+        SEGMENT_DESCRIPTOR_LENGTH, STORE_PUBLISH_LOCK_BUSY_MESSAGE, SUPERBLOCK_SIZE,
     };
 
     fn replace_segment(
@@ -4067,6 +4096,7 @@ mod tests {
             map_segment_object(&path, &descriptor).expect_err("payload checksum should fail");
 
         assert!(matches!(error, CoreError::ChecksumMismatch { .. }));
+        assert!(map_segment_object_shallow(&path, &descriptor).is_ok());
     }
 
     #[test]
