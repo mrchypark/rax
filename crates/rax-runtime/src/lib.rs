@@ -1255,8 +1255,8 @@ impl RuntimeStore {
     }
 
     fn ensure_text_lane(&mut self) -> Result<&TextLane, RuntimeError> {
+        self.ensure_snapshot_store_unchanged()?;
         if self.text_lane.is_none() {
-            self.ensure_snapshot_store_unchanged()?;
             let root_path = self.root_path();
             let store_path = self.store_path();
             let text_lane = if self.read_only_snapshot_open {
@@ -1279,8 +1279,8 @@ impl RuntimeStore {
     }
 
     fn ensure_vector_lane(&mut self) -> Result<&mut VectorLane, RuntimeError> {
+        self.ensure_snapshot_store_unchanged()?;
         if self.vector_lane.is_none() {
-            self.ensure_snapshot_store_unchanged()?;
             let root_path = self.root_path();
             let store_path = self.store_path();
             let vector_lane = VectorLane::load_runtime_with_store_path(
@@ -3920,6 +3920,42 @@ mod tests {
             })
             .unwrap_err();
 
+        assert!(
+            matches!(error, RuntimeError::Storage(message) if message.contains("snapshot store changed"))
+        );
+    }
+
+    #[test]
+    fn read_only_snapshot_doc_id_search_rejects_cached_lane_after_publish() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("agent.rax");
+        let mut writer = RuntimeStore::create_at(&store_path).unwrap();
+        writer
+            .writer()
+            .unwrap()
+            .publish_raw_snapshot(vec![NewDocument::new("doc-001", "alpha original")], None)
+            .unwrap();
+
+        let mut reader = RuntimeStore::open_existing_read_only_snapshot_at(&store_path).unwrap();
+        let request = RuntimeSearchRequest {
+            mode: RuntimeSearchMode::Text,
+            text_query: Some("alpha".to_owned()),
+            vector_query: None,
+            top_k: 10,
+            include_preview: false,
+        };
+        assert_eq!(
+            reader.search_doc_ids_snapshot(request.clone()).unwrap(),
+            vec!["doc-001".to_owned()]
+        );
+
+        writer
+            .writer()
+            .unwrap()
+            .publish_raw_snapshot(vec![NewDocument::new("doc-002", "alpha replacement")], None)
+            .unwrap();
+
+        let error = reader.search_doc_ids_snapshot(request).unwrap_err();
         assert!(
             matches!(error, RuntimeError::Storage(message) if message.contains("snapshot store changed"))
         );
