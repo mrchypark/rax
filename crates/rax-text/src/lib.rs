@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rax_bench_model::{tokenize, DatasetPackManifest};
 use rax_core::{PendingSegmentDescriptor, PendingSegmentWrite, SegmentDescriptor, SegmentKind};
@@ -25,14 +25,14 @@ pub struct TextLane {
 
 #[derive(Debug)]
 enum TextPostings {
-    InMemory(HashMap<String, Vec<String>>),
+    InMemory(HashMap<String, Arc<[String]>>),
     LazyStore(LazyStoreTextPostings),
 }
 
 #[derive(Debug)]
 struct LazyStoreTextPostings {
     bytes: rax_core::SegmentObject,
-    cache: Mutex<HashMap<String, Vec<String>>>,
+    cache: Mutex<HashMap<String, Arc<[String]>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -342,19 +342,25 @@ impl TextLane {
     }
 
     pub fn try_search_with_limit(&self, query: &str, limit: usize) -> Result<Vec<String>, String> {
-        let mut scores: HashMap<String, u32> = HashMap::new();
-        for token in tokenize(query) {
-            for doc_id in self.postings.doc_ids_for_token(&token)? {
-                *scores.entry(doc_id).or_insert(0) += 1;
+        let tokens = tokenize(query);
+        let postings_by_token = tokens
+            .iter()
+            .map(|token| self.postings.doc_ids_for_token(token))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut scores: HashMap<&str, u32> = HashMap::new();
+        for doc_ids in &postings_by_token {
+            for doc_id in doc_ids.iter() {
+                *scores.entry(doc_id.as_str()).or_insert(0) += 1;
             }
         }
 
-        let mut hits: Vec<(String, u32)> = scores.into_iter().collect();
-        hits.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        let mut hits: Vec<(&str, u32)> = scores.into_iter().collect();
+        hits.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0)));
         Ok(hits
             .into_iter()
             .take(limit)
-            .map(|(doc_id, _)| doc_id)
+            .map(|(doc_id, _)| doc_id.to_owned())
             .collect())
     }
 }
@@ -893,11 +899,12 @@ fn load_documents_for_text_builder(path: &Path) -> Result<Vec<(String, String)>,
 }
 
 impl TextPostings {
-    fn doc_ids_for_token(&self, token: &str) -> Result<Vec<String>, String> {
+    fn doc_ids_for_token(&self, token: &str) -> Result<Arc<[String]>, String> {
         match self {
-            TextPostings::InMemory(inverted) => {
-                Ok(inverted.get(token).cloned().unwrap_or_default())
-            }
+            TextPostings::InMemory(inverted) => Ok(inverted
+                .get(token)
+                .map(Arc::clone)
+                .unwrap_or_else(|| Arc::from(Vec::<String>::new().into_boxed_slice()))),
             TextPostings::LazyStore(postings) => postings.doc_ids_for_token(token),
         }
     }
@@ -911,7 +918,7 @@ impl LazyStoreTextPostings {
         }
     }
 
-    fn doc_ids_for_token(&self, token: &str) -> Result<Vec<String>, String> {
+    fn doc_ids_for_token(&self, token: &str) -> Result<Arc<[String]>, String> {
         if let Some(doc_ids) = self
             .cache
             .lock()
@@ -921,11 +928,11 @@ impl LazyStoreTextPostings {
         {
             return Ok(doc_ids);
         }
-        let doc_ids = find_doc_ids_for_token(&self.bytes, token)?;
+        let doc_ids = Arc::from(find_doc_ids_for_token(&self.bytes, token)?.into_boxed_slice());
         self.cache
             .lock()
             .expect("text postings cache mutex poisoned")
-            .insert(token.to_owned(), doc_ids.clone());
+            .insert(token.to_owned(), Arc::clone(&doc_ids));
         Ok(doc_ids)
     }
 }
@@ -954,14 +961,14 @@ fn load_text_postings(metadata: &TextLaneMetadata) -> Result<TextPostings, Strin
     }
 }
 
-fn load_text_postings_from_path(path: &Path) -> Result<HashMap<String, Vec<String>>, String> {
+fn load_text_postings_from_path(path: &Path) -> Result<HashMap<String, Arc<[String]>>, String> {
     let reader = BufReader::new(open_read_no_symlinks(path)?);
     let mut postings = HashMap::new();
     for line in reader.lines() {
         let line = line.map_err(|error| error.to_string())?;
         let posting: TextPostingRecord =
             serde_json::from_str(&line).map_err(|error| error.to_string())?;
-        postings.insert(posting.token, posting.doc_ids);
+        postings.insert(posting.token, Arc::from(posting.doc_ids.into_boxed_slice()));
     }
     Ok(postings)
 }
@@ -1099,7 +1106,7 @@ fn find_doc_ids_for_token(bytes: &[u8], wanted: &str) -> Result<Vec<String>, Str
     let record_count = usize::try_from(read_u64(bytes, 8))
         .map_err(|_| "text segment record_count exceeds addressable memory".to_owned())?;
     let mut cursor = TEXT_SEGMENT_HEADER_LENGTH;
-    if record_count > bytes[cursor..].len() / 8 {
+    if record_count > (bytes.len() - cursor) / 8 {
         return Err("text segment record_count exceeds possible records in slice".to_owned());
     }
     for _ in 0..record_count {
@@ -1113,7 +1120,7 @@ fn find_doc_ids_for_token(bytes: &[u8], wanted: &str) -> Result<Vec<String>, Str
             return Err("text segment truncated while reading token".to_owned());
         }
         cursor = token_end;
-        if doc_count > bytes[cursor..].len() / 4 {
+        if doc_count > (bytes.len() - cursor) / 4 {
             return Err("text segment doc_count exceeds possible records in slice".to_owned());
         }
 
