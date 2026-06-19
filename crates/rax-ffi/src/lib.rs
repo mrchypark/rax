@@ -300,7 +300,7 @@ pub unsafe extern "C" fn rax_handle_search_doc_ids(
 ) -> c_int {
     ffi_status(|| {
         ensure_output(out_json)?;
-        let handle = required_read_handle(handle)?;
+        let handle = unsafe { required_read_handle(handle) }?;
         let mode = parse_search_mode(required_string(mode, "mode")?)?;
         let text = optional_string(text, "text")?;
         let vector_input = optional_path(vector_input, "vector_input")?;
@@ -329,7 +329,7 @@ pub unsafe extern "C" fn rax_handle_search_doc_ids_profiled(
 ) -> c_int {
     ffi_status(|| {
         ensure_output(out_json)?;
-        let handle = required_read_handle(handle)?;
+        let handle = unsafe { required_read_handle(handle) }?;
         let mode = parse_search_mode(required_string(mode, "mode")?)?;
         let text = optional_string(text, "text")?;
         let vector_input = optional_path(vector_input, "vector_input")?;
@@ -350,13 +350,15 @@ pub unsafe extern "C" fn rax_handle_search_doc_ids_profiled(
 #[no_mangle]
 pub unsafe extern "C" fn rax_handle_close(handle: *mut c_void) {
     if !handle.is_null() {
-        let handle = unsafe { Box::from_raw(handle.cast::<RaxReadHandle>()) };
-        let runtime = handle.runtime.into_inner();
-        let mut runtime = match runtime {
-            Ok(runtime) => runtime,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let _ = runtime.close();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let handle = unsafe { Box::from_raw(handle.cast::<RaxReadHandle>()) };
+            let runtime = handle.runtime.into_inner();
+            let mut runtime = match runtime {
+                Ok(runtime) => runtime,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let _ = runtime.close();
+        }));
     }
 }
 
@@ -481,7 +483,7 @@ fn ensure_handle_output(out_handle: *mut *mut c_void) -> Result<(), FfiError> {
     Ok(())
 }
 
-fn required_read_handle<'a>(handle: *mut c_void) -> Result<&'a RaxReadHandle, FfiError> {
+unsafe fn required_read_handle<'a>(handle: *mut c_void) -> Result<&'a RaxReadHandle, FfiError> {
     if handle.is_null() {
         return Err(FfiError::invalid_argument("handle is required"));
     }
