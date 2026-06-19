@@ -27,7 +27,11 @@ extern "C" {
 
 const char *rax_version(void);
 int rax_create(const char *store);
-int rax_ingest_docs(const char *store, const char *input, char **out_json);
+int rax_ingest_docs_from_jsonl_bytes(
+    const char *store,
+    const unsigned char *jsonl,
+    size_t jsonl_len,
+    char **out_json);
 int rax_ingest_vectors(const char *store, const char *input, char **out_json);
 int rax_remember(const char *store, const char *text, char **out_json);
 int rax_recall(

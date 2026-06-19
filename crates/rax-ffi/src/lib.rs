@@ -105,16 +105,17 @@ pub unsafe extern "C" fn rax_create(store: *const c_char) -> c_int {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rax_ingest_docs(
+pub unsafe extern "C" fn rax_ingest_docs_from_jsonl_bytes(
     store: *const c_char,
-    input: *const c_char,
+    jsonl: *const u8,
+    jsonl_len: usize,
     out_json: *mut *mut c_char,
 ) -> c_int {
     ffi_status(|| {
         ensure_output(out_json)?;
         let store = required_path(store, "store")?;
-        let input = required_path(input, "input")?;
-        let documents = read_jsonl::<FfiNewDocument>(&input)?
+        let jsonl = required_bytes(jsonl, jsonl_len, "jsonl")?;
+        let documents = read_jsonl_bytes::<FfiNewDocument>(jsonl)?
             .into_iter()
             .map(|document| {
                 let mut runtime_document = NewDocument::new(document.doc_id, document.text)
@@ -435,6 +436,13 @@ fn optional_path(value: *const c_char, name: &str) -> Result<Option<PathBuf>, Ff
     }
 }
 
+fn required_bytes<'a>(value: *const u8, len: usize, name: &str) -> Result<&'a [u8], FfiError> {
+    if value.is_null() {
+        return Err(FfiError::invalid_argument(format!("{name} is required")));
+    }
+    Ok(unsafe { std::slice::from_raw_parts(value, len) })
+}
+
 fn ffi_top_k(top_k: c_int) -> Result<usize, FfiError> {
     usize::try_from(top_k).map_err(|_| FfiError::invalid_argument("top_k must be non-negative"))
 }
@@ -670,6 +678,14 @@ fn read_jsonl<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<T>, FfiEr
         .collect()
 }
 
+fn read_jsonl_bytes<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<Vec<T>, FfiError> {
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.iter().all(|byte| byte.is_ascii_whitespace()))
+        .map(|line| serde_json::from_slice(line).map_err(runtime_error))
+        .collect()
+}
+
 fn runtime_error(error: impl ToString) -> FfiError {
     FfiError::runtime(error.to_string())
 }
@@ -729,17 +745,12 @@ mod tests {
     fn raw_ingest_and_search_match_cli_json_shapes() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let store_path = tempdir.path().join("raw.rax");
-        let docs_path = tempdir.path().join("docs.jsonl");
         let vectors_path = tempdir.path().join("vectors.jsonl");
         let query_vector_path = tempdir.path().join("query-vector.json");
-        fs::write(
-            &docs_path,
-            concat!(
-                "{\"doc_id\":\"doc-1\",\"text\":\"rust ffi search target\"}\n",
-                "{\"doc_id\":\"doc-2\",\"text\":\"unrelated memory\"}\n",
-            ),
-        )
-        .unwrap();
+        let docs_jsonl = concat!(
+            "{\"doc_id\":\"doc-1\",\"text\":\"rust ffi search target\"}\n",
+            "{\"doc_id\":\"doc-2\",\"text\":\"unrelated memory\"}\n",
+        );
         fs::write(
             &vectors_path,
             format!(
@@ -756,7 +767,6 @@ mod tests {
         .unwrap();
 
         let store_path = CString::new(store_path.to_string_lossy().as_bytes()).unwrap();
-        let docs_path = CString::new(docs_path.to_string_lossy().as_bytes()).unwrap();
         let vectors_path = CString::new(vectors_path.to_string_lossy().as_bytes()).unwrap();
         let query_vector_path =
             CString::new(query_vector_path.to_string_lossy().as_bytes()).unwrap();
@@ -766,7 +776,12 @@ mod tests {
 
         let mut docs_json = ptr::null_mut();
         assert_eq!(0, unsafe {
-            super::rax_ingest_docs(store_path.as_ptr(), docs_path.as_ptr(), &mut docs_json)
+            super::rax_ingest_docs_from_jsonl_bytes(
+                store_path.as_ptr(),
+                docs_jsonl.as_ptr(),
+                docs_jsonl.len(),
+                &mut docs_json,
+            )
         });
         let docs_report: serde_json::Value =
             serde_json::from_str(unsafe { CStr::from_ptr(docs_json) }.to_str().unwrap()).unwrap();
@@ -910,6 +925,17 @@ mod tests {
         });
         let error = unsafe { CStr::from_ptr(super::rax_last_error()) }.to_string_lossy();
         assert!(error.contains("store path cannot be empty"));
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let valid_store = tempdir.path().join("invalid-args.rax");
+        let valid_store = CString::new(valid_store.to_string_lossy().as_bytes()).unwrap();
+        let mut json = ptr::null_mut();
+        assert_eq!(super::RAX_STATUS_INVALID_ARGUMENT, unsafe {
+            super::rax_ingest_docs_from_jsonl_bytes(valid_store.as_ptr(), ptr::null(), 0, &mut json)
+        });
+        assert!(json.is_null());
+        let error = unsafe { CStr::from_ptr(super::rax_last_error()) }.to_string_lossy();
+        assert!(error.contains("jsonl is required"));
     }
 
     #[test]
@@ -1013,6 +1039,18 @@ int main(int argc, char **argv) {
     if (json == NULL || strstr(json, "c header smoke memory") == NULL) {
         fprintf(stderr, "bad recall json\n");
         return 7;
+    }
+    rax_string_free(json);
+    json = NULL;
+
+    const char *docs = "{\"doc_id\":\"doc-c\",\"text\":\"c header byte ingest\"}\n";
+    if (rax_ingest_docs_from_jsonl_bytes(store, (const unsigned char *)docs, strlen(docs), &json) != RAX_STATUS_OK) {
+        fprintf(stderr, "byte ingest failed: %s\n", rax_last_error());
+        return 8;
+    }
+    if (json == NULL || strstr(json, "\"doc\"") == NULL || strstr(json, "\"text\"") == NULL) {
+        fprintf(stderr, "bad byte ingest json\n");
+        return 9;
     }
     rax_string_free(json);
     return 0;
