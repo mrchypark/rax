@@ -679,10 +679,9 @@ fn read_jsonl<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<T>, FfiEr
 }
 
 fn read_jsonl_bytes<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<Vec<T>, FfiError> {
-    bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.iter().all(|byte| byte.is_ascii_whitespace()))
-        .map(|line| serde_json::from_slice(line).map_err(runtime_error))
+    serde_json::Deserializer::from_slice(bytes)
+        .into_iter::<T>()
+        .map(|result| result.map_err(runtime_error))
         .collect()
 }
 

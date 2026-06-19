@@ -356,10 +356,15 @@ impl TextLane {
         }
 
         let mut hits: Vec<(&str, u32)> = scores.into_iter().collect();
+        if hits.len() > limit {
+            hits.select_nth_unstable_by(limit, |left, right| {
+                right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0))
+            });
+            hits.truncate(limit);
+        }
         hits.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0)));
         Ok(hits
             .into_iter()
-            .take(limit)
             .map(|(doc_id, _)| doc_id.to_owned())
             .collect())
     }
