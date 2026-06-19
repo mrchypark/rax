@@ -5168,6 +5168,27 @@ mod tests {
     }
 
     #[test]
+    fn publish_raw_documents_leaves_only_store_file() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("raw.rax");
+        let mut runtime = RuntimeStore::open_or_create_at(&store_path).unwrap();
+
+        runtime
+            .writer()
+            .unwrap()
+            .publish_raw_documents(vec![NewDocument::new("doc-001", "single durable store")])
+            .unwrap();
+        runtime.close().unwrap();
+
+        let mut files = fs::read_dir(temp_dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        files.sort();
+        assert_eq!(files, vec!["raw.rax"]);
+    }
+
+    #[test]
     fn publish_raw_documents_repairs_from_full_open_fallback_generation() {
         let temp_dir = tempdir().unwrap();
         let store_path = temp_dir.path().join("agent.rax");
