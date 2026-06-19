@@ -1,5 +1,6 @@
 use rax_bench_model::{DirtyProfile, QueryVectorProfile, SegmentTopologyEntry, VectorProfile};
 use sha2::{Digest, Sha256};
+use std::fmt::Write;
 
 use crate::PackError;
 
@@ -92,15 +93,15 @@ pub(crate) fn dataset_id(
 }
 
 pub(crate) fn checksum_label(bytes: &[u8]) -> String {
-    format!("sha256:{}", hex_encode(Sha256::digest(bytes).as_ref()))
+    sha256_label(Sha256::digest(bytes))
 }
 
-pub(crate) fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
+pub(crate) fn sha256_label(bytes: impl AsRef<[u8]>) -> String {
+    let bytes = bytes.as_ref();
+    let mut out = String::from("sha256:");
+    out.reserve(bytes.len() * 2);
     for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
+        write!(&mut out, "{byte:02x}").expect("write to string");
     }
     out
 }

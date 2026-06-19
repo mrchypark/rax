@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -445,15 +446,11 @@ fn checksum_file(path: &Path) -> Result<String, String> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(format!("sha256:{}", hex_encode(hasher.finalize().as_ref())))
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
+    let digest = hasher.finalize();
+    let mut out = String::from("sha256:");
+    out.reserve(digest.len() * 2);
+    for byte in digest {
+        write!(&mut out, "{byte:02x}").expect("write to string");
     }
-    out
+    Ok(out)
 }

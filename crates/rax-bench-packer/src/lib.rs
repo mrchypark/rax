@@ -23,8 +23,9 @@ use crate::artifacts::{
     emit_document_sidecars, emit_query_artifacts, emit_vector_artifacts, QueryArtifactSpec,
 };
 use crate::manifest_builder::{
-    build_dirty_profile, build_vector_profile, checksum_label, dataset_id, hex_encode,
-    manifest_query_fingerprint, require_embedding_dimensions, synthetic_embedding_identity,
+    build_dirty_profile, build_vector_profile, checksum_label, dataset_id,
+    manifest_query_fingerprint, require_embedding_dimensions, sha256_label,
+    synthetic_embedding_identity,
 };
 use crate::payloads::build_adhoc_query_files;
 use crate::source_loader::{
@@ -231,10 +232,7 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
             embedding_model_version: manifest_embedding.model_version,
             embedding_model_hash: manifest_embedding.model_hash,
             corpus_checksum: documents_checksum.clone(),
-            query_checksum: format!(
-                "sha256:{}",
-                hex_encode(logical_query_hasher.finalize().as_ref())
-            ),
+            query_checksum: sha256_label(logical_query_hasher.finalize()),
         },
         environment_constraints: source.environment_constraints,
         corpus: CorpusProfile {
@@ -265,10 +263,7 @@ pub fn pack_dataset(request: &PackRequest) -> Result<DatasetPackManifest, PackEr
             logical_documents_checksum: documents_checksum,
             logical_metadata_checksum,
             logical_query_definitions_checksum: checksum_label(&logical_query_fingerprint),
-            logical_vector_payload_checksum: Some(format!(
-                "sha256:{}",
-                hex_encode(vector_payload_hasher.finalize().as_ref())
-            )),
+            logical_vector_payload_checksum: Some(sha256_label(vector_payload_hasher.finalize())),
             fairness_fingerprint: checksum_label(&logical_query_fingerprint),
         },
     };
@@ -588,5 +583,5 @@ pub(crate) fn checksum_file(path: &Path) -> Result<String, std::io::Error> {
         hasher.update(&buffer[..read]);
     }
 
-    Ok(format!("sha256:{}", hex_encode(hasher.finalize().as_ref())))
+    Ok(sha256_label(hasher.finalize()))
 }
