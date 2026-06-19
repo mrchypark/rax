@@ -74,7 +74,7 @@ pub fn search_first_hybrid_query(
         .first_hybrid_top_k()
         .max(vector_lane.first_hybrid_top_k)
         .max(1);
-    let text_hits = text_lane.search_with_limit(hybrid_text_query, limit);
+    let text_hits = text_lane.try_search_with_limit(hybrid_text_query, limit)?;
     let hybrid_vector_query = hybrid_vector_query.clone();
     let report = hybrid_search_with_diagnostics(
         &text_hits,

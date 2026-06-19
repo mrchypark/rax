@@ -232,7 +232,7 @@ pub fn query_text_preview(
         SegmentValidationOptions::TEXT_ONLY,
     )?;
     let text_lane = TextLane::load(dataset_path, &manifest)?;
-    let doc_ids = text_lane.search_with_limit(query_text, top_k);
+    let doc_ids = text_lane.try_search_with_limit(query_text, top_k)?;
     let docstore = open_docstore(dataset_path, &manifest)?;
     let documents = load_documents_by_id(&docstore, &doc_ids)?;
     doc_ids
@@ -611,9 +611,9 @@ impl RaxEngine for PackedTextEngine {
             parse_benchmark_query(&request.query_text),
             Some(BenchmarkQuery::TtfqText | BenchmarkQuery::WarmText)
         ) {
-            lane.search_first_text_query()
+            lane.try_search_first_text_query()?
         } else {
-            lane.search(&request.query_text)
+            lane.try_search(&request.query_text)?
         };
         Ok(SearchResult { hits })
     }

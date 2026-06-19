@@ -92,7 +92,17 @@ pub(crate) fn dataset_id(
 }
 
 pub(crate) fn checksum_label(bytes: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(bytes))
+    format!("sha256:{}", hex_encode(Sha256::digest(bytes).as_ref()))
+}
+
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn embedding_dtype_from_spec_id(spec_id: &str) -> &str {

@@ -1,5 +1,5 @@
 [package]
 name = "rax-bench-metrics"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2021"
 publish = false

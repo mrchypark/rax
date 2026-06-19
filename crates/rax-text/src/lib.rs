@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use rax_bench_model::{tokenize, DatasetPackManifest};
 use rax_core::{PendingSegmentDescriptor, PendingSegmentWrite, SegmentDescriptor, SegmentKind};
@@ -13,13 +14,25 @@ const TEXT_SEGMENT_MAJOR: u16 = 1;
 const TEXT_SEGMENT_MINOR: u16 = 0;
 const TEXT_SEGMENT_HEADER_LENGTH: usize = 16;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct TextLane {
     first_text_query: String,
     first_text_top_k: usize,
     first_hybrid_query: Option<String>,
     first_hybrid_top_k: usize,
-    inverted: HashMap<String, Vec<String>>,
+    postings: TextPostings,
+}
+
+#[derive(Debug)]
+enum TextPostings {
+    InMemory(HashMap<String, Arc<[String]>>),
+    LazyStore(LazyStoreTextPostings),
+}
+
+#[derive(Debug)]
+struct LazyStoreTextPostings {
+    bytes: rax_core::SegmentObject,
+    cache: Mutex<HashMap<String, Arc<[String]>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +112,7 @@ pub struct TextLaneEligibility {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TextLaneMetadata {
     source: TextLaneSource,
+    validate_store_object_payloads: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,16 +129,38 @@ enum TextLaneSource {
 impl TextLaneMetadata {
     fn resolve(mount_root: &Path, manifest: &DatasetPackManifest) -> Result<Self, String> {
         let store_path = store_path_from_manifest(mount_root, manifest)?;
-        Self::resolve_with_store_path(mount_root, manifest, &store_path)
+        Self::resolve_with_store_path(mount_root, manifest, &store_path, true)
     }
 
     fn resolve_with_store_path(
         mount_root: &Path,
         manifest: &DatasetPackManifest,
         store_path: &Path,
+        validate_store_doc_payloads: bool,
+    ) -> Result<Self, String> {
+        Self::resolve_with_store_path_mode(
+            mount_root,
+            manifest,
+            store_path,
+            validate_store_doc_payloads,
+            true,
+        )
+    }
+
+    fn resolve_with_store_path_mode(
+        mount_root: &Path,
+        manifest: &DatasetPackManifest,
+        store_path: &Path,
+        validate_store_doc_payloads: bool,
+        validate_active_segments: bool,
     ) -> Result<Self, String> {
         if store_path.exists() {
-            let opened = rax_core::open_store(store_path).map_err(|error| error.to_string())?;
+            let opened = if validate_active_segments {
+                rax_core::open_store(store_path)
+            } else {
+                rax_core::open_store_shallow(store_path)
+            }
+            .map_err(|error| error.to_string())?;
             let latest_doc_descriptor = opened
                 .manifest
                 .segments
@@ -158,16 +194,19 @@ impl TextLaneMetadata {
                             .to_owned(),
                     );
                 }
-                validate_text_segment_against_store_doc_descriptor(
-                    store_path,
-                    &descriptor,
-                    doc_descriptor,
-                )?;
+                if validate_store_doc_payloads {
+                    validate_text_segment_against_store_doc_descriptor(
+                        store_path,
+                        &descriptor,
+                        doc_descriptor,
+                    )?;
+                }
                 return Ok(Self {
                     source: TextLaneSource::Store {
                         store_path: store_path.to_path_buf(),
                         descriptor,
                     },
+                    validate_store_object_payloads: validate_active_segments,
                 });
             }
             if latest_doc_descriptor.is_some() {
@@ -182,6 +221,7 @@ impl TextLaneMetadata {
             source: TextLaneSource::Compatibility {
                 postings_path: compatibility_postings_path(mount_root, manifest)?,
             },
+            validate_store_object_payloads: true,
         })
     }
 }
@@ -214,7 +254,29 @@ impl TextLane {
         manifest: &DatasetPackManifest,
         store_path: &Path,
     ) -> Result<Self, String> {
-        let metadata = TextLaneMetadata::resolve_with_store_path(mount_root, manifest, store_path)?;
+        let metadata =
+            TextLaneMetadata::resolve_with_store_path(mount_root, manifest, store_path, true)?;
+        Self::load_with_metadata(mount_root, manifest, metadata)
+    }
+
+    pub fn load_runtime_with_store_path(
+        mount_root: &Path,
+        manifest: &DatasetPackManifest,
+        store_path: &Path,
+    ) -> Result<Self, String> {
+        let metadata =
+            TextLaneMetadata::resolve_with_store_path(mount_root, manifest, store_path, false)?;
+        Self::load_with_metadata(mount_root, manifest, metadata)
+    }
+
+    pub fn load_runtime_snapshot_with_store_path(
+        mount_root: &Path,
+        manifest: &DatasetPackManifest,
+        store_path: &Path,
+    ) -> Result<Self, String> {
+        let metadata = TextLaneMetadata::resolve_with_store_path_mode(
+            mount_root, manifest, store_path, false, false,
+        )?;
         Self::load_with_metadata(mount_root, manifest, metadata)
     }
 
@@ -227,7 +289,7 @@ impl TextLane {
         let (first_text_query, first_text_top_k) =
             load_first_text_query(&query_inputs.query_paths)?;
         let first_hybrid_query = load_first_hybrid_text_query(&query_inputs.query_paths)?;
-        let inverted = load_text_postings(&metadata)?;
+        let postings = load_text_postings(&metadata)?;
 
         Ok(Self {
             first_text_query,
@@ -236,7 +298,7 @@ impl TextLane {
                 .as_ref()
                 .map(|query| query.query_text.clone()),
             first_hybrid_top_k: first_hybrid_query.map(|query| query.top_k).unwrap_or(0),
-            inverted,
+            postings,
         })
     }
 
@@ -252,8 +314,16 @@ impl TextLane {
         self.search_with_limit(&self.first_text_query, self.first_text_top_k)
     }
 
+    pub fn try_search_first_text_query(&self) -> Result<Vec<String>, String> {
+        self.try_search_with_limit(&self.first_text_query, self.first_text_top_k)
+    }
+
     pub fn search(&self, query: &str) -> Vec<String> {
         self.search_with_limit(query, usize::MAX)
+    }
+
+    pub fn try_search(&self, query: &str) -> Result<Vec<String>, String> {
+        self.try_search_with_limit(query, usize::MAX)
     }
 
     pub fn search_batch(&self, queries: &[TextBatchQuery]) -> Vec<TextBatchResult> {
@@ -267,21 +337,40 @@ impl TextLane {
     }
 
     pub fn search_with_limit(&self, query: &str, limit: usize) -> Vec<String> {
-        let mut scores: HashMap<String, u32> = HashMap::new();
-        for token in tokenize(query) {
-            if let Some(doc_ids) = self.inverted.get(&token) {
-                for doc_id in doc_ids {
-                    *scores.entry(doc_id.clone()).or_insert(0) += 1;
-                }
+        self.try_search_with_limit(query, limit)
+            .expect("text lane search failed")
+    }
+
+    pub fn try_search_with_limit(&self, query: &str, limit: usize) -> Result<Vec<String>, String> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let tokens = tokenize(query);
+        let postings_by_token = tokens
+            .iter()
+            .map(|token| self.postings.doc_ids_for_token(token))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut scores: HashMap<&str, u32> = HashMap::new();
+        for doc_ids in &postings_by_token {
+            for doc_id in doc_ids.iter() {
+                *scores.entry(doc_id.as_str()).or_insert(0) += 1;
             }
         }
 
-        let mut hits: Vec<(String, u32)> = scores.into_iter().collect();
-        hits.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-        hits.into_iter()
-            .take(limit)
-            .map(|(doc_id, _)| doc_id)
-            .collect()
+        let mut hits: Vec<(&str, u32)> = scores.into_iter().collect();
+        if hits.len() > limit {
+            hits.select_nth_unstable_by(limit, |left, right| {
+                right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0))
+            });
+            hits.truncate(limit);
+        }
+        hits.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0)));
+        Ok(hits
+            .into_iter()
+            .map(|(doc_id, _)| doc_id.to_owned())
+            .collect())
     }
 }
 
@@ -818,30 +907,78 @@ fn load_documents_for_text_builder(path: &Path) -> Result<Vec<(String, String)>,
         .collect()
 }
 
-fn load_text_postings(metadata: &TextLaneMetadata) -> Result<HashMap<String, Vec<String>>, String> {
+impl TextPostings {
+    fn doc_ids_for_token(&self, token: &str) -> Result<Arc<[String]>, String> {
+        match self {
+            TextPostings::InMemory(inverted) => Ok(inverted
+                .get(token)
+                .map(Arc::clone)
+                .unwrap_or_else(Arc::default)),
+            TextPostings::LazyStore(postings) => postings.doc_ids_for_token(token),
+        }
+    }
+}
+
+impl LazyStoreTextPostings {
+    fn new(bytes: rax_core::SegmentObject) -> Self {
+        Self {
+            bytes,
+            cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn doc_ids_for_token(&self, token: &str) -> Result<Arc<[String]>, String> {
+        if let Some(doc_ids) = self
+            .cache
+            .lock()
+            .expect("text postings cache mutex poisoned")
+            .get(token)
+            .cloned()
+        {
+            return Ok(doc_ids);
+        }
+        let doc_ids = Arc::from(find_doc_ids_for_token(&self.bytes, token)?.into_boxed_slice());
+        let mut cache = self
+            .cache
+            .lock()
+            .expect("text postings cache mutex poisoned");
+        let doc_ids = Arc::clone(cache.entry(token.to_owned()).or_insert(doc_ids));
+        Ok(doc_ids)
+    }
+}
+
+fn load_text_postings(metadata: &TextLaneMetadata) -> Result<TextPostings, String> {
     match &metadata.source {
         TextLaneSource::Compatibility { postings_path } => {
-            load_text_postings_from_path(postings_path)
+            load_text_postings_from_path(postings_path).map(TextPostings::InMemory)
         }
         TextLaneSource::Store {
             store_path,
             descriptor,
         } => {
-            let bytes = rax_core::map_segment_object(store_path, descriptor)
-                .map_err(|error| error.to_string())?;
-            BinaryTextSegment::decode(&bytes).map(|segment| segment.into_inverted())
+            let bytes = if metadata.validate_store_object_payloads {
+                rax_core::map_segment_object(store_path, descriptor)
+            } else {
+                rax_core::map_segment_object_shallow(store_path, descriptor)
+            }
+            .map_err(|error| error.to_string())?;
+            validate_binary_text_segment_header(&bytes)?;
+            if metadata.validate_store_object_payloads {
+                BinaryTextSegment::decode(&bytes)?;
+            }
+            Ok(TextPostings::LazyStore(LazyStoreTextPostings::new(bytes)))
         }
     }
 }
 
-fn load_text_postings_from_path(path: &Path) -> Result<HashMap<String, Vec<String>>, String> {
+fn load_text_postings_from_path(path: &Path) -> Result<HashMap<String, Arc<[String]>>, String> {
     let reader = BufReader::new(open_read_no_symlinks(path)?);
     let mut postings = HashMap::new();
     for line in reader.lines() {
         let line = line.map_err(|error| error.to_string())?;
         let posting: TextPostingRecord =
             serde_json::from_str(&line).map_err(|error| error.to_string())?;
-        postings.insert(posting.token, posting.doc_ids);
+        postings.insert(posting.token, Arc::from(posting.doc_ids.into_boxed_slice()));
     }
     Ok(postings)
 }
@@ -956,13 +1093,74 @@ impl BinaryTextSegment {
 
         Ok(Self { postings })
     }
+}
 
-    fn into_inverted(self) -> HashMap<String, Vec<String>> {
-        self.postings
-            .into_iter()
-            .map(|posting| (posting.token, posting.doc_ids))
-            .collect()
+fn validate_binary_text_segment_header(bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() < TEXT_SEGMENT_HEADER_LENGTH {
+        return Err(format!(
+            "text segment too short: expected at least {TEXT_SEGMENT_HEADER_LENGTH} bytes"
+        ));
     }
+    if &bytes[..4] != TEXT_SEGMENT_MAGIC {
+        return Err("text segment magic mismatch".to_owned());
+    }
+    if read_u16(bytes, 4) != TEXT_SEGMENT_MAJOR || read_u16(bytes, 6) != TEXT_SEGMENT_MINOR {
+        return Err("unsupported text segment version".to_owned());
+    }
+    Ok(())
+}
+
+fn find_doc_ids_for_token(bytes: &[u8], wanted: &str) -> Result<Vec<String>, String> {
+    validate_binary_text_segment_header(bytes)?;
+    let wanted_bytes = wanted.as_bytes();
+    let record_count = usize::try_from(read_u64(bytes, 8))
+        .map_err(|_| "text segment record_count exceeds addressable memory".to_owned())?;
+    let mut cursor = TEXT_SEGMENT_HEADER_LENGTH;
+    if record_count > (bytes.len() - cursor) / 8 {
+        return Err("text segment record_count exceeds possible records in slice".to_owned());
+    }
+    for _ in 0..record_count {
+        let token_length = read_u32_at(bytes, &mut cursor)? as usize;
+        let doc_count = read_u32_at(bytes, &mut cursor)? as usize;
+        let token_start = cursor;
+        let token_end = token_start
+            .checked_add(token_length)
+            .ok_or_else(|| "text segment token range overflow".to_owned())?;
+        if token_end > bytes.len() {
+            return Err("text segment truncated while reading token".to_owned());
+        }
+        cursor = token_end;
+        if doc_count > (bytes.len() - cursor) / 4 {
+            return Err("text segment doc_count exceeds possible records in slice".to_owned());
+        }
+
+        let ordering = bytes[token_start..token_end].cmp(wanted_bytes);
+        if ordering == std::cmp::Ordering::Equal {
+            let mut doc_ids = Vec::with_capacity(doc_count);
+            for _ in 0..doc_count {
+                let doc_id_length = read_u32_at(bytes, &mut cursor)? as usize;
+                doc_ids.push(read_string_at(bytes, &mut cursor, doc_id_length)?);
+            }
+            return Ok(doc_ids);
+        }
+        if ordering == std::cmp::Ordering::Greater {
+            return Ok(Vec::new());
+        }
+
+        for _ in 0..doc_count {
+            let doc_id_length = read_u32_at(bytes, &mut cursor)? as usize;
+            cursor = cursor
+                .checked_add(doc_id_length)
+                .ok_or_else(|| "text segment doc_id range overflow".to_owned())?;
+            if cursor > bytes.len() {
+                return Err("text segment truncated while skipping doc_id".to_owned());
+            }
+        }
+    }
+    if cursor != bytes.len() {
+        return Err("text segment trailing bytes mismatch".to_owned());
+    }
+    Ok(Vec::new())
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> u16 {
@@ -1295,6 +1493,73 @@ mod tests {
 
         let error = TextLane::load(temp_dir.path(), &test_manifest()).unwrap_err();
         assert!(error.contains("stale"));
+    }
+
+    #[test]
+    fn text_lane_runtime_load_trusts_manifest_visible_store_segment() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("store.rax");
+        fs::write(
+            temp_dir.path().join("queries.jsonl"),
+            "{\"query_id\":\"q-001\",\"query_class\":\"keyword\",\"difficulty\":\"easy\",\"query_text\":\"alpha\",\"top_k\":2,\"filter_spec\":{},\"preview_expected\":false,\"embedding_available\":false,\"lane_eligibility\":{\"text\":true,\"vector\":false,\"hybrid\":false}}\n",
+        )
+        .unwrap();
+        create_empty_store(&store_path).unwrap();
+        let doc_pending = prepare_raw_documents_segment(
+            &store_path,
+            vec![
+                ("doc-1".to_owned(), json!({"doc_id":"doc-1","text":"gamma"})),
+                ("doc-2".to_owned(), json!({"doc_id":"doc-2","text":"delta"})),
+            ],
+        )
+        .unwrap();
+        let text_pending = crate::prepare_text_segment_from_documents(&[
+            ("doc-1".to_owned(), "alpha".to_owned()),
+            ("doc-2".to_owned(), "beta".to_owned()),
+        ])
+        .unwrap();
+        publish_segments(&store_path, vec![doc_pending, text_pending]).unwrap();
+
+        let lane =
+            TextLane::load_runtime_with_store_path(temp_dir.path(), &test_manifest(), &store_path)
+                .unwrap();
+
+        assert_eq!(lane.search("alpha"), vec!["doc-1"]);
+    }
+
+    #[test]
+    fn text_lane_snapshot_search_reports_malformed_lazy_segment() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("store.rax");
+        fs::write(
+            temp_dir.path().join("queries.jsonl"),
+            "{\"query_id\":\"q-001\",\"query_class\":\"keyword\",\"difficulty\":\"easy\",\"query_text\":\"missing\",\"top_k\":2,\"filter_spec\":{},\"preview_expected\":false,\"embedding_available\":false,\"lane_eligibility\":{\"text\":true,\"vector\":false,\"hybrid\":false}}\n",
+        )
+        .unwrap();
+        create_empty_store(&store_path).unwrap();
+        let doc_pending = prepare_raw_documents_segment(
+            &store_path,
+            vec![("doc-1".to_owned(), json!({"doc_id":"doc-1","text":"alpha"}))],
+        )
+        .unwrap();
+        let mut text_pending =
+            crate::prepare_text_segment_from_documents(&[("doc-1".to_owned(), "alpha".to_owned())])
+                .unwrap();
+        text_pending.object_bytes.push(0);
+        publish_segments(&store_path, vec![doc_pending, text_pending]).unwrap();
+
+        let full_error =
+            TextLane::load_runtime_with_store_path(temp_dir.path(), &test_manifest(), &store_path)
+                .unwrap_err();
+        assert!(full_error.contains("trailing bytes"));
+        let snapshot = TextLane::load_runtime_snapshot_with_store_path(
+            temp_dir.path(),
+            &test_manifest(),
+            &store_path,
+        )
+        .unwrap();
+        let snapshot_error = snapshot.try_search("missing").unwrap_err();
+        assert!(snapshot_error.contains("trailing bytes"));
     }
 
     #[test]

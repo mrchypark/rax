@@ -1,6 +1,6 @@
 [package]
 name = "rax-bench-text-engine"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2021"
 publish = false
 
@@ -8,7 +8,7 @@ publish = false
 bytemuck = "1.24.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 rax-bench-model = { path = "../rax-bench-model" }
 rax-core = { path = "../rax-core" }
 rax-docstore = { path = "../rax-docstore" }
