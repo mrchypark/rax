@@ -929,10 +929,11 @@ impl LazyStoreTextPostings {
             return Ok(doc_ids);
         }
         let doc_ids = Arc::from(find_doc_ids_for_token(&self.bytes, token)?.into_boxed_slice());
-        self.cache
+        let mut cache = self
+            .cache
             .lock()
-            .expect("text postings cache mutex poisoned")
-            .insert(token.to_owned(), Arc::clone(&doc_ids));
+            .expect("text postings cache mutex poisoned");
+        let doc_ids = Arc::clone(cache.entry(token.to_owned()).or_insert(doc_ids));
         Ok(doc_ids)
     }
 }
