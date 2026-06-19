@@ -618,14 +618,14 @@ fn render_hits(hits: Vec<rax_runtime::RuntimeSearchHit>) -> Result<String, FfiEr
 }
 
 fn render_doc_ids(doc_ids: Vec<String>) -> Result<String, FfiError> {
-    serde_json::to_string_pretty(&doc_ids).map_err(|error| FfiError::runtime(error.to_string()))
+    serde_json::to_string(&doc_ids).map_err(|error| FfiError::runtime(error.to_string()))
 }
 
 fn render_profiled_doc_ids(
     response: rax_runtime::RuntimeSearchDocIdsResponse,
 ) -> Result<String, FfiError> {
     let profile = response.profile;
-    serde_json::to_string_pretty(&serde_json::json!({
+    serde_json::to_string(&serde_json::json!({
         "doc_ids": response.doc_ids,
         "profile": {
             "attempts": profile.attempts,
