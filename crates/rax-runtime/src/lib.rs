@@ -774,9 +774,9 @@ impl RuntimeStore {
                             "text_query is required for text search".to_owned(),
                         )
                     })?;
-                    Ok(self
-                        .ensure_text_lane()?
-                        .search_with_limit(text_query, top_k))
+                    self.ensure_text_lane()?
+                        .try_search_with_limit(text_query, top_k)
+                        .map_err(RuntimeError::Storage)
                 })(),
                 RuntimeSearchMode::Vector => (|| {
                     let vector_query = request.vector_query.as_deref().ok_or_else(|| {
@@ -807,7 +807,8 @@ impl RuntimeStore {
                     let text_limit = hybrid_text_candidate_limit(top_k, live_doc_count);
                     let text_hits = self
                         .ensure_text_lane()?
-                        .search_with_limit(text_query, text_limit);
+                        .try_search_with_limit(text_query, text_limit)
+                        .map_err(RuntimeError::Storage)?;
                     let report = hybrid_search_with_diagnostics(
                         &text_hits,
                         self.ensure_vector_lane()?,
@@ -958,7 +959,9 @@ impl RuntimeStore {
                     let text_lane = self.ensure_text_lane()?;
                     profile.lane_load_ms += elapsed_ms(phase_start);
                     let phase_start = Instant::now();
-                    let hits = text_lane.search_with_limit(text_query, top_k);
+                    let hits = text_lane
+                        .try_search_with_limit(text_query, top_k)
+                        .map_err(RuntimeError::Storage)?;
                     profile.rank_ms += elapsed_ms(phase_start);
                     Ok(hits)
                 })(),
@@ -999,7 +1002,9 @@ impl RuntimeStore {
                     let text_lane = self.ensure_text_lane()?;
                     profile.lane_load_ms += elapsed_ms(phase_start);
                     let phase_start = Instant::now();
-                    let text_hits = text_lane.search_with_limit(text_query, text_limit);
+                    let text_hits = text_lane
+                        .try_search_with_limit(text_query, text_limit)
+                        .map_err(RuntimeError::Storage)?;
                     profile.rank_ms += elapsed_ms(phase_start);
                     let phase_start = Instant::now();
                     let vector_lane = self.ensure_vector_lane()?;
@@ -1105,7 +1110,9 @@ impl RuntimeStore {
                 let text_lane = self.ensure_text_lane()?;
                 profile.lane_load_ms += elapsed_ms(phase_start);
                 let phase_start = Instant::now();
-                let hits = text_lane.search_with_limit(text_query, top_k);
+                let hits = text_lane
+                    .try_search_with_limit(text_query, top_k)
+                    .map_err(RuntimeError::Storage)?;
                 profile.rank_ms += elapsed_ms(phase_start);
                 hits
             }
@@ -1146,7 +1153,9 @@ impl RuntimeStore {
                 let text_lane = self.ensure_text_lane()?;
                 profile.lane_load_ms += elapsed_ms(phase_start);
                 let phase_start = Instant::now();
-                let text_hits = text_lane.search_with_limit(text_query, text_limit);
+                let text_hits = text_lane
+                    .try_search_with_limit(text_query, text_limit)
+                    .map_err(RuntimeError::Storage)?;
                 profile.rank_ms += elapsed_ms(phase_start);
                 let phase_start = Instant::now();
                 let vector_lane = self.ensure_vector_lane()?;
@@ -1223,6 +1232,22 @@ impl RuntimeStore {
         ensure_store_identity_matches(&self.store_path(), self.store_identity.as_ref())
     }
 
+    fn ensure_snapshot_store_unchanged(&self) -> Result<(), RuntimeError> {
+        if !self.read_only_snapshot_open {
+            return Ok(());
+        }
+        self.ensure_store_identity()?;
+        let current_generation =
+            loaded_store_manifest_generation_shallow_if_present(&self.store_path())?;
+        self.ensure_store_identity()?;
+        if current_generation != self.store_generation {
+            return Err(RuntimeError::Storage(
+                "snapshot store changed; reopen read handle".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     fn invalidate_read_cache(&mut self) {
         self.store_generation = None;
         self.text_lane = None;
@@ -1231,9 +1256,10 @@ impl RuntimeStore {
 
     fn ensure_text_lane(&mut self) -> Result<&TextLane, RuntimeError> {
         if self.text_lane.is_none() {
+            self.ensure_snapshot_store_unchanged()?;
             let root_path = self.root_path();
             let store_path = self.store_path();
-            self.text_lane = Some(if self.read_only_snapshot_open {
+            let text_lane = if self.read_only_snapshot_open {
                 TextLane::load_runtime_snapshot_with_store_path(
                     &root_path,
                     &self.manifest,
@@ -1243,7 +1269,9 @@ impl RuntimeStore {
             } else {
                 TextLane::load_runtime_with_store_path(&root_path, &self.manifest, &store_path)
                     .map_err(RuntimeError::Storage)?
-            });
+            };
+            self.ensure_snapshot_store_unchanged()?;
+            self.text_lane = Some(text_lane);
         }
         self.text_lane
             .as_ref()
@@ -1252,17 +1280,18 @@ impl RuntimeStore {
 
     fn ensure_vector_lane(&mut self) -> Result<&mut VectorLane, RuntimeError> {
         if self.vector_lane.is_none() {
+            self.ensure_snapshot_store_unchanged()?;
             let root_path = self.root_path();
             let store_path = self.store_path();
-            self.vector_lane = Some(
-                VectorLane::load_runtime_with_store_path(
-                    &root_path,
-                    &self.manifest,
-                    &store_path,
-                    rax_bench_model::VectorQueryMode::Auto,
-                )
-                .map_err(RuntimeError::Storage)?,
-            );
+            let vector_lane = VectorLane::load_runtime_with_store_path(
+                &root_path,
+                &self.manifest,
+                &store_path,
+                rax_bench_model::VectorQueryMode::Auto,
+            )
+            .map_err(RuntimeError::Storage)?;
+            self.ensure_snapshot_store_unchanged()?;
+            self.vector_lane = Some(vector_lane);
         }
         self.vector_lane
             .as_mut()
@@ -3861,6 +3890,39 @@ mod tests {
             .hits
             .iter()
             .any(|hit| hit.preview.as_deref() == Some("this write must be rejected")));
+    }
+
+    #[test]
+    fn read_only_snapshot_doc_id_search_rejects_lazy_lane_after_publish() {
+        let temp_dir = tempdir().unwrap();
+        let store_path = temp_dir.path().join("agent.rax");
+        let mut writer = RuntimeStore::create_at(&store_path).unwrap();
+        writer
+            .writer()
+            .unwrap()
+            .publish_raw_snapshot(vec![NewDocument::new("doc-001", "alpha original")], None)
+            .unwrap();
+
+        let mut reader = RuntimeStore::open_existing_read_only_snapshot_at(&store_path).unwrap();
+        writer
+            .writer()
+            .unwrap()
+            .publish_raw_snapshot(vec![NewDocument::new("doc-002", "alpha replacement")], None)
+            .unwrap();
+
+        let error = reader
+            .search_doc_ids_snapshot(RuntimeSearchRequest {
+                mode: RuntimeSearchMode::Text,
+                text_query: Some("alpha".to_owned()),
+                vector_query: None,
+                top_k: 10,
+                include_preview: false,
+            })
+            .unwrap_err();
+
+        assert!(
+            matches!(error, RuntimeError::Storage(message) if message.contains("snapshot store changed"))
+        );
     }
 
     #[test]

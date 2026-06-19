@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use rax_runtime::{
     Memory, MemorySearchOptions, NewDocument, NewDocumentVector, RuntimePublishFamily,
@@ -29,7 +30,7 @@ struct FfiError {
 }
 
 struct RaxReadHandle {
-    runtime: RuntimeStore,
+    runtime: Mutex<RuntimeStore>,
 }
 
 impl FfiError {
@@ -277,7 +278,9 @@ pub unsafe extern "C" fn rax_open_read_only(
         let store = required_path(store, "store")?;
         let runtime =
             RuntimeStore::open_existing_read_only_snapshot_at(&store).map_err(runtime_error)?;
-        let handle = Box::new(RaxReadHandle { runtime });
+        let handle = Box::new(RaxReadHandle {
+            runtime: Mutex::new(runtime),
+        });
         unsafe {
             *out_handle = Box::into_raw(handle).cast();
         }
@@ -302,8 +305,11 @@ pub unsafe extern "C" fn rax_handle_search_doc_ids(
         let vector_input = optional_path(vector_input, "vector_input")?;
         let top_k = ffi_top_k(top_k)?;
         let request = build_search_request(mode, text, vector_input, top_k, false)?;
-        let doc_ids = handle
+        let mut runtime = handle
             .runtime
+            .lock()
+            .map_err(|_| FfiError::runtime("read handle mutex poisoned"))?;
+        let doc_ids = runtime
             .search_doc_ids_snapshot(request)
             .map_err(runtime_error)?;
         let json = render_doc_ids(doc_ids)?;
@@ -328,8 +334,11 @@ pub unsafe extern "C" fn rax_handle_search_doc_ids_profiled(
         let vector_input = optional_path(vector_input, "vector_input")?;
         let top_k = ffi_top_k(top_k)?;
         let request = build_search_request(mode, text, vector_input, top_k, false)?;
-        let response = handle
+        let mut runtime = handle
             .runtime
+            .lock()
+            .map_err(|_| FfiError::runtime("read handle mutex poisoned"))?;
+        let response = runtime
             .search_doc_ids_snapshot_profiled(request)
             .map_err(runtime_error)?;
         let json = render_profiled_doc_ids(response)?;
@@ -340,8 +349,13 @@ pub unsafe extern "C" fn rax_handle_search_doc_ids_profiled(
 #[no_mangle]
 pub unsafe extern "C" fn rax_handle_close(handle: *mut c_void) {
     if !handle.is_null() {
-        let mut handle = unsafe { Box::from_raw(handle.cast::<RaxReadHandle>()) };
-        let _ = handle.runtime.close();
+        let handle = unsafe { Box::from_raw(handle.cast::<RaxReadHandle>()) };
+        let runtime = handle.runtime.into_inner();
+        let mut runtime = match runtime {
+            Ok(runtime) => runtime,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let _ = runtime.close();
     }
 }
 
@@ -455,11 +469,11 @@ fn ensure_handle_output(out_handle: *mut *mut c_void) -> Result<(), FfiError> {
     Ok(())
 }
 
-fn required_read_handle<'a>(handle: *mut c_void) -> Result<&'a mut RaxReadHandle, FfiError> {
+fn required_read_handle<'a>(handle: *mut c_void) -> Result<&'a RaxReadHandle, FfiError> {
     if handle.is_null() {
         return Err(FfiError::invalid_argument("handle is required"));
     }
-    Ok(unsafe { &mut *handle.cast::<RaxReadHandle>() })
+    Ok(unsafe { &*handle.cast::<RaxReadHandle>() })
 }
 
 fn parse_search_mode(mode: String) -> Result<FfiSearchMode, FfiError> {

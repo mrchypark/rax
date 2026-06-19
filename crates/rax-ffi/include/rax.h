@@ -54,6 +54,8 @@ int rax_search_doc_ids(
 /*
  * Persistent read handles search the snapshot opened by rax_open_read_only().
  * Reopen the handle after replacing or rebuilding the store.
+ * Search calls on the same handle are serialized internally.
+ * Do not call rax_handle_close while another thread is using the handle.
  */
 int rax_open_read_only(const char *store, void **out_handle);
 int rax_handle_search_doc_ids(
