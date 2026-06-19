@@ -1125,6 +1125,9 @@ fn find_doc_ids_for_token(bytes: &[u8], wanted: &str) -> Result<Vec<String>, Str
             }
             return Ok(doc_ids);
         }
+        if ordering == std::cmp::Ordering::Greater {
+            return Ok(Vec::new());
+        }
 
         for _ in 0..doc_count {
             let doc_id_length = read_u32_at(bytes, &mut cursor)? as usize;
@@ -1134,9 +1137,6 @@ fn find_doc_ids_for_token(bytes: &[u8], wanted: &str) -> Result<Vec<String>, Str
             if cursor > bytes.len() {
                 return Err("text segment truncated while skipping doc_id".to_owned());
             }
-        }
-        if ordering == std::cmp::Ordering::Greater {
-            return Ok(Vec::new());
         }
     }
     if cursor != bytes.len() {
