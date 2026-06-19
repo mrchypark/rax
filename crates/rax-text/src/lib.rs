@@ -342,6 +342,10 @@ impl TextLane {
     }
 
     pub fn try_search_with_limit(&self, query: &str, limit: usize) -> Result<Vec<String>, String> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
         let tokens = tokenize(query);
         let postings_by_token = tokens
             .iter()

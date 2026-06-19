@@ -114,7 +114,7 @@ pub unsafe extern "C" fn rax_ingest_docs_from_jsonl_bytes(
     ffi_status(|| {
         ensure_output(out_json)?;
         let store = required_path(store, "store")?;
-        let jsonl = required_bytes(jsonl, jsonl_len, "jsonl")?;
+        let jsonl = unsafe { required_bytes(jsonl, jsonl_len, "jsonl") }?;
         let documents = read_jsonl_bytes::<FfiNewDocument>(jsonl)?
             .into_iter()
             .map(|document| {
@@ -436,7 +436,11 @@ fn optional_path(value: *const c_char, name: &str) -> Result<Option<PathBuf>, Ff
     }
 }
 
-fn required_bytes<'a>(value: *const u8, len: usize, name: &str) -> Result<&'a [u8], FfiError> {
+unsafe fn required_bytes<'a>(
+    value: *const u8,
+    len: usize,
+    name: &str,
+) -> Result<&'a [u8], FfiError> {
     if value.is_null() {
         return Err(FfiError::invalid_argument(format!("{name} is required")));
     }
