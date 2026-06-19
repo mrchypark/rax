@@ -1095,6 +1095,7 @@ fn validate_binary_text_segment_header(bytes: &[u8]) -> Result<(), String> {
 
 fn find_doc_ids_for_token(bytes: &[u8], wanted: &str) -> Result<Vec<String>, String> {
     validate_binary_text_segment_header(bytes)?;
+    let wanted_bytes = wanted.as_bytes();
     let record_count = usize::try_from(read_u64(bytes, 8))
         .map_err(|_| "text segment record_count exceeds addressable memory".to_owned())?;
     let mut cursor = TEXT_SEGMENT_HEADER_LENGTH;
@@ -1116,7 +1117,7 @@ fn find_doc_ids_for_token(bytes: &[u8], wanted: &str) -> Result<Vec<String>, Str
             return Err("text segment doc_count exceeds possible records in slice".to_owned());
         }
 
-        let ordering = bytes[token_start..token_end].cmp(wanted.as_bytes());
+        let ordering = bytes[token_start..token_end].cmp(wanted_bytes);
         if ordering == std::cmp::Ordering::Equal {
             let mut doc_ids = Vec::with_capacity(doc_count);
             for _ in 0..doc_count {
