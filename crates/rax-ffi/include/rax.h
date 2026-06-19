@@ -27,7 +27,7 @@ extern "C" {
 
 const char *rax_version(void);
 int rax_create(const char *store);
-int rax_ingest_docs_from_jsonl_bytes(
+int rax_ingest_docs(
     const char *store,
     const unsigned char *jsonl,
     size_t jsonl_len,

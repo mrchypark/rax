@@ -105,7 +105,7 @@ pub unsafe extern "C" fn rax_create(store: *const c_char) -> c_int {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rax_ingest_docs_from_jsonl_bytes(
+pub unsafe extern "C" fn rax_ingest_docs(
     store: *const c_char,
     jsonl: *const u8,
     jsonl_len: usize,
@@ -781,7 +781,7 @@ mod tests {
 
         let mut docs_json = ptr::null_mut();
         assert_eq!(0, unsafe {
-            super::rax_ingest_docs_from_jsonl_bytes(
+            super::rax_ingest_docs(
                 store_path.as_ptr(),
                 docs_jsonl.as_ptr(),
                 docs_jsonl.len(),
@@ -936,7 +936,7 @@ mod tests {
         let valid_store = CString::new(valid_store.to_string_lossy().as_bytes()).unwrap();
         let mut json = ptr::null_mut();
         assert_eq!(super::RAX_STATUS_INVALID_ARGUMENT, unsafe {
-            super::rax_ingest_docs_from_jsonl_bytes(valid_store.as_ptr(), ptr::null(), 0, &mut json)
+            super::rax_ingest_docs(valid_store.as_ptr(), ptr::null(), 0, &mut json)
         });
         assert!(json.is_null());
         let error = unsafe { CStr::from_ptr(super::rax_last_error()) }.to_string_lossy();
@@ -1049,7 +1049,7 @@ int main(int argc, char **argv) {
     json = NULL;
 
     const char *docs = "{\"doc_id\":\"doc-c\",\"text\":\"c header byte ingest\"}\n";
-    if (rax_ingest_docs_from_jsonl_bytes(store, (const unsigned char *)docs, strlen(docs), &json) != RAX_STATUS_OK) {
+    if (rax_ingest_docs(store, (const unsigned char *)docs, strlen(docs), &json) != RAX_STATUS_OK) {
         fprintf(stderr, "byte ingest failed: %s\n", rax_last_error());
         return 8;
     }
