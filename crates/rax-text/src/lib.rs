@@ -904,7 +904,7 @@ impl TextPostings {
             TextPostings::InMemory(inverted) => Ok(inverted
                 .get(token)
                 .map(Arc::clone)
-                .unwrap_or_else(|| Arc::from(Vec::<String>::new().into_boxed_slice()))),
+                .unwrap_or_else(Arc::default)),
             TextPostings::LazyStore(postings) => postings.doc_ids_for_token(token),
         }
     }
