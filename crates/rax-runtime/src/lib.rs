@@ -843,7 +843,7 @@ impl RuntimeStore {
                 continue;
             }
 
-            let hits = match self.hydrate_hits(&doc_ids, request.include_preview) {
+            let hits = match self.hydrate_hits(doc_ids, request.include_preview) {
                 Ok(hits) => hits,
                 Err(error) => {
                     if self.search_generation_changed_since(snapshot_generation)? {
@@ -1306,14 +1306,14 @@ impl RuntimeStore {
 
     fn hydrate_hits(
         &self,
-        doc_ids: &[String],
+        doc_ids: Vec<String>,
         include_preview: bool,
     ) -> Result<Vec<RuntimeSearchHit>, RuntimeError> {
         if !include_preview {
             return Ok(doc_ids
-                .iter()
+                .into_iter()
                 .map(|doc_id| RuntimeSearchHit {
-                    doc_id: doc_id.clone(),
+                    doc_id,
                     preview: None,
                 })
                 .collect());
@@ -1321,12 +1321,12 @@ impl RuntimeStore {
 
         let documents = self
             .docstore
-            .load_documents_by_id(doc_ids)
+            .load_documents_by_id(&doc_ids)
             .map_err(|error| RuntimeError::Storage(docstore_error(error)))?;
         doc_ids
-            .iter()
+            .into_iter()
             .map(|doc_id| {
-                let document = documents.get(doc_id).ok_or_else(|| {
+                let document = documents.get(&doc_id).ok_or_else(|| {
                     RuntimeError::Storage(format!(
                         "search hit {doc_id} has no loadable document payload"
                     ))
@@ -1341,7 +1341,7 @@ impl RuntimeStore {
                     })?
                     .to_owned();
                 Ok(RuntimeSearchHit {
-                    doc_id: doc_id.clone(),
+                    doc_id,
                     preview: Some(preview),
                 })
             })
